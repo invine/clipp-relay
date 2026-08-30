@@ -30,6 +30,8 @@ Reach an implementation-ready decision set for a horizontally scalable Go Clipp 
 
 - [Research OCI relay-instance networking](issues/02-research-oci-relay-instance-networking.md) — Use stable ordinal network slots: shared NGINX for discovery/WSS, exact-pod OCI NLBs for TCP/UDP, runtime address publication, and two-phase GitOps drain.
 
+- [Research cross-runtime Google authorization](issues/03-research-cross-runtime-google-authorization.md) — The Coordinator alone brokers Google OIDC, then issues opaque, introspected Clipp Relay credentials to fixed public runtime clients through S256 PKCE and rotating login grants with no durable Device Identity binding.
+
 ## Not yet specified
 
 - Internal Go module seams and durable schema details that depend on the protocol, quota, and credential decisions.
