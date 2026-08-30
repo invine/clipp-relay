@@ -1,7 +1,7 @@
 # Research OCI relay-instance networking
 
 Type: research
-Status: open
+Status: claimed
 Blocked by:
 
 ## Question

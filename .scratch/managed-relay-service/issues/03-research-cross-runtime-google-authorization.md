@@ -1,7 +1,7 @@
 # Research cross-runtime Google authorization
 
 Type: research
-Status: open
+Status: claimed
 Blocked by:
 
 ## Question

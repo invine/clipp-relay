@@ -1,7 +1,7 @@
 # Research Go libp2p relay compatibility
 
 Type: research
-Status: open
+Status: claimed
 Blocked by:
 
 ## Question
