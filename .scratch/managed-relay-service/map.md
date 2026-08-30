@@ -26,6 +26,8 @@ Reach an implementation-ready decision set for a horizontally scalable Go Clipp 
 
 <!-- Closed-ticket context pointers are appended here. -->
 
+- [Research Go libp2p relay compatibility](issues/01-research-go-libp2p-relay-compatibility.md) — go-libp2p v0.49.0 covers Clipp's wire stack, but account-aware authentication, metering, and targeted termination require a narrow pinned relay adaptation validated by the prototype.
+
 ## Not yet specified
 
 - Internal Go module seams and durable schema details that depend on the protocol, quota, and credential decisions.
