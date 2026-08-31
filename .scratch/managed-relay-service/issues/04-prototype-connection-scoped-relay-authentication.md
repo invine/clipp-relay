@@ -1,7 +1,7 @@
 # Prototype connection-scoped Relay Authentication
 
 Type: prototype
-Status: open
+Status: claimed
 Blocked by: 01, 03
 
 ## Question
