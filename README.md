@@ -3,9 +3,9 @@
 This repository currently implements the service foundation, Google portal
 registration, and administrator account and quota-plan operations. It provides
 explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
-Relay Accounts and Portal Sessions, and separate public and private HTTP
-listeners. It does **not** yet provide Relay credentials, Relay Sessions or
-public relay transport.
+Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
+Access Tokens, and separate public and private HTTP listeners. It does **not**
+yet provide Relay Sessions or public relay transport.
 `/readyz` therefore remains `503 unavailable`; `/livez` is `200 ok` while the
 process runs. A later relay slice must start its listeners and publish a
 complete address snapshot before it may change readiness.

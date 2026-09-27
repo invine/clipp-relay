@@ -367,6 +367,22 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
+	if action == "deny" {
+		var subject string
+		if e := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, target).Scan(&subject); e != nil {
+			fail(w, 503)
+			return
+		}
+		_ = s.WithIdentityFence(subject, func() error {
+			s.adminAccountUpdate(w, r, actor, target, expected, action, plan)
+			return nil
+		})
+		return
+	}
+	s.adminAccountUpdate(w, r, actor, target, expected, action, plan)
+}
+
+func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action, plan string) {
 	ctx := r.Context()
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {

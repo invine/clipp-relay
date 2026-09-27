@@ -128,6 +128,7 @@ CREATE TABLE public.login_grants (
  account_id uuid NOT NULL REFERENCES public.accounts(id),
  credential_generation bigint NOT NULL,
  client_type text NOT NULL CHECK (client_type IN ('electron','android','extension')),
+ current_refresh_generation bigint NOT NULL DEFAULT 1 CHECK (current_refresh_generation>0),
  created_at timestamptz NOT NULL,
  last_used_at timestamptz NOT NULL,
  idle_expires_at timestamptz NOT NULL,
@@ -142,10 +143,13 @@ CREATE TABLE public.refresh_generations (
  credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
  pepper_version bigint NOT NULL CHECK (pepper_version>0),
  grant_id uuid NOT NULL REFERENCES public.login_grants(id),
+ generation bigint NOT NULL CHECK (generation>0),
  issued_at timestamptz NOT NULL,
- consumed_at timestamptz
+ consumed_at timestamptz,
+ UNIQUE(grant_id,generation)
 );
 CREATE INDEX refresh_generations_grant ON public.refresh_generations (grant_id);
+CREATE UNIQUE INDEX refresh_generations_one_current ON public.refresh_generations (grant_id) WHERE consumed_at IS NULL;
 CREATE TABLE public.relay_access_tokens (
  credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
  pepper_version bigint NOT NULL CHECK (pepper_version>0),

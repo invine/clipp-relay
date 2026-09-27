@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -428,5 +429,91 @@ func TestGrantCapAndDeadlines(t *testing.T) {
 	}
 	if w := tokenPost(s, url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refresh}}); w.Code == 200 {
 		t.Fatal("idle-expired grant renewed")
+	}
+}
+
+func TestHTTPSPublicClientStateContract(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	d := newProvider(t)
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	cookie := loginAs(t, s, d, "https-client-subject", "https@example.test", "")
+	_, e := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='https-client-subject'`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	server := httptest.NewTLSServer(s.Handler())
+	defer server.Close()
+	client := server.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	verifier := strings.Repeat("a", 43)
+	hash := sha256.Sum256([]byte(verifier))
+	expectedState := "initiator-owned-state"
+	authorize := func(state string) (string, string) {
+		q := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {state}}
+		req, _ := http.NewRequest("GET", server.URL+"/oauth/authorize?"+q.Encode(), nil)
+		req.AddCookie(cookie)
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 200 || response.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("authorize HTTPS status %d", response.StatusCode)
+		}
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(string(body))
+		csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(string(body))
+		if len(flow) != 2 || len(csrf) != 2 {
+			t.Fatal("consent form missing")
+		}
+		form := url.Values{"flow": {flow[1]}, "csrf": {csrf[1]}}
+		post, _ := http.NewRequest("POST", server.URL+"/oauth/authorize", strings.NewReader(form.Encode()))
+		post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		post.Header.Set("Origin", c.PortalOrigin)
+		post.AddCookie(cookie)
+		confirmed, err := client.Do(post)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer confirmed.Body.Close()
+		if confirmed.StatusCode != 302 {
+			t.Fatalf("confirm HTTPS status %d", confirmed.StatusCode)
+		}
+		callback, err := url.Parse(confirmed.Header.Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return callback.Query().Get("state"), callback.Query().Get("code")
+	}
+	actual, wrongCode := authorize("attacker-replaced-state")
+	if actual == expectedState || wrongCode == "" {
+		t.Fatal("bad test callback")
+	}
+	// A public client accepts only the exact state it generated; it never redeems this code.
+	actual, code := authorize(expectedState)
+	if actual != expectedState || code == "" {
+		t.Fatal("legitimate callback failed state check")
+	}
+	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}}
+	req, _ := http.NewRequest("POST", server.URL+"/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 || response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("HTTPS token status %d", response.StatusCode)
+	}
+	var tokens struct {
+		Access  string `json:"access_token"`
+		Refresh string `json:"refresh_token"`
+	}
+	if e := json.NewDecoder(response.Body).Decode(&tokens); e != nil || tokens.Access == "" || tokens.Refresh == "" {
+		t.Fatal("body credentials missing")
 	}
 }
