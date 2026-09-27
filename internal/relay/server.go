@@ -281,11 +281,15 @@ func (s *Server) disconnected(_ network.Network, c network.Conn) {
 	s.mu.Unlock()
 }
 
-func (s *Server) removeLocked(v *session) {
+func (s *Server) removeLocked(v *session) { s.removeSessionLocked(v, false) }
+
+func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 	if s.byConn[v.conn] != v {
 		return
 	}
-	s.removeRendezvousLocked(v)
+	if !preserveRendezvous {
+		s.removeRendezvousLocked(v)
+	}
 	delete(s.byConn, v.conn)
 	if s.byPeer[v.conn.RemotePeer()] == v {
 		delete(s.byPeer, v.conn.RemotePeer())
@@ -436,7 +440,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 		}
 	}
 	if current != nil {
-		s.removeLocked(current)
+		s.removeSessionLocked(current, true)
 	}
 	if replaced != nil && replaced != current {
 		s.removeLocked(replaced)
@@ -444,6 +448,11 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	v := &session{conn: c, account: credential.AccountID, generation: credential.Generation, deadline: deadline}
 	s.byConn[c] = v
 	s.byPeer[c.RemotePeer()] = v
+	if current != nil {
+		if lease := s.leases[c.RemotePeer()]; lease != nil && lease.owner == current {
+			lease.owner = v
+		}
+	}
 	if s.byAccount[v.account] == nil {
 		s.byAccount[v.account] = map[*session]struct{}{}
 	}

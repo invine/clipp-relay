@@ -16,15 +16,16 @@ import (
 var portal embed.FS
 
 type Service struct {
-	live             atomic.Bool
-	ready            atomic.Bool
-	requests         chan struct{}
-	scrapes          chan struct{}
-	servers          []*http.Server
-	once             sync.Once
-	public           http.Handler
-	publicRequests   chan struct{}
-	rendezvousCounts func() [2]uint64
+	live              atomic.Bool
+	ready             atomic.Bool
+	requests          chan struct{}
+	scrapes           chan struct{}
+	servers           []*http.Server
+	once              sync.Once
+	public            http.Handler
+	publicRequests    chan struct{}
+	rendezvousCountV1 func() uint64
+	rendezvousCountV2 func() uint64
 }
 
 func New() *Service {
@@ -33,9 +34,11 @@ func New() *Service {
 	return s
 }
 
-func (s *Service) SetPublicHandler(handler http.Handler)        { s.public = handler }
-func (s *Service) SetReady(ready bool)                          { s.ready.Store(ready) }
-func (s *Service) SetRendezvousMetrics(source func() [2]uint64) { s.rendezvousCounts = source }
+func (s *Service) SetPublicHandler(handler http.Handler) { s.public = handler }
+func (s *Service) SetReady(ready bool)                   { s.ready.Store(ready) }
+func (s *Service) SetRendezvousMetrics(v1, v2 func() uint64) {
+	s.rendezvousCountV1, s.rendezvousCountV2 = v1, v2
+}
 
 func (s *Service) PublicHandler() http.Handler {
 	if s.public != nil {
@@ -99,9 +102,8 @@ func (s *Service) PrivateHandler() http.Handler {
 			ready = "1"
 		}
 		_, _ = w.Write([]byte("# HELP clipp_relay_ready Relay readiness.\n# TYPE clipp_relay_ready gauge\nclipp_relay_ready " + ready + "\n"))
-		if s.rendezvousCounts != nil {
-			counts := s.rendezvousCounts()
-			_, _ = fmt.Fprintf(w, "# TYPE clipp_relay_rendezvous_requests_total counter\nclipp_relay_rendezvous_requests_total{version=\"1\"} %d\nclipp_relay_rendezvous_requests_total{version=\"2\"} %d\n", counts[0], counts[1])
+		if s.rendezvousCountV1 != nil && s.rendezvousCountV2 != nil {
+			_, _ = fmt.Fprintf(w, "# TYPE clipp_relay_rendezvous_requests_total counter\nclipp_relay_rendezvous_requests_total{version=\"1\"} %d\nclipp_relay_rendezvous_requests_total{version=\"2\"} %d\n", s.rendezvousCountV1(), s.rendezvousCountV2())
 		}
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -254,8 +254,8 @@ func TestRendezvousV1RegistrationV2LookupPreservesEnvelope(t *testing.T) {
 	if err = json.Unmarshal(found["record"], &rec); err != nil || rec.Peer != h.ID().String() || rec.SignedPeerRecord != base64.RawURLEncoding.EncodeToString(raw) || found["leaseExpiresAt"] == nil {
 		t.Fatalf("v2 found: %v, %v", found, err)
 	}
-	if counts := s.RendezvousCounts(); counts != [2]uint64{1, 1} {
-		t.Fatalf("version counters: %v", counts)
+	if s.RendezvousCountV1() != 1 || s.RendezvousCountV2() != 1 {
+		t.Fatalf("version counters: v1=%d v2=%d", s.RendezvousCountV1(), s.RendezvousCountV2())
 	}
 }
 
@@ -298,6 +298,7 @@ func TestRendezvousRejectsOversizeAndExtraFrames(t *testing.T) {
 		{"v2 oversize", RendezvousV2Protocol, []byte{0x81, 0x80, 0x02}},
 		{"v2 second frame", RendezvousV2Protocol, append(frame(`{"action":"unregister","topic":"clipp"}`), frame(`{"action":"unregister","topic":"clipp"}`)...)},
 		{"v1 oversize", RendezvousV1Protocol, append([]byte(`{"action":"unregister","topic":"clipp"}`), bytes.Repeat([]byte("x"), rvV1Limit)...)},
+		{"v1 whitespace over encoded cap", RendezvousV1Protocol, append([]byte(`{"action":"unregister","topic":"clipp"}`), bytes.Repeat([]byte(" "), rvV1Limit)...)},
 		{"v1 second object", RendezvousV1Protocol, []byte(`{"action":"unregister","topic":"clipp"}{"action":"unregister","topic":"clipp"}`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -424,5 +425,99 @@ func TestRendezvousNewSessionReplacesOldOwner(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if found := rvExchange(t, ctx, finder, s.Host.ID(), string(RendezvousV2Protocol), lookup); found["record"] == nil {
 		t.Fatalf("late old cleanup removed replacement: %v", found)
+	}
+}
+
+func TestRendezvousV2RejectsDelayedSecondFrame(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := rvClient(t, ctx, s, "authorized")
+	st, err := h.NewStream(ctx, s.Host.ID(), RendezvousV2Protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_ = st.SetDeadline(time.Now().Add(2 * time.Second))
+	request := frame(`{"action":"unregister","topic":"clipp"}`)
+	if _, err = st.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err = st.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	var b [1]byte
+	if n, err := st.Read(b[:]); n != 0 || err == nil {
+		t.Fatalf("delayed second frame yielded response: n=%d err=%v", n, err)
+	}
+}
+
+func TestRendezvousNegotiationFallsBackOnlyWhenV2Unsupported(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := rvClient(t, ctx, s, "authorized")
+	open := func(client host.Host) protocol.ID {
+		t.Helper()
+		st, err := client.NewStream(ctx, s.Host.ID(), RendezvousV2Protocol, RendezvousV1Protocol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		return st.Protocol()
+	}
+	if got := open(h); got != RendezvousV2Protocol {
+		t.Fatalf("preferred protocol %s", got)
+	}
+	// A semantic failure on v2 does not trigger a second v1 request.
+	if got := rvExchange(t, ctx, h, s.Host.ID(), string(RendezvousV2Protocol), []byte(`{"action":"list","topic":"clipp"}`)); !bytes.Equal(got["code"], []byte(`"invalid_request"`)) {
+		t.Fatalf("semantic error %v", got)
+	}
+	if s.RendezvousCountV1() != 0 {
+		t.Fatalf("v1 fallback after v2 semantic error")
+	}
+	s.Host.RemoveStreamHandler(RendezvousV2Protocol)
+	fresh := rvClient(t, ctx, s, "authorized")
+	if got := open(fresh); got != RendezvousV1Protocol {
+		t.Fatalf("unsupported v2 did not choose v1: %s", got)
+	}
+}
+
+func TestRendezvousLeaseAndReservationSurviveSameConnectionRenewal(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	owner := rvClient(t, ctx, s, "authorized")
+	if _, err = client.Reserve(ctx, owner, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	raw := rvEnvelope(t, owner, s.Host.ID())
+	req, _ := json.Marshal(map[string]any{"action": "register", "topic": "clipp", "signedPeerRecord": base64.RawURLEncoding.EncodeToString(raw)})
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), req); !bytes.Equal(got["ok"], []byte("true")) {
+		t.Fatal(got)
+	}
+	sendWireAuth(t, ctx, owner, s.Host.ID())
+	lookup, _ := json.Marshal(map[string]any{"action": "lookup", "topic": "clipp", "peerId": owner.ID().String()})
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), lookup); got["record"] == nil {
+		t.Fatalf("renewal lost lease: %v", got)
+	}
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), req); !bytes.Equal(got["ok"], []byte("true")) {
+		t.Fatalf("renewal lost reservation: %v", got)
 	}
 }

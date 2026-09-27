@@ -52,7 +52,7 @@ func TestReadinessMetricTracksHealth(t *testing.T) {
 
 func TestRendezvousMetricsHaveOnlyFixedVersionLabels(t *testing.T) {
 	s := service.New()
-	s.SetRendezvousMetrics(func() [2]uint64 { return [2]uint64{7, 11} })
+	s.SetRendezvousMetrics(func() uint64 { return 7 }, func() uint64 { return 11 })
 	metric := httptest.NewRecorder()
 	s.PrivateHandler().ServeHTTP(metric, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := metric.Body.String()

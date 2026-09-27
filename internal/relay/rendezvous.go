@@ -188,7 +188,10 @@ func readRV(st network.Stream, version protocol.ID, limit int) ([]byte, error) {
 		if _, err = io.ReadFull(st, data); err != nil {
 			return nil, errBadFrame
 		}
-		if !rvTailClean(st, false) {
+		// V2 clients half-close after the single framed request. Waiting for
+		// EOF within the operation deadline rejects even delayed extra frames.
+		var tail [1]byte
+		if n, err := st.Read(tail[:]); n != 0 || err != io.EOF {
 			return nil, errBadFrame
 		}
 		return data, nil
@@ -196,15 +199,22 @@ func readRV(st network.Stream, version protocol.ID, limit int) ([]byte, error) {
 	// Legacy v1 clients write one unframed JSON object and await the response
 	// without half-closing their write side. Decode one complete value instead
 	// of waiting for EOF, then reject already-arrived additional data.
-	dec := json.NewDecoder(io.LimitReader(st, int64(limit+1)))
+	bounded := &io.LimitedReader{R: st, N: int64(limit + 1)}
+	dec := json.NewDecoder(bounded)
 	var data json.RawMessage
 	if dec.Decode(&data) != nil || len(data) == 0 || len(data) > limit {
+		return nil, errBadFrame
+	}
+	// Decoder may read ahead. Count all encoded bytes, including JSON
+	// whitespace outside the object, against the full v1 wire limit.
+	consumed := int64(limit+1) - bounded.N
+	if consumed > int64(limit) {
 		return nil, errBadFrame
 	}
 	if extra, _ := io.ReadAll(dec.Buffered()); !rvWhitespace(extra) {
 		return nil, errBadFrame
 	}
-	if !rvTailClean(st, true) {
+	if !rvTailClean(st, int64(limit)-consumed) {
 		return nil, errBadFrame
 	}
 	return data, nil
@@ -212,12 +222,13 @@ func readRV(st network.Stream, version protocol.ID, limit int) ([]byte, error) {
 
 // A short bounded probe rejects an already queued second request while allowing
 // clients to keep the write side open until they receive the response.
-func rvTailClean(st network.Stream, allowWhitespace bool) bool {
+func rvTailClean(st network.Stream, remaining int64) bool {
 	_ = st.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-	var b [1]byte
+	var buf [4096]byte
 	for {
-		n, err := st.Read(b[:])
-		if n > 0 && (!allowWhitespace || (b[0] != ' ' && b[0] != '\n' && b[0] != '\r' && b[0] != '\t')) {
+		n, err := st.Read(buf[:])
+		remaining -= int64(n)
+		if remaining < 0 || !rvWhitespace(buf[:n]) {
 			return false
 		}
 		if err != nil {
@@ -229,6 +240,7 @@ func rvTailClean(st network.Stream, allowWhitespace bool) bool {
 		}
 	}
 }
+
 func rvWhitespace(data []byte) bool {
 	for _, b := range data {
 		if b != ' ' && b != '\n' && b != '\r' && b != '\t' {
@@ -369,19 +381,21 @@ func parseRV(data []byte, version protocol.ID) (rvRequest, error) {
 }
 
 func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
-	now := time.Now()
 	id := st.Conn().RemotePeer()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	now := time.Now()
 	if s.closing {
+		s.mu.Unlock()
 		return map[string]any{"ok": false, "code": "temporarily_unavailable", "retryAfterMillis": 5000}
 	}
 	if s.byConn[st.Conn()] != owner || s.byPeer[id] != owner || !now.Before(owner.deadline) {
+		s.mu.Unlock()
 		return map[string]any{"ok": false, "code": "authentication_failed"}
 	}
 	switch req.action {
 	case "lookup":
 		lease := s.currentLeaseLocked(req.peer, now)
+		s.mu.Unlock()
 		if lease == nil {
 			return map[string]any{"ok": true}
 		}
@@ -397,14 +411,34 @@ func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
 		if lease := s.leases[id]; lease != nil && lease.owner == owner {
 			s.deleteLeaseLocked(id, lease)
 		}
+		s.mu.Unlock()
 		return map[string]any{"ok": true}
 	case "register":
 		reservation := s.reservations[id]
 		if reservation.conn != owner.conn || !now.Before(reservation.deadline) {
+			s.mu.Unlock()
 			return map[string]any{"ok": false, "code": "reservation_required"}
 		}
+		s.mu.Unlock()
+		// Signature verification and address parsing operate on the already bounded
+		// request without holding the shared session/lease lock.
 		if !validPeerRecord(req.envelope, id, s.Host.ID()) {
 			return map[string]any{"ok": false, "code": "invalid_peer_record"}
+		}
+		s.mu.Lock()
+		now = time.Now()
+		if s.closing {
+			s.mu.Unlock()
+			return map[string]any{"ok": false, "code": "temporarily_unavailable", "retryAfterMillis": 5000}
+		}
+		if s.byConn[st.Conn()] != owner || s.byPeer[id] != owner || !now.Before(owner.deadline) {
+			s.mu.Unlock()
+			return map[string]any{"ok": false, "code": "authentication_failed"}
+		}
+		reservation = s.reservations[id]
+		if reservation.conn != owner.conn || !now.Before(reservation.deadline) {
+			s.mu.Unlock()
+			return map[string]any{"ok": false, "code": "reservation_required"}
 		}
 		deadline := now.Add(5 * time.Minute)
 		if owner.deadline.Before(deadline) {
@@ -414,6 +448,7 @@ func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
 			deadline = reservation.deadline
 		}
 		if !now.Before(deadline) {
+			s.mu.Unlock()
 			return map[string]any{"ok": false, "code": "reservation_required"}
 		}
 		if old := s.leases[id]; old != nil {
@@ -422,11 +457,13 @@ func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
 		lease := &rendezvousLease{owner: owner, record: bytes.Clone(req.envelope), registeredAt: now, deadline: deadline}
 		s.leases[id] = lease
 		lease.timer = time.AfterFunc(time.Until(deadline), func() { s.mu.Lock(); s.deleteLeaseLocked(id, lease); s.mu.Unlock() })
+		s.mu.Unlock()
 		if st.Protocol() == RendezvousV2Protocol {
 			return map[string]any{"ok": true, "peer": id.String(), "leaseExpiresAt": deadline.UTC().Format(time.RFC3339Nano)}
 		}
 		return map[string]any{"ok": true, "peer": id.String()}
 	}
+	s.mu.Unlock()
 	return map[string]any{"ok": false, "code": "invalid_request"}
 }
 
@@ -521,7 +558,6 @@ func boundedPeerAddresses(payload []byte) bool {
 	return count > 0
 }
 
-// RendezvousCounts returns only fixed-version aggregate counters.
-func (s *Server) RendezvousCounts() [2]uint64 {
-	return [2]uint64{s.rvCounts[0].Load(), s.rvCounts[1].Load()}
-}
+// RendezvousCountV1 and RendezvousCountV2 expose only fixed-version totals.
+func (s *Server) RendezvousCountV1() uint64 { return s.rvCounts[0].Load() }
+func (s *Server) RendezvousCountV2() uint64 { return s.rvCounts[1].Load() }
