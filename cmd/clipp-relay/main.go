@@ -104,6 +104,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer dataPlane.Close()
+	srv.SetRendezvousMetrics(dataPlane.RendezvousCounts)
 	portal.SetAccountChanged(func(change auth.AccountChange) {
 		if change.DiscardCredit {
 			credit.Invalidate(change.AccountID)
