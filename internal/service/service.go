@@ -15,21 +15,37 @@ import (
 var portal embed.FS
 
 type Service struct {
-	live     atomic.Bool
-	ready    atomic.Bool
-	requests chan struct{}
-	scrapes  chan struct{}
-	servers  []*http.Server
-	once     sync.Once
+	live           atomic.Bool
+	ready          atomic.Bool
+	requests       chan struct{}
+	scrapes        chan struct{}
+	servers        []*http.Server
+	once           sync.Once
+	public         http.Handler
+	publicRequests chan struct{}
 }
 
 func New() *Service {
-	s := &Service{requests: make(chan struct{}, 16), scrapes: make(chan struct{}, 2)}
+	s := &Service{requests: make(chan struct{}, 16), scrapes: make(chan struct{}, 2), publicRequests: make(chan struct{}, 128)}
 	s.live.Store(true)
 	return s
 }
 
+func (s *Service) SetPublicHandler(handler http.Handler) { s.public = handler }
+
 func (s *Service) PublicHandler() http.Handler {
+	if s.public != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case s.publicRequests <- struct{}{}:
+				defer func() { <-s.publicRequests }()
+			default:
+				http.Error(w, "unavailable", 503)
+				return
+			}
+			s.public.ServeHTTP(w, r)
+		})
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -134,9 +150,9 @@ func (s *Service) Run(ctx context.Context, publicAddr, privateAddr string) error
 		_ = pub.Close()
 		return errors.New("private listener unavailable")
 	}
-	s.servers = []*http.Server{{Handler: s.PublicHandler(), ReadHeaderTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second}, {Handler: s.PrivateHandler(), ReadHeaderTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second}}
+	s.servers = []*http.Server{{Handler: s.PublicHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}, {Handler: s.PrivateHandler(), ReadHeaderTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second}}
 	errCh := make(chan error, 2)
-	go func() { errCh <- s.servers[0].Serve(pub) }()
+	go func() { errCh <- s.servers[0].Serve(&limitedListener{Listener: pub, slots: make(chan struct{}, 512)}) }()
 	go func() { errCh <- s.servers[1].Serve(&limitedListener{Listener: priv, slots: make(chan struct{}, 32)}) }()
 	select {
 	case <-ctx.Done():

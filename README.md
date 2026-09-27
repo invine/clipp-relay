@@ -1,9 +1,10 @@
 # Clipp Relay executable foundation
 
-This repository currently implements the first executable slice of the managed
-relay. It provides explicit PostgreSQL migration, fail-closed startup checks,
-an embedded placeholder portal page, and separate public and private HTTP
-listeners. It does **not** yet provide Relay Sessions or public relay transport.
+This repository currently implements the service foundation and Google portal
+registration. It provides explicit PostgreSQL migration, fail-closed startup
+checks, a PostgreSQL-backed Pending Relay Account and Portal Session flow, and
+separate public and private HTTP listeners. It does **not** yet provide Relay
+credentials, Relay Sessions or public relay transport.
 `/readyz` therefore remains `503 unavailable`; `/livez` is `200 ok` while the
 process runs. A later relay slice must start its listeners and publish a
 complete address snapshot before it may change readiness.
@@ -63,7 +64,8 @@ are rejected. An example shape is:
 
 The allowlist file contains `{"revision":1,"emails":[]}`. The keyring file
 contains `{"current":1,"keys":[{"version":1,"material":"<base64 of at least 32 bytes>"}]}`.
-These files are validated but no account or administrator endpoint exists yet.
+The Google client and pepper files supply portal registration and sign-in.
+Administrator operations are not implemented yet.
 The database connection always uses hostname and CA verification, with no
 plaintext fallback. Normal application logs omit credential values and stable
 identity labels.
@@ -73,7 +75,8 @@ identity labels.
 `bash scripts/smoke-postgres.sh` creates disposable PostgreSQL 18 and 17 Docker
 containers bound only to loopback, provisions TLS and distinct roles, migrates,
 starts the process, checks health and public route isolation, stops PostgreSQL
-to check liveness, and runs the real SQL integration tests. It also rejects a
+to check liveness, and runs the real SQL and deterministic local OIDC provider
+integration tests. It also rejects a
 verified-TLS PostgreSQL 16 target. It removes only containers created by the
 script and all temporary Secret files on exit. It does not use any existing
 database or Docker volume.
