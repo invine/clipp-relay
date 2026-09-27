@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -17,12 +18,27 @@ import (
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/core/record"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
+	multistream "github.com/multiformats/go-multistream"
 )
+
+// Test-only client negotiation: application responses and timeouts never
+// qualify as unsupported multistream, so they cannot trigger a v1 dial.
+func rvDialPreferred(ctx context.Context, h host.Host, relayID peer.ID) (network.Stream, error) {
+	st, err := h.NewStream(ctx, relayID, RendezvousV2Protocol)
+	if err == nil {
+		return st, nil
+	}
+	if !errors.Is(err, multistream.ErrNotSupported[protocol.ID]{}) {
+		return nil, err
+	}
+	return h.NewStream(ctx, relayID, RendezvousV1Protocol)
+}
 
 func rvClient(t *testing.T, ctx context.Context, s *Server, token string) host.Host {
 	t.Helper()
@@ -430,7 +446,7 @@ func TestRendezvousNewSessionReplacesOldOwner(t *testing.T) {
 	}
 }
 
-func TestRendezvousV2RejectsDelayedSecondFrame(t *testing.T) {
+func TestRendezvousV2RejectsQueuedSecondFrame(t *testing.T) {
 	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
@@ -449,7 +465,6 @@ func TestRendezvousV2RejectsDelayedSecondFrame(t *testing.T) {
 	if _, err = st.Write(request); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
 	if _, err = st.Write(request); err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +473,7 @@ func TestRendezvousV2RejectsDelayedSecondFrame(t *testing.T) {
 	}
 	var b [1]byte
 	if n, err := st.Read(b[:]); n != 0 || err == nil {
-		t.Fatalf("delayed second frame yielded response: n=%d err=%v", n, err)
+		t.Fatalf("queued second frame yielded response: n=%d err=%v", n, err)
 	}
 }
 
@@ -473,7 +488,7 @@ func TestRendezvousNegotiationFallsBackOnlyWhenV2Unsupported(t *testing.T) {
 	h := rvClient(t, ctx, s, "authorized")
 	open := func(client host.Host) protocol.ID {
 		t.Helper()
-		st, err := client.NewStream(ctx, s.Host.ID(), RendezvousV2Protocol, RendezvousV1Protocol)
+		st, err := rvDialPreferred(ctx, client, s.Host.ID())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -526,7 +541,7 @@ func TestRendezvousLeaseAndReservationSurviveSameConnectionRenewal(t *testing.T)
 
 func rvNegotiatedError(t *testing.T, ctx context.Context, h host.Host, relayID peer.ID, expected string) {
 	t.Helper()
-	st, err := h.NewStream(ctx, relayID, RendezvousV2Protocol, RendezvousV1Protocol)
+	st, err := rvDialPreferred(ctx, h, relayID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +574,6 @@ func rvNegotiatedError(t *testing.T, ctx context.Context, h host.Host, relayID p
 }
 
 func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
-	request := func() []byte { return frame(`{"action":"unregister","topic":"clipp"}`) }
 	t.Run("authentication", func(t *testing.T) {
 		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
@@ -626,7 +640,7 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		h := rvClient(t, ctx, s, "authorized")
-		st, err := h.NewStream(ctx, s.Host.ID(), RendezvousV2Protocol, RendezvousV1Protocol)
+		st, err := rvDialPreferred(ctx, h, s.Host.ID())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -635,11 +649,11 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 			t.Fatalf("timeout path negotiated %s", st.Protocol())
 		}
 		_ = st.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		if _, err = st.Write(request()); err != nil {
+		if _, err = st.Write([]byte{64, '{'}); err != nil {
 			t.Fatal(err)
 		}
-		// No half-close: the server waits for the rest of this v2 operation; a client
-		// timeout must not be interpreted as unsupported multistream.
+		// The declared frame remains incomplete. A client read timeout must
+		// not be interpreted as unsupported multistream.
 		if _, err = binary.ReadUvarint(byteReader{st}); err == nil {
 			t.Fatal("incomplete request received a response")
 		}
@@ -662,4 +676,36 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 			t.Fatalf("server counters: v1=%d v2=%d", s.RendezvousCountV1(), s.RendezvousCountV2())
 		}
 	})
+}
+
+func TestRendezvousV2AnswersCompleteFrameWithWriteSideOpen(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := rvClient(t, ctx, s, "authorized")
+	st, err := h.NewStream(ctx, s.Host.ID(), RendezvousV2Protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_ = st.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err = st.Write(frame(`{"action":"unregister","topic":"clipp"}`)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := binary.ReadUvarint(byteReader{st})
+	if err != nil {
+		t.Fatalf("open-write frame header: %v", err)
+	}
+	raw := make([]byte, n)
+	if _, err = io.ReadFull(st, raw); err != nil || !bytes.Contains(raw, []byte(`"ok":true`)) {
+		t.Fatalf("open-write response %q: %v", raw, err)
+	}
+	var tail [1]byte
+	if n, err := st.Read(tail[:]); n != 0 || err != io.EOF {
+		t.Fatalf("stream did not close after one response: n=%d err=%v", n, err)
+	}
 }
