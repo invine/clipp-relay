@@ -1,0 +1,24 @@
+# Replace the example project, namespace, repository and full commit SHA with approved inputs.
+# Keep the sync manual. Never sync this file against a production cluster for this ticket.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: clipp-relay-isolated
+  namespace: argocd
+spec:
+  project: isolated-relays
+  source:
+    repoURL: https://git.example.test/clipp/clipp-relay.git
+    targetRevision: 0123456789abcdef0123456789abcdef01234567
+    path: charts/clipp-relay
+    helm:
+      releaseName: isolated
+      valueFiles:
+        - examples/external-values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: clipp-isolated
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=false
+      - PruneLast=true

@@ -252,6 +252,29 @@ test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/readyz)" =
 kill "$pid"; wait "$pid" || true
 pid=
 
+# Serving must reject an untrusted CA and a leaf for a different DNS name.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=Wrong test CA' -keyout "$work/wrong-ca.key" -out "$work/wrong-ca.crt" >/dev/null 2>&1
+sed "s|$work/ca.crt|$work/wrong-ca.crt|" "$work/serving17.json" > "$work/wrong-ca.json"
+if "$work/clipp-relay" -command serve -config "$work/wrong-ca.json" > "$work/wrong-ca.log" 2>&1; then
+  echo 'untrusted PostgreSQL CA unexpectedly accepted' >&2; exit 1
+fi
+grep -q 'startup validation failed' "$work/wrong-ca.log"
+
+openssl req -newkey rsa:2048 -nodes -subj '/CN=wrong.example.test' -keyout "$work/wrong-host.key" -out "$work/wrong-host.csr" >/dev/null 2>&1
+printf 'subjectAltName=DNS:wrong.example.test\nextendedKeyUsage=serverAuth\n' > "$work/wrong-host.ext"
+openssl x509 -req -in "$work/wrong-host.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key" -CAcreateserial -days 1 -extfile "$work/wrong-host.ext" -out "$work/wrong-host.crt" >/dev/null 2>&1
+docker cp "$work/wrong-host.crt" "$supported_name:/var/lib/postgresql/server.crt"
+docker cp "$work/wrong-host.key" "$supported_name:/var/lib/postgresql/server.key"
+docker exec -u root "$supported_name" chown postgres:postgres /var/lib/postgresql/server.crt /var/lib/postgresql/server.key
+docker exec -u root "$supported_name" chmod 600 /var/lib/postgresql/server.key
+docker restart "$supported_name" >/dev/null
+wait_for_pg "$supported_name"
+if "$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/wrong-host.log" 2>&1; then
+  echo 'wrong PostgreSQL certificate hostname unexpectedly accepted' >&2; exit 1
+fi
+grep -q 'startup validation failed' "$work/wrong-host.log"
+echo 'PostgreSQL 17 wrong CA and hostname rejection passed'
+
 # A separate verified-TLS PostgreSQL 16 target must fail before migration.
 start_tls_pg "$wrong_name" 16
 docker exec -e PGPASSWORD="$admin_pass" "$wrong_name" psql -v ON_ERROR_STOP=1 -U postgres -c 'CREATE DATABASE clipp_ticket02_smoke' >/dev/null
@@ -263,4 +286,4 @@ if "$work/clipp-relay" -command migrate -config "$work/wrong-major.json" > "$wor
   echo 'wrong PostgreSQL major unexpectedly accepted' >&2; exit 1
 fi
 grep -q 'unsupported PostgreSQL major' "$work/wrong-major.log"
-echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, table/database/extension ownership rejection, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection'
+echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, table/database/extension ownership rejection, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection, wrong CA/hostname rejection'

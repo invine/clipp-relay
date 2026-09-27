@@ -1,0 +1,26 @@
+{{- $v := .Values -}}
+{{- $name := include "clipp.name" . -}}
+{{- if ne $v.database.mode "external" }}{{ fail "this isolated chart requires explicit external database mode" }}{{ end -}}
+{{- if or (eq $v.database.external.host "") (eq $v.database.name "") (eq $v.database.servingSecret "") (eq $v.database.migrationSecret "") (eq $v.database.caSecret "") }}{{ fail "external database endpoint, name and distinct credential/trust Secret references are required" }}{{ end -}}
+{{- if eq $v.database.servingSecret $v.database.migrationSecret }}{{ fail "serving and migration Secrets must differ" }}{{ end -}}
+{{- if or (eq $v.image.repository "") (not (regexMatch "^sha256:[0-9a-f]{64}$" $v.image.digest)) }}{{ fail "immutable relay image repository and sha256 digest required" }}{{ end -}}
+{{- if ne (int $v.deployment.expectedSchema) 8 }}{{ fail "chart requires application schema revision 8" }}{{ end -}}
+{{- if and (eq $v.deployment.phase "migrating") (eq $v.deployment.runId "") }}{{ fail "migration phase requires a run ID" }}{{ end -}}
+{{- if and (ne $v.deployment.phase "migrating") (ne $v.deployment.runId "") }}{{ fail "run ID only valid in migrating phase" }}{{ end -}}
+{{- $portalHost := trimPrefix "https://" $v.public.portalOrigin -}}
+{{- if or (eq $portalHost $v.public.wssHostname) (contains ":" $portalHost) (eq $v.public.wssHostname "") }}{{ fail "portal and WSS require distinct exact DNS hostnames" }}{{ end -}}
+{{- if or (eq $v.public.portalTLSSecret "") (eq $v.public.wssTLSSecret "") (eq $v.public.ingressClass "") }}{{ fail "existing TLS Secrets and F5 ingress class required" }}{{ end -}}
+{{- $ports := list $v.listeners.portalPort $v.listeners.privatePort $v.listeners.tcpPort $v.listeners.wssPort $v.listeners.udpPort -}}
+{{- $seen := dict -}}
+{{- range $ports }}{{ $key := printf "%d" (int .) }}{{ if hasKey $seen $key }}{{ fail "listener ports must be distinct" }}{{ end }}{{ $_ := set $seen $key true }}{{ end -}}
+{{- range $ports }}{{ if lt (int .) 1024 }}{{ fail "listener ports must be unprivileged" }}{{ end }}{{ end -}}
+{{- if and (not $v.transports.tcp.enabled) (not $v.transports.wss.enabled) (not $v.transports.udp.enabled) }}{{ fail "at least one transport required" }}{{ end -}}
+{{- if and $v.transports.tcp.enabled (eq (len $v.transports.tcp.addresses) 0) (eq (int $v.transports.tcp.publicPort) 0) }}{{ fail "watched TCP transport needs public port" }}{{ end -}}
+{{- if and $v.transports.udp.enabled (eq (len $v.transports.udp.addresses) 0) (eq (int $v.transports.udp.publicPort) 0) }}{{ fail "watched UDP transport needs public port" }}{{ end -}}
+{{- if and $v.transports.wss.enabled (eq (len $v.transports.wss.addresses) 0) }}{{ fail "WSS requires explicit exact-host public address" }}{{ end -}}
+{{- if or (and (not $v.transports.tcp.enabled) (gt (len $v.transports.tcp.addresses) 0)) (and (not $v.transports.udp.enabled) (gt (len $v.transports.udp.addresses) 0)) (and (not $v.transports.wss.enabled) (gt (len $v.transports.wss.addresses) 0)) }}{{ fail "disabled transport cannot publish addresses" }}{{ end -}}
+{{- range $v.transports.wss.addresses }}{{ if not (hasPrefix (printf "/dns4/%s/" $v.public.wssHostname) .) }}{{ fail "WSS public address must use exact configured host" }}{{ end }}{{ end -}}
+{{- if or (eq $v.credentials.googleSecret "") (eq $v.credentials.adminSecret "") (eq $v.credentials.pepperSecret "") (eq $v.credentials.journalSecret "") }}{{ fail "versioned serving Secret references required" }}{{ end -}}
+{{- if or (eq $v.journal.region "") (eq $v.journal.namespace "") (eq $v.journal.bucket "") (eq $v.journal.repositoryId "") (eq $v.journal.coverageHash "") (eq $v.journal.tenancyOcid "") (eq $v.journal.userOcid "") (eq $v.journal.fingerprint "") }}{{ fail "attested journal configuration required" }}{{ end -}}
+{{- if or (eq $v.oci.subnetOcid "") (eq $v.oci.frontendNsgOcid "") (eq $v.oci.backendNsgOcid "") }}{{ fail "existing OCI subnet and frontend/backend NSG inputs required" }}{{ end -}}
+{{- if or (eq (len $v.networkPolicy.publicCidrs) 0) (eq (len $v.networkPolicy.operationsCidrs) 0) (eq (len $v.networkPolicy.databaseCidrs) 0) (eq (len $v.networkPolicy.apiCidrs) 0) (eq (len $v.networkPolicy.httpsCidrs) 0) (eq (len $v.networkPolicy.ingressNamespaceSelector) 0) (eq (len $v.networkPolicy.ingressPodSelector) 0) (eq (len $v.networkPolicy.dnsNamespaceSelector) 0) (eq (len $v.networkPolicy.dnsPodSelector) 0) }}{{ fail "enforcing NetworkPolicy source and destination inputs required" }}{{ end -}}
