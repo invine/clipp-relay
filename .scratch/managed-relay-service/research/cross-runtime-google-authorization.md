@@ -1,5 +1,8 @@
 # Cross-runtime Google authorization
 
+Applicability update (2026-09-05): the Android callback recommendation below is
+superseded by the Q195 decision in [Define Clipp runtime integration](../issues/10-define-clipp-runtime-integration.md).
+
 ## Question
 
 What authorization-code-with-PKCE and renewable-grant architecture can serve Clipp's Electron, Android, and Chrome-extension runtimes while keeping Google credentials out of Relay Instances, authorizing administrators from a verified-email allowlist, avoiding durable Device Identity records, and failing safely during Coordinator or PostgreSQL outages?

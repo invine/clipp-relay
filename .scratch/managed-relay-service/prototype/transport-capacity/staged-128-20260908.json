@@ -1,0 +1,1419 @@
+{
+  "Warning": "PROTOTYPE: secured Go connections, not account-authorized Relay Sessions; no OCI capacity claim",
+  "Platform": "darwin/arm64",
+  "Go": "go1.27.1",
+  "Rows": [
+    {
+      "Transport": "tcp",
+      "Phase": "baseline",
+      "Target": 0,
+      "ElapsedSeconds": 0.313345917,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 1973520,
+        "GoManaged": 9206040,
+        "RSSKiB": 24064,
+        "PeakRSSBytes": 24477696,
+        "CPUSeconds": 0.015198,
+        "Goroutines": 20,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 0,
+          "GoManaged": 0,
+          "RSSKiB": 0,
+          "PeakRSSBytes": 0,
+          "CPUSeconds": 0,
+          "Goroutines": 0,
+          "Blocked": null
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "grow",
+      "Target": 2,
+      "ElapsedSeconds": 0.327518792,
+      "Relay": {
+        "Connections": 2,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 2271488,
+        "GoManaged": 11114776,
+        "RSSKiB": 26016,
+        "PeakRSSBytes": 26624000,
+        "CPUSeconds": 0.025837,
+        "Goroutines": 28,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 2,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 2,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 1466136,
+          "GoManaged": 10660104,
+          "RSSKiB": 25616,
+          "PeakRSSBytes": 26132480,
+          "CPUSeconds": 0.022028,
+          "Goroutines": 27,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "grow",
+      "Target": 8,
+      "ElapsedSeconds": 0.342423916,
+      "Relay": {
+        "Connections": 8,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 1501768,
+        "GoManaged": 13121816,
+        "RSSKiB": 27968,
+        "PeakRSSBytes": 28639232,
+        "CPUSeconds": 0.044777,
+        "Goroutines": 52,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 6,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 8,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 3137616,
+          "GoManaged": 13224200,
+          "RSSKiB": 27760,
+          "PeakRSSBytes": 28393472,
+          "CPUSeconds": 0.056765,
+          "Goroutines": 105,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "grow",
+      "Target": 32,
+      "ElapsedSeconds": 0.385198542,
+      "Relay": {
+        "Connections": 32,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 2826904,
+        "GoManaged": 13670680,
+        "RSSKiB": 28688,
+        "PeakRSSBytes": 29376512,
+        "CPUSeconds": 0.079659,
+        "Goroutines": 148,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 24,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 32,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 6727664,
+          "GoManaged": 19605768,
+          "RSSKiB": 34272,
+          "PeakRSSBytes": 35094528,
+          "CPUSeconds": 0.155417,
+          "Goroutines": 417,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "grow",
+      "Target": 128,
+      "ElapsedSeconds": 0.579044792,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 4155368,
+        "GoManaged": 17905944,
+        "RSSKiB": 32816,
+        "PeakRSSBytes": 33603584,
+        "CPUSeconds": 0.225964,
+        "Goroutines": 532,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 96,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 19638512,
+          "GoManaged": 44914968,
+          "RSSKiB": 58800,
+          "PeakRSSBytes": 60211200,
+          "CPUSeconds": 0.522532,
+          "Goroutines": 1665,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "control",
+      "Target": 0,
+      "ElapsedSeconds": 0.325016833,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 3988072,
+        "GoManaged": 22092056,
+        "RSSKiB": 36384,
+        "PeakRSSBytes": 37257216,
+        "CPUSeconds": 0.265384,
+        "Goroutines": 532,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 128,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 20139952,
+          "GoManaged": 44931352,
+          "RSSKiB": 58832,
+          "PeakRSSBytes": 60243968,
+          "CPUSeconds": 0.547797,
+          "Goroutines": 1665,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "active-circuits",
+      "Target": 16,
+      "ElapsedSeconds": 0.344747042,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 32,
+        "Accounted": 8454144,
+        "Heap": 5342288,
+        "GoManaged": 22092056,
+        "RSSKiB": 36448,
+        "PeakRSSBytes": 37322752,
+        "CPUSeconds": 0.30731,
+        "Goroutines": 564,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 16,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 23280104,
+          "GoManaged": 47700248,
+          "RSSKiB": 61312,
+          "PeakRSSBytes": 62783488,
+          "CPUSeconds": 0.592939,
+          "Goroutines": 1681,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "churn-close",
+      "Target": 8,
+      "ElapsedSeconds": 0.318673,
+      "Relay": {
+        "Connections": 120,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 5434528,
+        "GoManaged": 22092056,
+        "RSSKiB": 36464,
+        "PeakRSSBytes": 37339136,
+        "CPUSeconds": 0.313665,
+        "Goroutines": 500,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 120,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 23392288,
+          "GoManaged": 47733016,
+          "RSSKiB": 61376,
+          "PeakRSSBytes": 62849024,
+          "CPUSeconds": 0.600184,
+          "Goroutines": 1561,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "churn-replace",
+      "Target": 128,
+      "ElapsedSeconds": 0.366728958,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 5900800,
+        "GoManaged": 22092056,
+        "RSSKiB": 36480,
+        "PeakRSSBytes": 37355520,
+        "CPUSeconds": 0.331845,
+        "Goroutines": 532,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 27651624,
+          "GoManaged": 47913240,
+          "RSSKiB": 61568,
+          "PeakRSSBytes": 63045632,
+          "CPUSeconds": 0.632493,
+          "Goroutines": 1665,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "tcp",
+      "Phase": "cleanup",
+      "Target": 0,
+      "ElapsedSeconds": 0.344284917,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 6167824,
+        "GoManaged": 22124824,
+        "RSSKiB": 34128,
+        "PeakRSSBytes": 37404672,
+        "CPUSeconds": 0.342285,
+        "Goroutines": 20,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 28036128,
+          "GoManaged": 47913240,
+          "RSSKiB": 61568,
+          "PeakRSSBytes": 63045632,
+          "CPUSeconds": 0.656258,
+          "Goroutines": 1,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "baseline",
+      "Target": 0,
+      "ElapsedSeconds": 0.305291625,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 1936968,
+        "GoManaged": 9464072,
+        "RSSKiB": 24240,
+        "PeakRSSBytes": 24657920,
+        "CPUSeconds": 0.013655,
+        "Goroutines": 20,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 0,
+          "GoManaged": 0,
+          "RSSKiB": 0,
+          "PeakRSSBytes": 0,
+          "CPUSeconds": 0,
+          "Goroutines": 0,
+          "Blocked": null
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "grow",
+      "Target": 2,
+      "ElapsedSeconds": 0.327948084,
+      "Relay": {
+        "Connections": 2,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 2403120,
+        "GoManaged": 10955016,
+        "RSSKiB": 26608,
+        "PeakRSSBytes": 27213824,
+        "CPUSeconds": 0.020545,
+        "Goroutines": 28,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 2,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 2,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 2018824,
+          "GoManaged": 11659528,
+          "RSSKiB": 26896,
+          "PeakRSSBytes": 27459584,
+          "CPUSeconds": 0.022828,
+          "Goroutines": 27,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "grow",
+      "Target": 8,
+      "ElapsedSeconds": 0.341129625,
+      "Relay": {
+        "Connections": 8,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 2022936,
+        "GoManaged": 13322504,
+        "RSSKiB": 28848,
+        "PeakRSSBytes": 29507584,
+        "CPUSeconds": 0.036669,
+        "Goroutines": 52,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 6,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 8,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 2767400,
+          "GoManaged": 13789448,
+          "RSSKiB": 29248,
+          "PeakRSSBytes": 29900800,
+          "CPUSeconds": 0.054174,
+          "Goroutines": 105,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "grow",
+      "Target": 32,
+      "ElapsedSeconds": 0.398280041,
+      "Relay": {
+        "Connections": 32,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 2869584,
+        "GoManaged": 14960904,
+        "RSSKiB": 30560,
+        "PeakRSSBytes": 31293440,
+        "CPUSeconds": 0.08646,
+        "Goroutines": 148,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 24,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 32,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 7616280,
+          "GoManaged": 21375240,
+          "RSSKiB": 36368,
+          "PeakRSSBytes": 37224448,
+          "CPUSeconds": 0.161668,
+          "Goroutines": 417,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "grow",
+      "Target": 128,
+      "ElapsedSeconds": 0.6349445,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 6962016,
+        "GoManaged": 21817608,
+        "RSSKiB": 37104,
+        "PeakRSSBytes": 37994496,
+        "CPUSeconds": 0.259619,
+        "Goroutines": 533,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 96,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 31147776,
+          "GoManaged": 49793288,
+          "RSSKiB": 64000,
+          "PeakRSSBytes": 65519616,
+          "CPUSeconds": 0.532816,
+          "Goroutines": 1665,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "control",
+      "Target": 0,
+      "ElapsedSeconds": 0.325727417,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 8115832,
+        "GoManaged": 25618696,
+        "RSSKiB": 40688,
+        "PeakRSSBytes": 41664512,
+        "CPUSeconds": 0.293471,
+        "Goroutines": 532,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 128,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 31675104,
+          "GoManaged": 51153160,
+          "RSSKiB": 65360,
+          "PeakRSSBytes": 66912256,
+          "CPUSeconds": 0.558005,
+          "Goroutines": 1665,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "active-circuits",
+      "Target": 16,
+      "ElapsedSeconds": 0.344459583,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 32,
+        "Accounted": 8454144,
+        "Heap": 9714656,
+        "GoManaged": 25741576,
+        "RSSKiB": 40832,
+        "PeakRSSBytes": 41811968,
+        "CPUSeconds": 0.338634,
+        "Goroutines": 564,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 16,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 35593344,
+          "GoManaged": 55191816,
+          "RSSKiB": 68912,
+          "PeakRSSBytes": 70533120,
+          "CPUSeconds": 0.605678,
+          "Goroutines": 1681,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "churn-close",
+      "Target": 8,
+      "ElapsedSeconds": 0.314229458,
+      "Relay": {
+        "Connections": 120,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 9804360,
+        "GoManaged": 25757960,
+        "RSSKiB": 40912,
+        "PeakRSSBytes": 41844736,
+        "CPUSeconds": 0.345187,
+        "Goroutines": 500,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 120,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 35714608,
+          "GoManaged": 55273736,
+          "RSSKiB": 69056,
+          "PeakRSSBytes": 70680576,
+          "CPUSeconds": 0.611624,
+          "Goroutines": 1561,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "churn-replace",
+      "Target": 128,
+      "ElapsedSeconds": 0.351084875,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 6883216,
+        "GoManaged": 26495240,
+        "RSSKiB": 41488,
+        "PeakRSSBytes": 42467328,
+        "CPUSeconds": 0.373966,
+        "Goroutines": 532,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 28214048,
+          "GoManaged": 57870600,
+          "RSSKiB": 71600,
+          "PeakRSSBytes": 73318400,
+          "CPUSeconds": 0.681931,
+          "Goroutines": 1665,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "wss",
+      "Phase": "cleanup",
+      "Target": 0,
+      "ElapsedSeconds": 0.332626917,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 7123016,
+        "GoManaged": 26495240,
+        "RSSKiB": 41536,
+        "PeakRSSBytes": 42500096,
+        "CPUSeconds": 0.392778,
+        "Goroutines": 20,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 28757088,
+          "GoManaged": 57870600,
+          "RSSKiB": 71600,
+          "PeakRSSBytes": 73318400,
+          "CPUSeconds": 0.714528,
+          "Goroutines": 1,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "baseline",
+      "Target": 0,
+      "ElapsedSeconds": 0.308304875,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 1970816,
+        "GoManaged": 9201928,
+        "RSSKiB": 24144,
+        "PeakRSSBytes": 24592384,
+        "CPUSeconds": 0.015255,
+        "Goroutines": 20,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 0,
+          "GoManaged": 0,
+          "RSSKiB": 0,
+          "PeakRSSBytes": 0,
+          "CPUSeconds": 0,
+          "Goroutines": 0,
+          "Blocked": null
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 2,
+      "ElapsedSeconds": 0.332226709,
+      "Relay": {
+        "Connections": 2,
+        "Streams": 0,
+        "Accounted": 5263360,
+        "Heap": 2345880,
+        "GoManaged": 12527880,
+        "RSSKiB": 30080,
+        "PeakRSSBytes": 30752768,
+        "CPUSeconds": 0.036658,
+        "Goroutines": 70,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 2,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 2,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 2289512,
+          "GoManaged": 13084936,
+          "RSSKiB": 29680,
+          "PeakRSSBytes": 30310400,
+          "CPUSeconds": 0.03706,
+          "Goroutines": 101,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 8,
+      "ElapsedSeconds": 0.350116042,
+      "Relay": {
+        "Connections": 8,
+        "Streams": 0,
+        "Accounted": 21053440,
+        "Heap": 3360992,
+        "GoManaged": 15313160,
+        "RSSKiB": 32192,
+        "PeakRSSBytes": 32964608,
+        "CPUSeconds": 0.079198,
+        "Goroutines": 220,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 6,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 8,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 5741480,
+          "GoManaged": 18245896,
+          "RSSKiB": 34672,
+          "PeakRSSBytes": 35454976,
+          "CPUSeconds": 0.101461,
+          "Goroutines": 401,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 32,
+      "ElapsedSeconds": 0.452931,
+      "Relay": {
+        "Connections": 32,
+        "Streams": 0,
+        "Accounted": 84213760,
+        "Heap": 8038568,
+        "GoManaged": 25012488,
+        "RSSKiB": 41552,
+        "PeakRSSBytes": 42516480,
+        "CPUSeconds": 0.237239,
+        "Goroutines": 826,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 24,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 32,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 18004400,
+          "GoManaged": 40634632,
+          "RSSKiB": 56304,
+          "PeakRSSBytes": 57655296,
+          "CPUSeconds": 0.326695,
+          "Goroutines": 1604,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 128,
+      "ElapsedSeconds": 3.829556666,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 0,
+        "Accounted": 318433280,
+        "Heap": 35145600,
+        "GoManaged": 58968328,
+        "RSSKiB": 74240,
+        "PeakRSSBytes": 75988992,
+        "CPUSeconds": 0.821774,
+        "Goroutines": 3068,
+        "Blocked": {
+          "block_reserve_memory:system": 12
+        }
+      },
+      "Clients": {
+        "OK": 89,
+        "Failed": 1,
+        "Error": "failed to dial: context deadline exceeded",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 63021552,
+          "GoManaged": 118438168,
+          "RSSKiB": 130720,
+          "PeakRSSBytes": 133857280,
+          "CPUSeconds": 1.18003,
+          "Goroutines": 6074,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "control",
+      "Target": 0,
+      "ElapsedSeconds": 0.329682208,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 0,
+        "Accounted": 318433280,
+        "Heap": 30802472,
+        "GoManaged": 66672920,
+        "RSSKiB": 81488,
+        "PeakRSSBytes": 83410944,
+        "CPUSeconds": 0.905264,
+        "Goroutines": 3068,
+        "Blocked": {
+          "block_reserve_memory:system": 12
+        }
+      },
+      "Clients": {
+        "OK": 121,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 67165896,
+          "GoManaged": 118733080,
+          "RSSKiB": 131040,
+          "PeakRSSBytes": 134184960,
+          "CPUSeconds": 1.238362,
+          "Goroutines": 6078,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "active-circuits",
+      "Target": 16,
+      "ElapsedSeconds": 0.382330834,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 32,
+        "Accounted": 318498816,
+        "Heap": 46671944,
+        "GoManaged": 79378712,
+        "RSSKiB": 94336,
+        "PeakRSSBytes": 96600064,
+        "CPUSeconds": 1.119208,
+        "Goroutines": 3134,
+        "Blocked": {
+          "block_reserve_memory:system": 12
+        }
+      },
+      "Clients": {
+        "OK": 16,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 105259664,
+          "GoManaged": 152635688,
+          "RSSKiB": 164288,
+          "PeakRSSBytes": 168198144,
+          "CPUSeconds": 1.424433,
+          "Goroutines": 6126,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "churn-close",
+      "Target": 8,
+      "ElapsedSeconds": 0.31256675,
+      "Relay": {
+        "Connections": 113,
+        "Streams": 0,
+        "Accounted": 297379840,
+        "Heap": 47219056,
+        "GoManaged": 79419672,
+        "RSSKiB": 94480,
+        "PeakRSSBytes": 96747520,
+        "CPUSeconds": 1.144932,
+        "Goroutines": 2870,
+        "Blocked": {
+          "block_reserve_memory:system": 12
+        }
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 113,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 105972656,
+          "GoManaged": 153291048,
+          "RSSKiB": 164928,
+          "PeakRSSBytes": 168886272,
+          "CPUSeconds": 1.459126,
+          "Goroutines": 5678,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "churn-replace",
+      "Target": 128,
+      "ElapsedSeconds": 3.373395,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 0,
+        "Accounted": 318433280,
+        "Heap": 28832752,
+        "GoManaged": 79509784,
+        "RSSKiB": 93856,
+        "PeakRSSBytes": 96944128,
+        "CPUSeconds": 1.32328,
+        "Goroutines": 3070,
+        "Blocked": {
+          "block_reserve_memory:system": 23
+        }
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 1,
+        "Error": "failed to dial: context deadline exceeded",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 67914672,
+          "GoManaged": 153930024,
+          "RSSKiB": 164944,
+          "PeakRSSBytes": 169721856,
+          "CPUSeconds": 1.702828,
+          "Goroutines": 6082,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "cleanup",
+      "Target": 0,
+      "ElapsedSeconds": 0.354173209,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 29691152,
+        "GoManaged": 79509784,
+        "RSSKiB": 93872,
+        "PeakRSSBytes": 96944128,
+        "CPUSeconds": 1.373118,
+        "Goroutines": 45,
+        "Blocked": {
+          "block_reserve_memory:system": 23
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 69118448,
+          "GoManaged": 153930024,
+          "RSSKiB": 164944,
+          "PeakRSSBytes": 169721856,
+          "CPUSeconds": 1.793212,
+          "Goroutines": 32,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "baseline",
+      "Target": 0,
+      "ElapsedSeconds": 0.308428083,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 2022208,
+        "GoManaged": 9505032,
+        "RSSKiB": 24496,
+        "PeakRSSBytes": 24952832,
+        "CPUSeconds": 0.015919,
+        "Goroutines": 20,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 0,
+          "GoManaged": 0,
+          "RSSKiB": 0,
+          "PeakRSSBytes": 0,
+          "CPUSeconds": 0,
+          "Goroutines": 0,
+          "Blocked": null
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "grow",
+      "Target": 2,
+      "ElapsedSeconds": 0.325318667,
+      "Relay": {
+        "Connections": 2,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 2412944,
+        "GoManaged": 11036936,
+        "RSSKiB": 26608,
+        "PeakRSSBytes": 27197440,
+        "CPUSeconds": 0.025285,
+        "Goroutines": 28,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 2,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 2,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 1889024,
+          "GoManaged": 11503880,
+          "RSSKiB": 26800,
+          "PeakRSSBytes": 27361280,
+          "CPUSeconds": 0.023587,
+          "Goroutines": 27,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "grow",
+      "Target": 8,
+      "ElapsedSeconds": 0.347176042,
+      "Relay": {
+        "Connections": 8,
+        "Streams": 0,
+        "Accounted": 5263360,
+        "Heap": 2297824,
+        "GoManaged": 13388040,
+        "RSSKiB": 31184,
+        "PeakRSSBytes": 31916032,
+        "CPUSeconds": 0.055105,
+        "Goroutines": 95,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 6,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 8,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 3905752,
+          "GoManaged": 16050440,
+          "RSSKiB": 32896,
+          "PeakRSSBytes": 33669120,
+          "CPUSeconds": 0.071648,
+          "Goroutines": 180,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "grow",
+      "Target": 32,
+      "ElapsedSeconds": 0.4130695,
+      "Relay": {
+        "Connections": 32,
+        "Streams": 0,
+        "Accounted": 26316800,
+        "Heap": 4029888,
+        "GoManaged": 17512728,
+        "RSSKiB": 35248,
+        "PeakRSSBytes": 36077568,
+        "CPUSeconds": 0.152647,
+        "Goroutines": 363,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 24,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 32,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 10915920,
+          "GoManaged": 27404552,
+          "RSSKiB": 44416,
+          "PeakRSSBytes": 45449216,
+          "CPUSeconds": 0.22695,
+          "Goroutines": 789,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "grow",
+      "Target": 128,
+      "ElapsedSeconds": 0.677273875,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 110530560,
+        "Heap": 16481992,
+        "GoManaged": 33773848,
+        "RSSKiB": 51072,
+        "PeakRSSBytes": 52264960,
+        "CPUSeconds": 0.451274,
+        "Goroutines": 1427,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 96,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 44561008,
+          "GoManaged": 70359320,
+          "RSSKiB": 85904,
+          "PeakRSSBytes": 87965696,
+          "CPUSeconds": 0.724451,
+          "Goroutines": 3226,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "control",
+      "Target": 0,
+      "ElapsedSeconds": 0.322948625,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 110530560,
+        "Heap": 17741272,
+        "GoManaged": 38951192,
+        "RSSKiB": 55888,
+        "PeakRSSBytes": 57229312,
+        "CPUSeconds": 0.504512,
+        "Goroutines": 1427,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 128,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 46474240,
+          "GoManaged": 73136408,
+          "RSSKiB": 88720,
+          "PeakRSSBytes": 90816512,
+          "CPUSeconds": 0.769707,
+          "Goroutines": 3230,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "active-circuits",
+      "Target": 16,
+      "ElapsedSeconds": 0.358717333,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 32,
+        "Accounted": 116363264,
+        "Heap": 21848936,
+        "GoManaged": 42457368,
+        "RSSKiB": 59504,
+        "PeakRSSBytes": 60899328,
+        "CPUSeconds": 0.608399,
+        "Goroutines": 1469,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 16,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 41261576,
+          "GoManaged": 85965080,
+          "RSSKiB": 100608,
+          "PeakRSSBytes": 103022592,
+          "CPUSeconds": 0.899166,
+          "Goroutines": 3256,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "churn-close",
+      "Target": 8,
+      "ElapsedSeconds": 0.310631792,
+      "Relay": {
+        "Connections": 120,
+        "Streams": 0,
+        "Accounted": 105267200,
+        "Heap": 22042944,
+        "GoManaged": 42604824,
+        "RSSKiB": 59664,
+        "PeakRSSBytes": 61095936,
+        "CPUSeconds": 0.619169,
+        "Goroutines": 1353,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 120,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 41537280,
+          "GoManaged": 85965080,
+          "RSSKiB": 100688,
+          "PeakRSSBytes": 103104512,
+          "CPUSeconds": 0.913246,
+          "Goroutines": 3052,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "churn-replace",
+      "Target": 128,
+      "ElapsedSeconds": 0.345375584,
+      "Relay": {
+        "Connections": 128,
+        "Streams": 0,
+        "Accounted": 110530560,
+        "Heap": 14600856,
+        "GoManaged": 43014424,
+        "RSSKiB": 60096,
+        "PeakRSSBytes": 61538304,
+        "CPUSeconds": 0.659976,
+        "Goroutines": 1427,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 128,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 47343504,
+          "GoManaged": 85965080,
+          "RSSKiB": 100800,
+          "PeakRSSBytes": 103219200,
+          "CPUSeconds": 0.955745,
+          "Goroutines": 3230,
+          "Blocked": {}
+        }
+      }
+    },
+    {
+      "Transport": "mixed",
+      "Phase": "cleanup",
+      "Target": 0,
+      "ElapsedSeconds": 0.329019084,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 15068256,
+        "GoManaged": 43014424,
+        "RSSKiB": 60128,
+        "PeakRSSBytes": 61538304,
+        "CPUSeconds": 0.680297,
+        "Goroutines": 33,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 48072128,
+          "GoManaged": 85965080,
+          "RSSKiB": 100800,
+          "PeakRSSBytes": 103219200,
+          "CPUSeconds": 0.996881,
+          "Goroutines": 12,
+          "Blocked": {}
+        }
+      }
+    }
+  ]
+}

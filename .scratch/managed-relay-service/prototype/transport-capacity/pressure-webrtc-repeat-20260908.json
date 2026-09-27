@@ -1,0 +1,1979 @@
+{
+  "Warning": "PROTOTYPE: secured Go connections, not account-authorized Relay Sessions; no OCI capacity claim",
+  "Platform": "darwin/arm64",
+  "Go": "go1.27.1",
+  "Rows": [
+    {
+      "Transport": "webrtc",
+      "Phase": "baseline",
+      "Target": 0,
+      "ElapsedSeconds": 0.312876041,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 1972296,
+        "GoManaged": 9128200,
+        "RSSKiB": 24080,
+        "PeakRSSBytes": 24477696,
+        "CPUSeconds": 0.011515,
+        "Goroutines": 20,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 0,
+          "GoManaged": 0,
+          "RSSKiB": 0,
+          "PeakRSSBytes": 0,
+          "CPUSeconds": 0,
+          "Goroutines": 0,
+          "Blocked": null
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 2,
+      "ElapsedSeconds": 0.338242958,
+      "Relay": {
+        "Connections": 2,
+        "Streams": 0,
+        "Accounted": 5263360,
+        "Heap": 2406336,
+        "GoManaged": 13347080,
+        "RSSKiB": 30064,
+        "PeakRSSBytes": 30687232,
+        "CPUSeconds": 0.041274,
+        "Goroutines": 70,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 2,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 2,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 2353224,
+          "GoManaged": 12986632,
+          "RSSKiB": 29552,
+          "PeakRSSBytes": 30146560,
+          "CPUSeconds": 0.043054,
+          "Goroutines": 101,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 8,
+      "ElapsedSeconds": 0.361598708,
+      "Relay": {
+        "Connections": 8,
+        "Streams": 0,
+        "Accounted": 21053440,
+        "Heap": 2963880,
+        "GoManaged": 15608072,
+        "RSSKiB": 32384,
+        "PeakRSSBytes": 33161216,
+        "CPUSeconds": 0.099495,
+        "Goroutines": 221,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 6,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 8,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 6045280,
+          "GoManaged": 18016520,
+          "RSSKiB": 34640,
+          "PeakRSSBytes": 35438592,
+          "CPUSeconds": 0.119463,
+          "Goroutines": 401,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 32,
+      "ElapsedSeconds": 0.470485625,
+      "Relay": {
+        "Connections": 32,
+        "Streams": 0,
+        "Accounted": 84213760,
+        "Heap": 8727824,
+        "GoManaged": 24869144,
+        "RSSKiB": 41152,
+        "PeakRSSBytes": 42139648,
+        "CPUSeconds": 0.266027,
+        "Goroutines": 823,
+        "Blocked": {}
+      },
+      "Clients": {
+        "OK": 24,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 32,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 16545936,
+          "GoManaged": 41171224,
+          "RSSKiB": 56688,
+          "PeakRSSBytes": 58048512,
+          "CPUSeconds": 0.362709,
+          "Goroutines": 1603,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "grow",
+      "Target": 128,
+      "ElapsedSeconds": 3.801407792,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 0,
+        "Accounted": 318433280,
+        "Heap": 36251632,
+        "GoManaged": 60176664,
+        "RSSKiB": 75088,
+        "PeakRSSBytes": 76873728,
+        "CPUSeconds": 0.930079,
+        "Goroutines": 3061,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 89,
+        "Failed": 1,
+        "Error": "failed to dial: context deadline exceeded",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 61263928,
+          "GoManaged": 121227560,
+          "RSSKiB": 133856,
+          "PeakRSSBytes": 137068544,
+          "CPUSeconds": 1.285706,
+          "Goroutines": 6073,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "control",
+      "Target": 0,
+      "ElapsedSeconds": 0.341582417,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 0,
+        "Accounted": 318433280,
+        "Heap": 32349776,
+        "GoManaged": 66304280,
+        "RSSKiB": 81136,
+        "PeakRSSBytes": 83083264,
+        "CPUSeconds": 1.081941,
+        "Goroutines": 3061,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 121,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 65432288,
+          "GoManaged": 121301288,
+          "RSSKiB": 134000,
+          "PeakRSSBytes": 137183232,
+          "CPUSeconds": 1.398879,
+          "Goroutines": 6090,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "active-circuits",
+      "Target": 16,
+      "ElapsedSeconds": 0.404484167,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 32,
+        "Accounted": 318498816,
+        "Heap": 29034808,
+        "GoManaged": 79649048,
+        "RSSKiB": 94368,
+        "PeakRSSBytes": 96632832,
+        "CPUSeconds": 1.337441,
+        "Goroutines": 3125,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 16,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 104006504,
+          "GoManaged": 153250088,
+          "RSSKiB": 164992,
+          "PeakRSSBytes": 168919040,
+          "CPUSeconds": 1.613322,
+          "Goroutines": 6138,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-start",
+      "Target": 12,
+      "ElapsedSeconds": 0.316109,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 44316912,
+        "GoManaged": 89737512,
+        "RSSKiB": 107760,
+        "PeakRSSBytes": 110346240,
+        "CPUSeconds": 1.901023,
+        "Goroutines": 3318,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 104433960,
+          "GoManaged": 153372968,
+          "RSSKiB": 165552,
+          "PeakRSSBytes": 169050112,
+          "CPUSeconds": 1.644022,
+          "Goroutines": 6095,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 1,
+      "ElapsedSeconds": 0.3101115,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 36334768,
+        "GoManaged": 93743400,
+        "RSSKiB": 111376,
+        "PeakRSSBytes": 114049024,
+        "CPUSeconds": 3.717594,
+        "Goroutines": 3318,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 81571568,
+          "GoManaged": 184408376,
+          "RSSKiB": 197024,
+          "PeakRSSBytes": 201752576,
+          "CPUSeconds": 3.421702,
+          "Goroutines": 6348,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 2,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 5,
+          "ControlFailed": 0,
+          "AcceptedBytes": 10485760,
+          "VerifiedEchoBytes": 10485760,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 2,
+      "ElapsedSeconds": 0.3145225,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 44773696,
+        "GoManaged": 91695400,
+        "RSSKiB": 112240,
+        "PeakRSSBytes": 114933760,
+        "CPUSeconds": 5.4572389999999995,
+        "Goroutines": 3325,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 123261840,
+          "GoManaged": 187316536,
+          "RSSKiB": 199536,
+          "PeakRSSBytes": 204324864,
+          "CPUSeconds": 5.081539,
+          "Goroutines": 6347,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 5,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 5,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 10,
+          "ControlFailed": 0,
+          "AcceptedBytes": 20971520,
+          "VerifiedEchoBytes": 20889600,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 3,
+      "ElapsedSeconds": 0.3093575,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 54343056,
+        "GoManaged": 95439144,
+        "RSSKiB": 112784,
+        "PeakRSSBytes": 115490816,
+        "CPUSeconds": 7.264648,
+        "Goroutines": 3318,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 110904800,
+          "GoManaged": 187734328,
+          "RSSKiB": 203648,
+          "PeakRSSBytes": 208535552,
+          "CPUSeconds": 6.80444,
+          "Goroutines": 6348,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 8,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 7,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 15,
+          "ControlFailed": 0,
+          "AcceptedBytes": 31047680,
+          "VerifiedEchoBytes": 31047680,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 4,
+      "ElapsedSeconds": 0.309892542,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 45653664,
+        "GoManaged": 96241960,
+        "RSSKiB": 112800,
+        "PeakRSSBytes": 115507200,
+        "CPUSeconds": 9.073743,
+        "Goroutines": 3318,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 80240728,
+          "GoManaged": 185006392,
+          "RSSKiB": 205248,
+          "PeakRSSBytes": 210173952,
+          "CPUSeconds": 8.467797000000001,
+          "Goroutines": 6348,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 10,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 10,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 20,
+          "ControlFailed": 0,
+          "AcceptedBytes": 41320448,
+          "VerifiedEchoBytes": 41320448,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 5,
+      "ElapsedSeconds": 0.312231,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 52126320,
+        "GoManaged": 94562600,
+        "RSSKiB": 113088,
+        "PeakRSSBytes": 115802112,
+        "CPUSeconds": 10.848869,
+        "Goroutines": 3315,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 123875072,
+          "GoManaged": 187554104,
+          "RSSKiB": 205280,
+          "PeakRSSBytes": 210173952,
+          "CPUSeconds": 10.132098,
+          "Goroutines": 6344,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 13,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 13,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 26,
+          "ControlFailed": 0,
+          "AcceptedBytes": 51560448,
+          "VerifiedEchoBytes": 51511296,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 6,
+      "ElapsedSeconds": 0.314477084,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 59770464,
+        "GoManaged": 94939432,
+        "RSSKiB": 116976,
+        "PeakRSSBytes": 119783424,
+        "CPUSeconds": 12.568372,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 109791448,
+          "GoManaged": 189479224,
+          "RSSKiB": 205280,
+          "PeakRSSBytes": 210206720,
+          "CPUSeconds": 11.764338,
+          "Goroutines": 6326,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 16,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 15,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 31,
+          "ControlFailed": 0,
+          "AcceptedBytes": 62013440,
+          "VerifiedEchoBytes": 61751296,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 7,
+      "ElapsedSeconds": 0.311983583,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 42140048,
+        "GoManaged": 94791976,
+        "RSSKiB": 116976,
+        "PeakRSSBytes": 119783424,
+        "CPUSeconds": 14.403108,
+        "Goroutines": 3304,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 102727712,
+          "GoManaged": 189954360,
+          "RSSKiB": 205440,
+          "PeakRSSBytes": 210370560,
+          "CPUSeconds": 13.532548,
+          "Goroutines": 6323,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 18,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 18,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 128,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 36,
+          "ControlFailed": 0,
+          "AcceptedBytes": 72171520,
+          "VerifiedEchoBytes": 72122368,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 8,
+      "ElapsedSeconds": 0.311418959,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 59114648,
+        "GoManaged": 101517608,
+        "RSSKiB": 118128,
+        "PeakRSSBytes": 120963072,
+        "CPUSeconds": 16.122862,
+        "Goroutines": 3302,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 88611336,
+          "GoManaged": 189954360,
+          "RSSKiB": 205456,
+          "PeakRSSBytes": 210386944,
+          "CPUSeconds": 15.20239,
+          "Goroutines": 6325,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 21,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 20,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 128,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 41,
+          "ControlFailed": 0,
+          "AcceptedBytes": 82280448,
+          "VerifiedEchoBytes": 82247680,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 9,
+      "ElapsedSeconds": 0.319291584,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 60779832,
+        "GoManaged": 94800168,
+        "RSSKiB": 118208,
+        "PeakRSSBytes": 121044992,
+        "CPUSeconds": 17.844102,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 127889840,
+          "GoManaged": 189864248,
+          "RSSKiB": 205520,
+          "PeakRSSBytes": 210452480,
+          "CPUSeconds": 16.849055,
+          "Goroutines": 6324,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 23,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 23,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 128,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 46,
+          "ControlFailed": 0,
+          "AcceptedBytes": 92782592,
+          "VerifiedEchoBytes": 92422144,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 10,
+      "ElapsedSeconds": 0.30996675,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 57420824,
+        "GoManaged": 99911976,
+        "RSSKiB": 118224,
+        "PeakRSSBytes": 121061376,
+        "CPUSeconds": 19.559774,
+        "Goroutines": 3301,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 105451528,
+          "GoManaged": 187873592,
+          "RSSKiB": 206512,
+          "PeakRSSBytes": 211468288,
+          "CPUSeconds": 18.522923,
+          "Goroutines": 6309,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 26,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 25,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 128,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 51,
+          "ControlFailed": 0,
+          "AcceptedBytes": 102416384,
+          "VerifiedEchoBytes": 102416384,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 11,
+      "ElapsedSeconds": 0.310495208,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 45151400,
+        "GoManaged": 94898472,
+        "RSSKiB": 118224,
+        "PeakRSSBytes": 121061376,
+        "CPUSeconds": 21.314675,
+        "Goroutines": 3299,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 95770240,
+          "GoManaged": 188545336,
+          "RSSKiB": 206512,
+          "PeakRSSBytes": 211468288,
+          "CPUSeconds": 20.203429,
+          "Goroutines": 6310,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 28,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 28,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": false,
+          "Opened": 128,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 56,
+          "ControlFailed": 0,
+          "AcceptedBytes": 112590848,
+          "VerifiedEchoBytes": 112574464,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "sustained-sample",
+      "Target": 12,
+      "ElapsedSeconds": 0.32127125,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 0,
+        "Accounted": 318433280,
+        "Heap": 36974968,
+        "GoManaged": 93055272,
+        "RSSKiB": 118224,
+        "PeakRSSBytes": 121061376,
+        "CPUSeconds": 22.318103,
+        "Goroutines": 3045,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 98721168,
+          "GoManaged": 188373304,
+          "RSSKiB": 206512,
+          "PeakRSSBytes": 211468288,
+          "CPUSeconds": 21.655753,
+          "Goroutines": 6051,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 30,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 30,
+          "IdleControlFailed": 0,
+          "Kind": "sustained",
+          "Done": true,
+          "Opened": 128,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 60,
+          "ControlFailed": 0,
+          "AcceptedBytes": 121307136,
+          "VerifiedEchoBytes": 121307136,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-start",
+      "Target": 12,
+      "ElapsedSeconds": 0.327227791,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 100957600,
+        "GoManaged": 189471032,
+        "RSSKiB": 201632,
+        "PeakRSSBytes": 205979648,
+        "CPUSeconds": 23.650349,
+        "Goroutines": 3323,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 98806376,
+          "GoManaged": 188373304,
+          "RSSKiB": 206512,
+          "PeakRSSBytes": 211468288,
+          "CPUSeconds": 21.676901,
+          "Goroutines": 6099,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 0,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 0,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 0,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 0,
+          "ControlFailed": 0,
+          "AcceptedBytes": 0,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 1,
+      "ElapsedSeconds": 0.314522792,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 174901008,
+        "GoManaged": 225917240,
+        "RSSKiB": 237824,
+        "PeakRSSBytes": 243531776,
+        "CPUSeconds": 26.002839,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 168062104,
+          "GoManaged": 305310040,
+          "RSSKiB": 313552,
+          "PeakRSSBytes": 321077248,
+          "CPUSeconds": 24.956958,
+          "Goroutines": 6312,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 2,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 2,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 0,
+          "ControlOK": 4,
+          "ControlFailed": 0,
+          "AcceptedBytes": 73269248,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 2,
+      "ElapsedSeconds": 0.323830625,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 179472352,
+        "GoManaged": 225982776,
+        "RSSKiB": 237856,
+        "PeakRSSBytes": 243564544,
+        "CPUSeconds": 26.131146,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 214378824,
+          "GoManaged": 325454168,
+          "RSSKiB": 333328,
+          "PeakRSSBytes": 341295104,
+          "CPUSeconds": 25.60443,
+          "Goroutines": 6312,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 0,
+          "IdleControlOK": 3,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 28,
+          "ControlOK": 6,
+          "ControlFailed": 0,
+          "AcceptedBytes": 86638592,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 3,
+      "ElapsedSeconds": 0.337710583,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 179950600,
+        "GoManaged": 225982776,
+        "RSSKiB": 237856,
+        "PeakRSSBytes": 243564544,
+        "CPUSeconds": 26.242609,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 214728232,
+          "GoManaged": 325511512,
+          "RSSKiB": 333344,
+          "PeakRSSBytes": 341344256,
+          "CPUSeconds": 25.680664,
+          "Goroutines": 6310,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 1,
+          "IdleControlOK": 4,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 28,
+          "ControlOK": 7,
+          "ControlFailed": 1,
+          "AcceptedBytes": 86638592,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 4,
+      "ElapsedSeconds": 0.335162625,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 180451664,
+        "GoManaged": 225982776,
+        "RSSKiB": 237856,
+        "PeakRSSBytes": 243564544,
+        "CPUSeconds": 26.335756,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 215299256,
+          "GoManaged": 325511512,
+          "RSSKiB": 333344,
+          "PeakRSSBytes": 341344256,
+          "CPUSeconds": 25.791072,
+          "Goroutines": 6310,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 2,
+          "IdleControlOK": 4,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 28,
+          "ControlOK": 7,
+          "ControlFailed": 2,
+          "AcceptedBytes": 86638592,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 5,
+      "ElapsedSeconds": 0.331376834,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 180898528,
+        "GoManaged": 225982776,
+        "RSSKiB": 237856,
+        "PeakRSSBytes": 243564544,
+        "CPUSeconds": 26.44995,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 215621368,
+          "GoManaged": 325536088,
+          "RSSKiB": 333376,
+          "PeakRSSBytes": 341377024,
+          "CPUSeconds": 25.897362,
+          "Goroutines": 6312,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 2,
+          "IdleControlOK": 5,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 28,
+          "ControlOK": 8,
+          "ControlFailed": 2,
+          "AcceptedBytes": 86638592,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 6,
+      "ElapsedSeconds": 0.326434542,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 181225832,
+        "GoManaged": 225982776,
+        "RSSKiB": 237856,
+        "PeakRSSBytes": 243564544,
+        "CPUSeconds": 26.528062,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 216120152,
+          "GoManaged": 325544280,
+          "RSSKiB": 333376,
+          "PeakRSSBytes": 341377024,
+          "CPUSeconds": 26.015199,
+          "Goroutines": 6312,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 3,
+          "IdleControlOK": 6,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 28,
+          "ControlOK": 9,
+          "ControlFailed": 3,
+          "AcceptedBytes": 86638592,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 7,
+      "ElapsedSeconds": 0.325975459,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 181751048,
+        "GoManaged": 225982776,
+        "RSSKiB": 237856,
+        "PeakRSSBytes": 243564544,
+        "CPUSeconds": 26.622281,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 216354288,
+          "GoManaged": 325544280,
+          "RSSKiB": 333376,
+          "PeakRSSBytes": 341377024,
+          "CPUSeconds": 26.084041,
+          "Goroutines": 6310,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 4,
+          "IdleControlOK": 7,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 28,
+          "ControlOK": 10,
+          "ControlFailed": 4,
+          "AcceptedBytes": 86638592,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 0
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 8,
+      "ElapsedSeconds": 0.318271584,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 128,
+        "Accounted": 318695424,
+        "Heap": 143017544,
+        "GoManaged": 259443016,
+        "RSSKiB": 270384,
+        "PeakRSSBytes": 276856832,
+        "CPUSeconds": 27.688229,
+        "Goroutines": 3303,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 192350728,
+          "GoManaged": 327846232,
+          "RSSKiB": 335680,
+          "PeakRSSBytes": 343736320,
+          "CPUSeconds": 26.828286,
+          "Goroutines": 6309,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 3,
+          "BusyControlFailed": 4,
+          "IdleControlOK": 7,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 28,
+          "ControlOK": 10,
+          "ControlFailed": 4,
+          "AcceptedBytes": 86638592,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 47823436
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 9,
+      "ElapsedSeconds": 0.31849575,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 100,
+        "Accounted": 318638080,
+        "Heap": 205418712,
+        "GoManaged": 267069768,
+        "RSSKiB": 278224,
+        "PeakRSSBytes": 284901376,
+        "CPUSeconds": 28.884298,
+        "Goroutines": 3245,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 123600816,
+          "GoManaged": 278014296,
+          "RSSKiB": 335840,
+          "PeakRSSBytes": 343900160,
+          "CPUSeconds": 28.204825,
+          "Goroutines": 6273,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 4,
+          "BusyControlFailed": 5,
+          "IdleControlOK": 9,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 40,
+          "ControlOK": 13,
+          "ControlFailed": 5,
+          "AcceptedBytes": 95371264,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 71927500
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 10,
+      "ElapsedSeconds": 0.323129917,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 100,
+        "Accounted": 318638080,
+        "Heap": 205672544,
+        "GoManaged": 267069768,
+        "RSSKiB": 278224,
+        "PeakRSSBytes": 284901376,
+        "CPUSeconds": 28.952636,
+        "Goroutines": 3243,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 170754080,
+          "GoManaged": 278382936,
+          "RSSKiB": 335840,
+          "PeakRSSBytes": 343900160,
+          "CPUSeconds": 28.509903,
+          "Goroutines": 6254,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 4,
+          "BusyControlFailed": 6,
+          "IdleControlOK": 9,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 44,
+          "ControlOK": 13,
+          "ControlFailed": 6,
+          "AcceptedBytes": 98271232,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 74886063
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 11,
+      "ElapsedSeconds": 0.333067042,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 100,
+        "Accounted": 318638080,
+        "Heap": 206219360,
+        "GoManaged": 267069768,
+        "RSSKiB": 278224,
+        "PeakRSSBytes": 284901376,
+        "CPUSeconds": 29.07678,
+        "Goroutines": 3243,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 171068824,
+          "GoManaged": 278382936,
+          "RSSKiB": 335840,
+          "PeakRSSBytes": 343900160,
+          "CPUSeconds": 28.611016,
+          "Goroutines": 6256,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 4,
+          "BusyControlFailed": 6,
+          "IdleControlOK": 10,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": false,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 0,
+          "SlowWrites": 44,
+          "ControlOK": 14,
+          "ControlFailed": 6,
+          "AcceptedBytes": 98271232,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 74886063
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "slow-readers-sample",
+      "Target": 12,
+      "ElapsedSeconds": 0.331855542,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 100,
+        "Accounted": 318638080,
+        "Heap": 206448728,
+        "GoManaged": 267069768,
+        "RSSKiB": 278240,
+        "PeakRSSBytes": 284917760,
+        "CPUSeconds": 29.164248,
+        "Goroutines": 3241,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 171633784,
+          "GoManaged": 278382936,
+          "RSSKiB": 335840,
+          "PeakRSSBytes": 343900160,
+          "CPUSeconds": 28.734106,
+          "Goroutines": 6152,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 4,
+          "BusyControlFailed": 8,
+          "IdleControlOK": 11,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": true,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 48,
+          "SlowWrites": 92,
+          "ControlOK": 15,
+          "ControlFailed": 8,
+          "AcceptedBytes": 98728277,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 74886063
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "churn-close",
+      "Target": 8,
+      "ElapsedSeconds": 0.335147417,
+      "Relay": {
+        "Connections": 113,
+        "Streams": 76,
+        "Accounted": 297535488,
+        "Heap": 206718984,
+        "GoManaged": 267069768,
+        "RSSKiB": 278320,
+        "PeakRSSBytes": 284999680,
+        "CPUSeconds": 29.212259,
+        "Goroutines": 3001,
+        "Blocked": {
+          "block_reserve_memory:system": 11
+        }
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 113,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 172001952,
+          "GoManaged": 278382936,
+          "RSSKiB": 335856,
+          "PeakRSSBytes": 343916544,
+          "CPUSeconds": 28.789026,
+          "Goroutines": 5728,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 4,
+          "BusyControlFailed": 8,
+          "IdleControlOK": 11,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": true,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 48,
+          "SlowWrites": 92,
+          "ControlOK": 15,
+          "ControlFailed": 8,
+          "AcceptedBytes": 98728277,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 74886063
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "churn-replace",
+      "Target": 128,
+      "ElapsedSeconds": 3.386350375,
+      "Relay": {
+        "Connections": 121,
+        "Streams": 64,
+        "Accounted": 318564352,
+        "Heap": 116201512,
+        "GoManaged": 232515912,
+        "RSSKiB": 278560,
+        "PeakRSSBytes": 285245440,
+        "CPUSeconds": 30.775312,
+        "Goroutines": 3182,
+        "Blocked": {
+          "block_reserve_memory:system": 21
+        }
+      },
+      "Clients": {
+        "OK": 8,
+        "Failed": 1,
+        "Error": "failed to dial: context deadline exceeded",
+        "Sample": {
+          "Connections": 121,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 140106104,
+          "GoManaged": 277498200,
+          "RSSKiB": 336000,
+          "PeakRSSBytes": 344064000,
+          "CPUSeconds": 29.699494,
+          "Goroutines": 6129,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 4,
+          "BusyControlFailed": 8,
+          "IdleControlOK": 11,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": true,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 48,
+          "SlowWrites": 92,
+          "ControlOK": 15,
+          "ControlFailed": 8,
+          "AcceptedBytes": 98728277,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 78436714
+        }
+      }
+    },
+    {
+      "Transport": "webrtc",
+      "Phase": "cleanup",
+      "Target": 0,
+      "ElapsedSeconds": 0.345678708,
+      "Relay": {
+        "Connections": 0,
+        "Streams": 0,
+        "Accounted": 0,
+        "Heap": 117310176,
+        "GoManaged": 232515912,
+        "RSSKiB": 278560,
+        "PeakRSSBytes": 285245440,
+        "CPUSeconds": 30.827063,
+        "Goroutines": 29,
+        "Blocked": {
+          "block_reserve_memory:system": 21
+        }
+      },
+      "Clients": {
+        "OK": 0,
+        "Failed": 0,
+        "Error": "",
+        "Sample": {
+          "Connections": 0,
+          "Streams": 0,
+          "Accounted": 0,
+          "Heap": 158040656,
+          "GoManaged": 281520472,
+          "RSSKiB": 336000,
+          "PeakRSSBytes": 344064000,
+          "CPUSeconds": 30.420212,
+          "Goroutines": 3,
+          "Blocked": {}
+        },
+        "Work": {
+          "BusyControlOK": 4,
+          "BusyControlFailed": 8,
+          "IdleControlOK": 11,
+          "IdleControlFailed": 0,
+          "Kind": "slow-readers",
+          "Done": true,
+          "Opened": 64,
+          "OpenFailed": 0,
+          "IOFailed": 0,
+          "DeadlineWrites": 48,
+          "SlowWrites": 92,
+          "ControlOK": 15,
+          "ControlFailed": 8,
+          "AcceptedBytes": 98728277,
+          "VerifiedEchoBytes": 0,
+          "DestinationReadBytes": 92257616
+        }
+      }
+    }
+  ]
+}
