@@ -1,0 +1,509 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "phase": {
+          "enum": [
+            "stopped",
+            "migrating",
+            "serving"
+          ]
+        },
+        "expectedSchema": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "phase",
+        "expectedSchema",
+        "runId"
+      ]
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$"
+        },
+        "pullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          }
+        }
+      },
+      "required": [
+        "repository",
+        "digest",
+        "pullSecrets"
+      ]
+    },
+    "public": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "portalOrigin": {
+          "type": "string",
+          "pattern": "^https://[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$",
+          "maxLength": 261
+        },
+        "wssHostname": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$",
+          "maxLength": 253
+        },
+        "portalTLSSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "wssTLSSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "ingressClass": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        }
+      },
+      "required": [
+        "portalOrigin",
+        "wssHostname",
+        "portalTLSSecret",
+        "wssTLSSecret",
+        "ingressClass"
+      ]
+    },
+    "clients": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "androidRedirect": {
+          "type": "string",
+          "pattern": ".+"
+        },
+        "extensionRedirect": {
+          "type": "string",
+          "pattern": "^https://[a-p]{32}\\.chromiumapp\\.org/clipp-relay$"
+        }
+      },
+      "required": [
+        "androidRedirect",
+        "extensionRedirect"
+      ]
+    },
+    "listeners": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "portalPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "privatePort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "tcpPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "wssPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "udpPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "portalPort",
+        "privatePort",
+        "tcpPort",
+        "wssPort",
+        "udpPort"
+      ]
+    },
+    "transports": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tcp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "publicPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "addresses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "enabled",
+            "publicPort",
+            "addresses"
+          ]
+        },
+        "wss": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "addresses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "enabled",
+            "addresses"
+          ]
+        },
+        "udp": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "publicPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "addresses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "enabled",
+            "publicPort",
+            "addresses"
+          ]
+        }
+      },
+      "required": [
+        "tcp",
+        "wss",
+        "udp"
+      ]
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "external",
+            "bundled",
+            ""
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "external": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+              "maxLength": 253
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          },
+          "required": [
+            "host",
+            "port"
+          ]
+        },
+        "servingSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "migrationSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "caSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "caKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "maxLength": 253
+        }
+      },
+      "required": [
+        "mode",
+        "name",
+        "external",
+        "servingSecret",
+        "migrationSecret",
+        "caSecret",
+        "caKey"
+      ]
+    },
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "googleSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "adminSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "pepperSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "journalSecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        }
+      },
+      "required": [
+        "googleSecret",
+        "adminSecret",
+        "pepperSecret",
+        "journalSecret"
+      ]
+    },
+    "journal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "region": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "bucket": {
+          "type": "string"
+        },
+        "repositoryId": {
+          "type": "string"
+        },
+        "coverageFloor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coverageHash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$|^$"
+        },
+        "tenancyOcid": {
+          "type": "string"
+        },
+        "userOcid": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "region",
+        "namespace",
+        "bucket",
+        "repositoryId",
+        "coverageFloor",
+        "coverageHash",
+        "tenancyOcid",
+        "userOcid",
+        "fingerprint"
+      ]
+    },
+    "oci": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "subnetOcid": {
+          "type": "string"
+        },
+        "frontendNsgOcid": {
+          "type": "string"
+        },
+        "backendNsgOcid": {
+          "type": "string"
+        },
+        "tcpReservedIp": {
+          "type": "string"
+        },
+        "udpReservedIp": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subnetOcid",
+        "frontendNsgOcid",
+        "backendNsgOcid",
+        "tcpReservedIp",
+        "udpReservedIp"
+      ]
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "publicCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ingressNamespaceSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "ingressPodSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "operationsCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "databaseCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "apiCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dnsNamespaceSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "dnsPodSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "httpsCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "publicCidrs",
+        "ingressNamespaceSelector",
+        "ingressPodSelector",
+        "operationsCidrs",
+        "databaseCidrs",
+        "apiCidrs",
+        "dnsNamespaceSelector",
+        "dnsPodSelector",
+        "httpsCidrs"
+      ]
+    },
+    "scheduling": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "required": [
+        "nodeSelector",
+        "tolerations"
+      ]
+    }
+  },
+  "required": [
+    "deployment",
+    "image",
+    "public",
+    "clients",
+    "listeners",
+    "transports",
+    "database",
+    "credentials",
+    "journal",
+    "oci",
+    "networkPolicy",
+    "scheduling"
+  ],
+  "$schema": "https://json-schema.org/draft-07/schema#"
+}

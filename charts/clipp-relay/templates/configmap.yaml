@@ -1,0 +1,24 @@
+{{- $v := .Values -}}
+{{- $config := dict
+      "version" 1
+      "portal_origin" $v.public.portalOrigin
+      "wss_hostname" $v.public.wssHostname
+      "public_clients" (dict "android_redirect" $v.clients.androidRedirect "extension_redirect" $v.clients.extensionRedirect)
+      "listeners" (dict "public" (printf ":%d" (int $v.listeners.portalPort)) "private" (printf ":%d" (int $v.listeners.privatePort)))
+      "relay_tcp" (dict "listen" (ternary (printf "/ip4/0.0.0.0/tcp/%d" (int $v.listeners.tcpPort)) "" $v.transports.tcp.enabled) "public_port" (ternary (int $v.transports.tcp.publicPort) 0 (and $v.transports.tcp.enabled (eq (len $v.transports.tcp.addresses) 0))) "public_addresses" $v.transports.tcp.addresses)
+      "relay_websocket" (dict "listen" (ternary (printf "/ip4/0.0.0.0/tcp/%d/ws" (int $v.listeners.wssPort)) "" $v.transports.wss.enabled) "public_addresses" $v.transports.wss.addresses)
+      "relay_webrtc_direct" (dict "listen" (ternary (printf "/ip4/0.0.0.0/udp/%d/webrtc-direct" (int $v.listeners.udpPort)) "" $v.transports.udp.enabled) "public_port" (ternary (int $v.transports.udp.publicPort) 0 (and $v.transports.udp.enabled (eq (len $v.transports.udp.addresses) 0))) "public_addresses" $v.transports.udp.addresses)
+      "relay_services" (dict "namespace" .Release.Namespace "tcp_name" (printf "%s-tcp" (include "clipp.name" .)) "udp_name" (printf "%s-udp" (include "clipp.name" .)) "token_file" "/var/run/secrets/kubernetes.io/serviceaccount/token" "ca_file" "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+      "database" (dict "mode" "external" "host" $v.database.external.host "port" (int $v.database.external.port) "name" $v.database.name "username_file" "/run/secrets/db/username" "password_file" "/run/secrets/db/password" "ca_file" "/run/secrets/db-ca/ca.crt")
+      "journal" (dict "region" $v.journal.region "namespace" $v.journal.namespace "bucket" $v.journal.bucket "repository_id" $v.journal.repositoryId "coverage_floor" (int64 $v.journal.coverageFloor) "coverage_hash" $v.journal.coverageHash "tenancy_ocid" $v.journal.tenancyOcid "user_ocid" $v.journal.userOcid "fingerprint" $v.journal.fingerprint "private_key_file" "/run/secrets/journal/api-signing-key.pem")
+      "secrets" (dict "google_client_id_file" "/run/secrets/google/client-id" "google_client_secret_file" "/run/secrets/google/client-secret" "admin_allowlist_file" "/run/secrets/admin/allowlist.json" "pepper_keyring_file" "/run/secrets/peppers/keyring.json") -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "clipp.name" . }}-config
+  labels:
+    app.kubernetes.io/name: clipp-relay
+data:
+  config.json: |
+
+    {{ $config | toJson }}

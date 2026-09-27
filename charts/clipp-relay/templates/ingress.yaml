@@ -1,0 +1,47 @@
+{{- $v := .Values -}}
+{{- $name := include "clipp.name" . -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}-portal
+spec:
+  ingressClassName: {{ $v.public.ingressClass | quote }}
+  tls:
+    - hosts: [{{ trimPrefix "https://" $v.public.portalOrigin | quote }}]
+      secretName: {{ $v.public.portalTLSSecret | quote }}
+  rules:
+    - host: {{ trimPrefix "https://" $v.public.portalOrigin | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}-portal
+                port: {name: http}
+{{- if $v.transports.wss.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}-wss
+  annotations:
+    nginx.org/websocket-services: {{ $name }}-wss
+    nginx.org/proxy-read-timeout: "3600s"
+    nginx.org/proxy-send-timeout: "3600s"
+spec:
+  ingressClassName: {{ $v.public.ingressClass | quote }}
+  tls:
+    - hosts: [{{ $v.public.wssHostname | quote }}]
+      secretName: {{ $v.public.wssTLSSecret | quote }}
+  rules:
+    - host: {{ $v.public.wssHostname | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}-wss
+                port: {name: http}
+{{- end }}

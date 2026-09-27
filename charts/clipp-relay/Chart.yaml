@@ -1,0 +1,5 @@
+apiVersion: v2
+name: clipp-relay
+version: 0.1.0
+appVersion: "1"
+description: Isolated single-process Clipp relay using an operator-owned PostgreSQL database

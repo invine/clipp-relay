@@ -1,0 +1,80 @@
+deployment:
+  phase: stopped
+  expectedSchema: 8
+  runId: ""
+image:
+  repository: ""
+  digest: ""
+  pullSecrets: []
+public:
+  portalOrigin: ""
+  wssHostname: ""
+  portalTLSSecret: ""
+  wssTLSSecret: ""
+  ingressClass: ""
+clients:
+  androidRedirect: ""
+  extensionRedirect: ""
+listeners:
+  portalPort: 8080
+  privatePort: 8081
+  tcpPort: 4001
+  wssPort: 4002
+  udpPort: 4003
+transports:
+  tcp:
+    enabled: true
+    publicPort: 4001
+    addresses: []
+  wss:
+    enabled: true
+    addresses: []
+  udp:
+    enabled: true
+    publicPort: 4003
+    addresses: []
+database:
+  mode: ""
+  name: ""
+  external:
+    host: ""
+    port: 5432
+  servingSecret: ""
+  migrationSecret: ""
+  caSecret: ""
+  caKey: ca.crt
+credentials:
+  googleSecret: ""
+  adminSecret: ""
+  pepperSecret: ""
+  journalSecret: ""
+journal:
+  region: ""
+  namespace: ""
+  bucket: ""
+  repositoryId: ""
+  coverageFloor: 0
+  coverageHash: ""
+  tenancyOcid: ""
+  userOcid: ""
+  fingerprint: ""
+oci:
+  subnetOcid: ""
+  frontendNsgOcid: ""
+  backendNsgOcid: ""
+  tcpReservedIp: ""
+  udpReservedIp: ""
+networkPolicy:
+  publicCidrs: []
+  ingressNamespaceSelector: {}
+  ingressPodSelector: {}
+  operationsCidrs: []
+  databaseCidrs: []
+  apiCidrs: []
+  dnsNamespaceSelector: {}
+  dnsPodSelector: {}
+  httpsCidrs: []
+scheduling:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  tolerations: []

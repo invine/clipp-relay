@@ -1,0 +1,36 @@
+# Isolated external PostgreSQL relay
+
+This chart is installation scaffolding for one ephemeral Relay Network Slot. It consumes an existing namespace, Secrets, F5 NGINX Ingress Controller, DNS/TLS, OCI VCN/NSG/subnet inputs, and PostgreSQL 17 or 18. The example uses placeholder names and OCIDs; it is not a deployable environment. No Secret data is stored in chart values or rendered resources.
+
+## Values and rendered contract
+
+`examples/external-values.yaml` is the full external-mode example. Replace the registry digest with an immutable Linux ARM64 or AMD64 Go-only image containing the embedded portal, and provide the exact public client registrations and attested journal head. The chart checks value shape, required references, distinct hosts and ports, the expected application schema revision, and transport conflicts. The Go process revalidates the versioned non-secret `config.json`, uses PostgreSQL `verify-full`, refuses unsupported major/schema or DDL-capable serving credentials, and never migrates while serving. Database credentials are projected as individual `username`/`password` keys; the serving Pod never mounts the migration Secret. Admin allowlist and other live files use normal Secret volumes, not `subPath`.
+
+The StatefulSet is one replica in `serving`, zero in `stopped` or `migrating`; its `OnDelete` strategy prevents an unreviewed replacement. The network-slot Services, exact-host F5 Ingresses, watch Role, and NetworkPolicy remain across maintenance. WSS has its own backend and process listener, which has no portal routes. Its F5 proxy read/send interval is 3600s, longer than the 30m reservation and 15m Relay Session lifetimes; each timeout measures silence between I/O operations. The operator must confirm the installed F5 version honors these annotations and prove under live pressure that valid sessions are not evicted by ingress idle handling. Local render cannot prove that behavior. TCP and UDP have separate OCI NLB Services, direct Pod selector and no NodePorts. Both use `/readyz` on the private listener as their HTTP health check and explicitly disable instant failover. The private operations port has no public Service or Ingress. The chart creates no PVC, HPA, PDB, Secret, cert-manager issuer, namespace, or cluster role.
+
+The `migrating` phase intentionally renders zero serving replicas and no migration Job. The safe migration orchestration and old-Pod absence verifier belong to ticket 24. An operator must prove the previous Pod has terminated or fence an uncertain node before running the existing `clipp-relay -command migrate` binary with the distinct migration Secret. The command uses the same `config.json` file and exact image digest. A completed migration against the intended target and schema is required before `serving`; a stale Argo Healthy state is insufficient. No automatic schema changes occur on chart sync.
+
+The NetworkPolicy denies other ingress and egress. It permits public data ports, portal/WSS only from the selected ingress Pods, operations from approved CIDRs, and egress to PostgreSQL, API, selected DNS Pods and public HTTPS. The broad HTTPS CIDR is necessary for Google/OCI endpoints but is not a domain firewall; application clients enforce endpoint/redirect restrictions. Operators must verify that their CNI actually enforces these policies, including NAT and host-network paths. Configure the selected ingress controller to overwrite and sanitize proxy metadata, permit only intended methods/routes, and keep F5 access logs from collecting credentials or tokens. The chart does not install controllers or alter controller-wide logging.
+
+## Local proof and preflight
+
+```sh
+bash scripts/test-chart.sh
+bash scripts/preflight-external.sh charts/clipp-relay/examples/external-values.yaml isolated clipp-isolated
+GOPROXY=off GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...
+```
+
+The preflight makes no cluster changes. Without a context it reports required external checks as pending. Any optional `kubectl` inspection only reads namespace, named Secret metadata and IngressClass. It does not read Secret data. It does not imply that TLS, IAM, network policy, F5, OCI, database roles, node limits or traffic behavior have been proven.
+
+## Authorized isolated installation procedure
+
+1. Obtain explicit authorization for an isolated target and record the exact cluster context, namespace, chart Git commit, image digest, database endpoint/major/name, schema revision, role names, trust CA, journal head and operator-owned resource inventory. This ticket does not authorize any cluster installation.
+2. Verify existing namespace, versioned Secrets, F5 class/TLS and exact DNS hosts, OCI subnet/NSG rules, VCN-native Pod backend support, ingress metadata trust, CNI policy enforcement, node ARM64/AMD64 capacity and process soft nofile at least 16,384. Confirm database SCRAM and full chain/hostname verification. Refuse plaintext, wrong CA/hostname, DDL-capable serving role or wrong schema.
+3. Render all three phases and run the non-mutating preflight. Inspect the manifests and existing resources; do not create missing infrastructure from the chart. Start with `stopped` and verify the old process is absent or the node is fenced.
+4. Provision database roles and schema with operator-owned procedures. Run the separate migration identity only after absence is verified. Check the resulting exact revision and checksums. Do not rely on the `migrating` phase alone as an absence fence.
+5. Select `serving` only after the intended image/database/schema/journal and monitoring prerequisites are verified. Use manual full Argo sync with `PruneLast=true`, no automatic self-heal, Force, Replace or selective maintenance sync. Delete the old zero-replica Pod only as an explicitly reviewed rollout step when `OnDelete` prevents replacement.
+6. From actual external clients, test exact HTTPS portal/discovery, WSS, TCP and WebRTC Direct; inspect NLB readyz health, publication order, private operations pressure limits, normal drain, NetworkPolicy enforcement and wrong CA/hostname rejection. Rendering cannot establish these outcomes. Do not open public traffic before all release gates.
+
+For uninstall, first stop serving and verify termination or fence. Inspect Argo prune and Kubernetes deletion plans, retain operator-owned namespace, Secrets, issuers, NSGs, DNS, PostgreSQL and journal, and preserve stable routing resources until the network slot has drained. A release rename or database-mode change requires a deliberate data handoff, never an empty target fallback. Do not delete the database or repurpose a Secret name as a shortcut.
+
+The Argo example pins a full illustrative Git SHA that must be replaced with the approved commit containing this chart. It has no automated sync. The example does not authorize applying the Application.

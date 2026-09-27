@@ -1,0 +1,126 @@
+{{- $v := .Values -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "clipp.name" . }}
+spec:
+  serviceName: {{ include "clipp.name" . }}-headless
+  replicas: {{ ternary 1 0 (eq $v.deployment.phase "serving") }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: clipp-relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/name: clipp-relay
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "clipp.name" . }}
+      automountServiceAccountToken: {{ or (eq (include "clipp.watchTCP" .) "true") (eq (include "clipp.watchUDP" .) "true") }}
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $v.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      nodeSelector:
+        {{- toYaml $v.scheduling.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml $v.scheduling.tolerations | nindent 8 }}
+      containers:
+        - name: relay
+          image: {{ printf "%s@%s" $v.image.repository $v.image.digest | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["-command", "serve", "-config", "/etc/clipp/config.json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+              ephemeral-storage: 128Mi
+          ports:
+            - {name: portal, containerPort: {{ $v.listeners.portalPort }}, protocol: TCP}
+            - {name: private, containerPort: {{ $v.listeners.privatePort }}, protocol: TCP}
+            {{- if $v.transports.tcp.enabled }}
+            - {name: tcp, containerPort: {{ $v.listeners.tcpPort }}, protocol: TCP}
+            {{- end }}
+            {{- if $v.transports.wss.enabled }}
+            - {name: wss, containerPort: {{ $v.listeners.wssPort }}, protocol: TCP}
+            {{- end }}
+            {{- if $v.transports.udp.enabled }}
+            - {name: udp, containerPort: {{ $v.listeners.udpPort }}, protocol: UDP}
+            {{- end }}
+          startupProbe:
+            httpGet: {path: /readyz, port: private}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 120
+          readinessProbe:
+            httpGet: {path: /readyz, port: private}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 1
+            successThreshold: 1
+          livenessProbe:
+            httpGet: {path: /livez, port: private}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - {name: config, mountPath: /etc/clipp, readOnly: true}
+            - {name: db, mountPath: /run/secrets/db, readOnly: true}
+            - {name: db-ca, mountPath: /run/secrets/db-ca, readOnly: true}
+            - {name: google, mountPath: /run/secrets/google, readOnly: true}
+            - {name: admin, mountPath: /run/secrets/admin, readOnly: true}
+            - {name: peppers, mountPath: /run/secrets/peppers, readOnly: true}
+            - {name: journal, mountPath: /run/secrets/journal, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "clipp.name" . }}-config
+            items: [{key: config.json, path: config.json}]
+        - name: db
+          secret:
+            secretName: {{ $v.database.servingSecret | quote }}
+            items: [{key: username, path: username}, {key: password, path: password}]
+        - name: db-ca
+          secret:
+            secretName: {{ $v.database.caSecret | quote }}
+            items: [{key: {{ $v.database.caKey | quote }}, path: ca.crt}]
+        - name: google
+          secret:
+            secretName: {{ $v.credentials.googleSecret | quote }}
+            items: [{key: client-id, path: client-id}, {key: client-secret, path: client-secret}]
+        - name: admin
+          secret:
+            secretName: {{ $v.credentials.adminSecret | quote }}
+            items: [{key: allowlist.json, path: allowlist.json}]
+        - name: peppers
+          secret:
+            secretName: {{ $v.credentials.pepperSecret | quote }}
+            items: [{key: keyring.json, path: keyring.json}]
+        - name: journal
+          secret:
+            secretName: {{ $v.credentials.journalSecret | quote }}
+            items: [{key: api-signing-key.pem, path: api-signing-key.pem}]

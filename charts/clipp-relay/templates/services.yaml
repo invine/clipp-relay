@@ -1,0 +1,69 @@
+{{- $v := .Values -}}
+{{- $name := include "clipp.name" . -}}
+{{- $selector := dict "statefulset.kubernetes.io/pod-name" (printf "%s-0" $name) -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-headless
+spec:
+  clusterIP: None
+  selector: {{ $selector | toJson }}
+  ports:
+    - {name: portal, port: {{ $v.listeners.portalPort }}, targetPort: portal}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-portal
+spec:
+  type: ClusterIP
+  selector: {{ $selector | toJson }}
+  ports:
+    - {name: http, port: {{ $v.listeners.portalPort }}, targetPort: portal}
+{{- if $v.transports.wss.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-wss
+  annotations:
+    nginx.org/websocket-services: {{ $name }}-wss
+spec:
+  type: ClusterIP
+  selector: {{ $selector | toJson }}
+  ports:
+    - {name: http, port: {{ $v.listeners.wssPort }}, targetPort: wss}
+{{- end }}
+{{- range $kind, $transport := dict "tcp" $v.transports.tcp "udp" $v.transports.udp }}
+{{- if $transport.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-{{ $kind }}
+  annotations:
+    oci.oraclecloud.com/load-balancer-type: "nlb"
+    oci-network-load-balancer.oraclecloud.com/external-ip-only: "true"
+    oci-network-load-balancer.oraclecloud.com/is-instant-failover-enabled: "false"
+    oci-network-load-balancer.oraclecloud.com/health-check: {{ dict "protocol" "HTTP" "port" (int $v.listeners.privatePort) "urlPath" "/readyz" "returnCode" 200 | toJson | quote }}
+    oci.oraclecloud.com/security-rule-management-mode: "NSG"
+    oci.oraclecloud.com/oci-backend-network-security-group: {{ $v.oci.backendNsgOcid | quote }}
+    oci-network-load-balancer.oraclecloud.com/oci-network-security-groups: {{ $v.oci.frontendNsgOcid | quote }}
+    oci-network-load-balancer.oraclecloud.com/subnet: {{ $v.oci.subnetOcid | quote }}
+    {{- if eq $kind "tcp" }}{{- with $v.oci.tcpReservedIp }}
+    oci.oraclecloud.com/reserved-ips: {{ . | quote }}
+    {{- end }}{{- else }}{{- with $v.oci.udpReservedIp }}
+    oci.oraclecloud.com/reserved-ips: {{ . | quote }}
+    {{- end }}{{- end }}
+spec:
+  type: LoadBalancer
+  allocateLoadBalancerNodePorts: false
+  externalTrafficPolicy: Cluster
+  selector: {{ $selector | toJson }}
+  ports:
+    - name: {{ $kind }}
+      port: {{ $transport.publicPort }}
+      targetPort: {{ $kind }}
+      protocol: {{ upper $kind }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,72 @@
+{{- $v := .Values -}}
+{{- $selector := dict "app.kubernetes.io/name" "clipp-relay" "app.kubernetes.io/instance" .Release.Name -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "clipp.name" . }}
+spec:
+  podSelector:
+    matchLabels: {{ $selector | toJson }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- if $v.transports.tcp.enabled }}
+    - from:
+        {{- range $v.networkPolicy.publicCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: {{ $v.listeners.tcpPort }}}
+    {{- end }}
+    {{- if $v.transports.udp.enabled }}
+    - from:
+        {{- range $v.networkPolicy.publicCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: UDP, port: {{ $v.listeners.udpPort }}}
+    {{- end }}
+    - from:
+        - namespaceSelector:
+            matchLabels: {{ $v.networkPolicy.ingressNamespaceSelector | toJson }}
+          podSelector:
+            matchLabels: {{ $v.networkPolicy.ingressPodSelector | toJson }}
+      ports:
+        - {protocol: TCP, port: {{ $v.listeners.portalPort }}}
+        {{- if $v.transports.wss.enabled }}
+        - {protocol: TCP, port: {{ $v.listeners.wssPort }}}
+        {{- end }}
+    - from:
+        {{- range $v.networkPolicy.operationsCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: {{ $v.listeners.privatePort }}}
+  egress:
+    - to:
+        {{- range $v.networkPolicy.databaseCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: {{ $v.database.external.port }}}
+    {{- if or (eq (include "clipp.watchTCP" .) "true") (eq (include "clipp.watchUDP" .) "true") }}
+    - to:
+        {{- range $v.networkPolicy.apiCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 443}
+    {{- end }}
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ $v.networkPolicy.dnsNamespaceSelector | toJson }}
+          podSelector:
+            matchLabels: {{ $v.networkPolicy.dnsPodSelector | toJson }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        {{- range $v.networkPolicy.httpsCidrs }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 443}
