@@ -4,7 +4,7 @@
 
 **Blocked by:** [09: Revoke access and change live quotas](09-revoke-access-and-change-live-quotas.md).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I3, I5, I6, I10, I11.
@@ -55,3 +55,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Claimed centrally on 2026-09-27 after ticket 09 resolution (`9861d10`); assigned to a fresh isolated Go implementation agent. External OCI journal qualification requires operator-provided repository identity and coverage floor; local implementation and test work can proceed while those inputs are unavailable. Resolution awaits integration review and acceptance evidence.
