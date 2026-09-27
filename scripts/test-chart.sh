@@ -25,6 +25,7 @@ ruby scripts/assert-chart-render.rb "$work/serving.yaml" "$work/stopped.yaml"
 grep -q 'kind: Service' "$work/stopped.yaml"
 ! grep -q 'kind: Job' "$work/stopped.yaml"
 
+long_label=$(printf 'a%.0s' {1..64})
 for override in \
   'database.mode=bundled' \
   'public.wssHostname=portal.example.test' \
@@ -40,7 +41,11 @@ for override in \
   'database.servingSecret=bad/name' \
   'database.migrationSecret=bad/name' \
   'database.caSecret=bad/name' \
-  'database.caKey=bad/key'; do
+  'database.caKey=bad/key' \
+  "public.portalOrigin=https://$long_label.example.test" \
+  "public.wssHostname=$long_label.example.test" \
+  "database.external.host=$long_label.example.test" \
+  "database.servingSecret=$long_label"; do
   if helm template isolated "$chart" -n clipp-isolated -f "$example" --set "$override" > "$work/invalid.yaml" 2>&1; then
     echo "invalid chart setting accepted: $override" >&2
     exit 1
