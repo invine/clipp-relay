@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
 	"clipp-relay/internal/service"
@@ -66,7 +67,11 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("service starting", "schema_revision", database.ExpectedRevision)
-	if err = service.New().Run(ctx, c.Listeners.Public, c.Listeners.Private); err != nil {
+	srv := service.New()
+	portal := auth.New(pool, c, material, auth.Google())
+	srv.SetPublicHandler(portal.Handler())
+	go portal.Maintain(ctx)
+	if err = srv.Run(ctx, c.Listeners.Public, c.Listeners.Private); err != nil {
 		logger.Error("service stopped", "reason", "listener failure")
 		os.Exit(1)
 	}

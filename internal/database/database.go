@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 1
+const ExpectedRevision = 3
 
 type migration struct {
 	revision int
@@ -27,7 +27,53 @@ var migrations = []migration{{1, `CREATE TABLE public.schema_migrations (
  revision integer PRIMARY KEY CHECK (revision > 0),
  checksum text NOT NULL CHECK (length(checksum) = 64),
  applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
-)`}}
+)`}, {2, `CREATE TABLE public.accounts (
+ id uuid PRIMARY KEY,
+ issuer text NOT NULL CHECK (issuer = 'https://accounts.google.com'),
+ subject text NOT NULL CHECK (length(subject) BETWEEN 1 AND 255),
+ email text NOT NULL CHECK (length(email) BETWEEN 1 AND 320),
+ email_verified boolean NOT NULL,
+ hosted_domain text CHECK (hosted_domain IS NULL OR length(hosted_domain) <= 255),
+ validated_at timestamptz NOT NULL,
+ created_at timestamptz NOT NULL,
+ last_portal_login_at timestamptz NOT NULL,
+ status text NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Active','Suspended','Denied')),
+ credential_generation bigint NOT NULL DEFAULT 0 CHECK (credential_generation >= 0),
+ UNIQUE (issuer,subject)
+);
+CREATE TABLE public.authorization_transactions (
+ id uuid PRIMARY KEY,
+ state_digest bytea NOT NULL UNIQUE CHECK (octet_length(state_digest)=32),
+ nonce_digest bytea NOT NULL CHECK (octet_length(nonce_digest)=32),
+ binding_digest bytea NOT NULL CHECK (octet_length(binding_digest)=32),
+ pepper_version bigint NOT NULL CHECK (pepper_version>0),
+ created_at timestamptz NOT NULL,
+ expires_at timestamptz NOT NULL,
+ claimed_at timestamptz
+);
+CREATE INDEX authorization_transactions_expiry ON public.authorization_transactions (expires_at);
+CREATE TABLE public.portal_sessions (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ pepper_version bigint NOT NULL CHECK (pepper_version>0),
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ credential_generation bigint NOT NULL,
+ csrf_digest bytea NOT NULL CHECK (octet_length(csrf_digest)=32),
+ google_authenticated_at timestamptz NOT NULL,
+ created_at timestamptz NOT NULL,
+ last_used_at timestamptz NOT NULL,
+ idle_expires_at timestamptz NOT NULL,
+ absolute_expires_at timestamptz NOT NULL
+);
+CREATE INDEX portal_sessions_account ON public.portal_sessions (account_id);
+CREATE INDEX portal_sessions_expiry ON public.portal_sessions (idle_expires_at,absolute_expires_at);
+CREATE TABLE public.audit_events (
+ id uuid PRIMARY KEY,
+ occurred_at timestamptz NOT NULL,
+ event text NOT NULL CHECK (event IN ('account_created')),
+ account_id uuid NOT NULL
+);
+CREATE INDEX audit_events_expiry ON public.audit_events (occurred_at);
+REVOKE ALL ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events FROM PUBLIC`}, {3, `CREATE INDEX portal_sessions_absolute_expiry ON public.portal_sessions (absolute_expires_at)`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

@@ -85,7 +85,7 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	}
 	defer p.Close()
 	// The fixture is intentionally disposable. Reset only this owned test table.
-	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.schema_migrations CASCADE"); e != nil {
+	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.schema_migrations CASCADE"); e != nil {
 		t.Fatal(e)
 	}
 	var wg sync.WaitGroup
@@ -153,7 +153,7 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	if _, e = sp.Exec(ctx, "CREATE TEMP TABLE serving_must_not_create_temp (id integer)"); e == nil {
 		t.Fatal("serving role unexpectedly has TEMP authority")
 	}
-	steps := append(append([]migration{}, migrations...), migration{2, "CREATE TABLE public.rollback_probe(id integer); SELECT 1/0"})
+	steps := append(append([]migration{}, migrations...), migration{4, "CREATE TABLE public.rollback_probe(id integer); SELECT 1/0"})
 	if e = migrate(ctx, p, steps); e == nil {
 		t.Fatal("failed migration reported success")
 	}
@@ -173,7 +173,7 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	if _, e = p.Exec(ctx, "UPDATE public.schema_migrations SET checksum=$1 WHERE revision=1", checksum(migrations[0].sql)); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = p.Exec(ctx, "INSERT INTO public.schema_migrations(revision,checksum) VALUES (2,repeat('0',64))"); e != nil {
+	if _, e = p.Exec(ctx, "INSERT INTO public.schema_migrations(revision,checksum) VALUES (4,repeat('0',64))"); e != nil {
 		t.Fatal(e)
 	}
 	if e = VerifyServing(ctx, sp); e == nil {

@@ -120,6 +120,7 @@ export GOCACHE="${GOCACHE:-/private/tmp/clipp-go-cache}"
 go build -o "$work/clipp-relay" ./cmd/clipp-relay
 migrate_when_ready "$work/migration.json"
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events TO clipp_serving' >/dev/null
 "$work/clipp-relay" -command serve -config "$work/serving.json" > "$work/service.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do
@@ -183,6 +184,9 @@ echo 'Inherited extension ownership rejection passed'
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'DROP EXTENSION clipp_ownership_probe; REVOKE clipp_extension_owner FROM clipp_serving; DROP ROLE clipp_extension_owner' >/dev/null
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
 echo 'PostgreSQL 18 integration tests passed'
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events TO clipp_serving' >/dev/null
+CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/auth
+echo 'PostgreSQL 18 OIDC browser integration tests passed'
 
 # Both supported majors must migrate and start with the same verified TLS policy.
 start_tls_pg "$supported_name" 17
@@ -197,6 +201,7 @@ sed "s/\"port\":$port/\"port\":$supported_port/" "$work/migration.json" > "$work
 sed "s/\"port\":$port/\"port\":$supported_port/" "$work/serving.json" > "$work/serving17.json"
 migrate_when_ready "$work/migration17.json"
 docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events TO clipp_serving' >/dev/null
 "$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/service17.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do

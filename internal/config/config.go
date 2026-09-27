@@ -42,6 +42,10 @@ type Config struct {
 type Material struct {
 	DBUsername, DBPassword string
 	DBRootCAs              *x509.CertPool
+	GoogleClientID         string
+	GoogleClientSecret     string
+	CurrentPepper          uint64
+	Peppers                map[uint64][]byte
 }
 
 func strictJSON(data []byte, target any) error {
@@ -232,10 +236,19 @@ func (c Config) ReadMaterial() (Material, error) {
 	if err != nil {
 		return m, err
 	}
-	for _, path := range []string{c.Secrets.GoogleClientIDFile, c.Secrets.GoogleClientSecretFile} {
-		if _, err = readSecret(path); err != nil {
-			return m, err
+	for i, path := range []string{c.Secrets.GoogleClientIDFile, c.Secrets.GoogleClientSecretFile} {
+		value, e := readSecret(path)
+		if e != nil {
+			return m, e
 		}
+		if i == 0 {
+			m.GoogleClientID = strings.TrimSuffix(string(value), "\n")
+		} else {
+			m.GoogleClientSecret = strings.TrimSuffix(string(value), "\n")
+		}
+	}
+	if m.GoogleClientID == "" || m.GoogleClientSecret == "" {
+		return m, errors.New("Google client material empty")
 	}
 	allow, err := readSecret(c.Secrets.AdminAllowlistFile)
 	if err != nil {
@@ -269,16 +282,19 @@ func (c Config) ReadMaterial() (Material, error) {
 	}
 	seen := map[uint64]bool{}
 	current := false
+	m.Peppers = map[uint64][]byte{}
 	for _, key := range ring.Keys {
 		b, e := base64.StdEncoding.DecodeString(key.Material)
 		if e != nil || len(b) < 32 || key.Version == 0 || seen[key.Version] {
 			return m, errors.New("invalid pepper keyring")
 		}
 		seen[key.Version] = true
+		m.Peppers[key.Version] = b
 		current = current || key.Version == ring.Current
 	}
 	if !current {
 		return m, errors.New("invalid pepper keyring")
 	}
+	m.CurrentPepper = ring.Current
 	return m, nil
 }
