@@ -39,6 +39,17 @@ func TestLoadRejectsConflictingDuplicateFields(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsCaseInsensitiveAliasKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"Version":2}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("load error = %v", err)
+	}
+}
+
 func TestLoadRejectsNoncanonicalOrigin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

@@ -72,17 +72,22 @@ func uniqueFields(dec *json.Decoder) error {
 		}
 		switch delim {
 		case '{':
-			seen := map[string]bool{}
+			seen := make([]string, 0)
 			for dec.More() {
 				keyToken, e := dec.Token()
 				if e != nil {
 					return e
 				}
 				key, ok := keyToken.(string)
-				if !ok || seen[key] {
+				if !ok {
 					return errors.New("duplicate field")
 				}
-				seen[key] = true
+				for _, prior := range seen {
+					if strings.EqualFold(prior, key) {
+						return errors.New("duplicate field")
+					}
+				}
+				seen = append(seen, key)
 				if e = visit(); e != nil {
 					return e
 				}

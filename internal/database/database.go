@@ -100,7 +100,49 @@ func VerifyServing(ctx context.Context, p *pgxpool.Pool) error {
 		return err
 	}
 	var privileged bool
-	err = conn.QueryRow(ctx, `SELECT r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR has_database_privilege(current_database(),'CREATE') OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND has_schema_privilege(oid,'CREATE')) FROM pg_roles r WHERE r.rolname=current_user`).Scan(&privileged)
+	err = conn.QueryRow(ctx, `
+SELECT
+  EXISTS (
+    SELECT 1 FROM pg_roles reachable
+    WHERE (reachable.rolname = current_user OR pg_has_role(reachable.oid, 'MEMBER'))
+      AND (
+        reachable.rolsuper OR reachable.rolcreatedb OR reachable.rolcreaterole
+        OR EXISTS (
+          SELECT 1 FROM pg_database db WHERE db.datname = current_database()
+            AND (has_database_privilege(reachable.oid, db.oid, 'CREATE')
+              OR has_database_privilege(reachable.oid, db.oid, 'TEMP'))
+        )
+        OR EXISTS (
+          SELECT 1 FROM pg_namespace ns
+          WHERE left(ns.nspname, 3) <> 'pg_' AND ns.nspname <> 'information_schema'
+            AND has_schema_privilege(reachable.oid, ns.oid, 'CREATE')
+        )
+      )
+  )
+  OR EXISTS (
+    SELECT 1 FROM pg_namespace ns
+    WHERE left(ns.nspname, 3) <> 'pg_' AND ns.nspname <> 'information_schema'
+      AND (ns.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        OR pg_has_role(ns.nspowner, 'MEMBER'))
+  )
+  OR EXISTS (
+    SELECT 1 FROM pg_class rel JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    WHERE left(ns.nspname, 3) <> 'pg_' AND ns.nspname <> 'information_schema'
+      AND (rel.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        OR pg_has_role(rel.relowner, 'MEMBER'))
+  )
+  OR EXISTS (
+    SELECT 1 FROM pg_proc routine JOIN pg_namespace ns ON ns.oid = routine.pronamespace
+    WHERE left(ns.nspname, 3) <> 'pg_' AND ns.nspname <> 'information_schema'
+      AND (routine.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        OR pg_has_role(routine.proowner, 'MEMBER'))
+  )
+  OR EXISTS (
+    SELECT 1 FROM pg_type typ JOIN pg_namespace ns ON ns.oid = typ.typnamespace
+    WHERE left(ns.nspname, 3) <> 'pg_' AND ns.nspname <> 'information_schema'
+      AND (typ.typowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        OR pg_has_role(typ.typowner, 'MEMBER'))
+  )`).Scan(&privileged)
 	if err != nil || privileged {
 		return errors.New("serving database role has DDL authority or cannot be verified")
 	}

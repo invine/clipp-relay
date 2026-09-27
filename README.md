@@ -14,7 +14,9 @@ Requires Go 1.27.1 or newer and PostgreSQL 17 or 18 with verified TLS and
 SCRAM-authenticated, separately provisioned roles. The migration identity
 needs CREATE on the target schema. The serving identity needs SELECT on
 `public.schema_migrations`, no persistent DDL authority, and an administrator
-set `temp_file_limit` of at most 64 MB. Bootstrap and role provisioning are
+set `temp_file_limit` of at most 64 MB. Revoke database `TEMPORARY` from PUBLIC
+and the serving role as well as schema CREATE; serving cannot own application
+objects or join an owning/DDL-capable role. Bootstrap and role provisioning are
 explicit operator steps; this binary never creates roles or databases.
 
 ```sh
@@ -67,11 +69,12 @@ identity labels.
 
 ## Local real-database check
 
-`bash scripts/smoke-postgres.sh` creates a disposable PostgreSQL 18 Docker
-container bound only to loopback, provisions TLS and distinct roles, migrates,
+`bash scripts/smoke-postgres.sh` creates disposable PostgreSQL 18 and 17 Docker
+containers bound only to loopback, provisions TLS and distinct roles, migrates,
 starts the process, checks health and public route isolation, stops PostgreSQL
-to check liveness, and runs the real SQL integration tests. It removes the
-container and temporary Secret files on exit. It does not use any existing
+to check liveness, and runs the real SQL integration tests. It also rejects a
+verified-TLS PostgreSQL 16 target. It removes only containers created by the
+script and all temporary Secret files on exit. It does not use any existing
 database or Docker volume.
 
 Other checks: `gofmt -l cmd internal`, `go vet ./...`, `go test ./...`.

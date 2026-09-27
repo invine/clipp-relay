@@ -150,6 +150,9 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	if _, e = sp.Exec(ctx, "CREATE TABLE public.serving_must_not_create (id integer)"); e == nil {
 		t.Fatal("serving role unexpectedly has DDL authority")
 	}
+	if _, e = sp.Exec(ctx, "CREATE TEMP TABLE serving_must_not_create_temp (id integer)"); e == nil {
+		t.Fatal("serving role unexpectedly has TEMP authority")
+	}
 	steps := append(append([]migration{}, migrations...), migration{2, "CREATE TABLE public.rollback_probe(id integer); SELECT 1/0"})
 	if e = migrate(ctx, p, steps); e == nil {
 		t.Fatal("failed migration reported success")

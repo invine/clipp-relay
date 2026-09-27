@@ -5,9 +5,83 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 name="clipp-ticket02-$$"
+supported_name="clipp-ticket02-supported17-$$"
 wrong_name="clipp-ticket02-wrong-major-$$"
-cleanup() { if [[ -n "${pid:-}" ]]; then kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; fi; docker rm -f "$name" "$wrong_name" >/dev/null 2>&1 || true; rm -rf "$work"; }
+created_ids=()
+cleanup() {
+  local status=$?
+  if ((status != 0)) && [[ -f "$work/service.log" ]]; then
+    echo 'service startup diagnostics:' >&2
+    cat "$work/service.log" >&2
+  fi
+  if [[ -n "${pid:-}" ]]; then kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; fi
+  if ((${#created_ids[@]})); then docker rm -f "${created_ids[@]}" >/dev/null 2>&1 || true; fi
+  rm -rf "$work"
+}
 trap cleanup EXIT
+
+wait_for_pg() {
+  local target=$1
+  for i in $(seq 1 60); do
+    if docker exec "$target" pg_isready -U postgres >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  docker exec "$target" pg_isready -U postgres >/dev/null
+}
+
+start_tls_pg() {
+  local target=$1 major=$2 created_id
+  created_id=$(docker create --name "$target" -e POSTGRES_PASSWORD="$admin_pass" -p 127.0.0.1::5432 "postgres:$major")
+  created_ids+=("$created_id")
+  docker start "$created_id" >/dev/null
+  wait_for_pg "$target"
+  docker cp "$work/server.crt" "$target:/var/lib/postgresql/server.crt"
+  docker cp "$work/server.key" "$target:/var/lib/postgresql/server.key"
+  docker exec -u root "$target" chown postgres:postgres /var/lib/postgresql/server.crt /var/lib/postgresql/server.key
+  docker exec -u root "$target" chmod 600 /var/lib/postgresql/server.key
+  docker exec -e PGPASSWORD="$admin_pass" "$target" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl = on" >/dev/null
+  docker exec -e PGPASSWORD="$admin_pass" "$target" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/server.crt'" >/dev/null
+  docker exec -e PGPASSWORD="$admin_pass" "$target" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/server.key'" >/dev/null
+  docker exec -u root "$target" sh -c 'printf "hostnossl all all all reject\nhostssl all all all scram-sha-256\n" > /tmp/clipp-hba; cat "$PGDATA/pg_hba.conf" >> /tmp/clipp-hba; cat /tmp/clipp-hba > "$PGDATA/pg_hba.conf"'
+  docker restart "$target" >/dev/null
+  wait_for_pg "$target"
+}
+
+expect_ddl_role_rejected() {
+  local label=$1 probe
+  "$work/clipp-relay" -command serve -config "$work/serving.json" > "$work/$label.log" 2>&1 &
+  probe=$!
+  for i in $(seq 1 10); do
+    if ! kill -0 "$probe" 2>/dev/null; then break; fi
+    sleep 1
+  done
+  if kill -0 "$probe" 2>/dev/null; then
+    kill "$probe"; wait "$probe" || true
+    echo "$label serving role was accepted" >&2
+    return 1
+  fi
+  if wait "$probe"; then
+    echo "$label serving role was accepted" >&2
+    return 1
+  fi
+  if ! grep -q 'serving database role has DDL authority' "$work/$label.log"; then
+    cat "$work/$label.log" >&2
+    return 1
+  fi
+}
+
+migrate_when_ready() {
+  local config_path=$1
+  for i in $(seq 1 30); do
+    if "$work/clipp-relay" -command migrate -config "$config_path" > "$work/migrate.log" 2>&1; then
+      cat "$work/migrate.log"
+      return 0
+    fi
+    sleep 1
+  done
+  cat "$work/migrate.log" >&2
+  return 1
+}
 
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=Clipp test CA' -keyout "$work/ca.key" -out "$work/ca.crt" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes -subj '/CN=localhost' -keyout "$work/server.key" -out "$work/server.csr" >/dev/null 2>&1
@@ -17,31 +91,13 @@ openssl x509 -req -in "$work/server.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key
 admin_pass=$(openssl rand -hex 24)
 migration_pass=$(openssl rand -hex 24)
 serving_pass=$(openssl rand -hex 24)
-docker run -d --name "$name" -e POSTGRES_PASSWORD="$admin_pass" -p 127.0.0.1::5432 postgres:18 >/dev/null
-for i in $(seq 1 60); do
-  if docker exec "$name" pg_isready -U postgres >/dev/null 2>&1; then break; fi
-  sleep 1
-done
-docker exec "$name" pg_isready -U postgres >/dev/null
-docker cp "$work/server.crt" "$name:/var/lib/postgresql/server.crt"
-docker cp "$work/server.key" "$name:/var/lib/postgresql/server.key"
-docker exec -u root "$name" chown postgres:postgres /var/lib/postgresql/server.crt /var/lib/postgresql/server.key
-docker exec -u root "$name" chmod 600 /var/lib/postgresql/server.key
-docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl = on" >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/server.crt'" >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/server.key'" >/dev/null
-docker exec -u root "$name" sh -c 'printf "hostnossl all all all reject\nhostssl all all all scram-sha-256\n" > /tmp/clipp-hba; cat "$PGDATA/pg_hba.conf" >> /tmp/clipp-hba; cat /tmp/clipp-hba > "$PGDATA/pg_hba.conf"'
-docker restart "$name" >/dev/null
-for i in $(seq 1 60); do
-  if docker exec "$name" pg_isready -U postgres >/dev/null 2>&1; then break; fi
-  sleep 1
-done
-docker exec "$name" pg_isready -U postgres >/dev/null
+start_tls_pg "$name" 18
 
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "CREATE ROLE clipp_migration LOGIN PASSWORD '$migration_pass'" >/dev/null
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "CREATE ROLE clipp_serving LOGIN PASSWORD '$serving_pass'" >/dev/null
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE clipp_serving SET temp_file_limit = '64MB'" >/dev/null
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "CREATE DATABASE clipp_ticket02_smoke" >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c "REVOKE TEMPORARY ON DATABASE clipp_ticket02_smoke FROM PUBLIC" >/dev/null
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c "ALTER SCHEMA public OWNER TO clipp_migration; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE ON SCHEMA public TO clipp_serving" >/dev/null
 if docker exec -e PGPASSWORD="$serving_pass" "$name" psql 'host=localhost port=5432 dbname=clipp_ticket02_smoke user=clipp_serving sslmode=disable' -c 'SELECT 1' > "$work/plaintext.log" 2>&1; then
   echo 'plaintext PostgreSQL unexpectedly accepted' >&2; exit 1
@@ -62,45 +118,66 @@ sed "s|migration-user|serving-user|;s|migration-pass|serving-pass|" "$work/migra
 
 export GOCACHE="${GOCACHE:-/private/tmp/clipp-go-cache}"
 go build -o "$work/clipp-relay" ./cmd/clipp-relay
-"$work/clipp-relay" -command migrate -config "$work/migration.json"
+migrate_when_ready "$work/migration.json"
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
 "$work/clipp-relay" -command serve -config "$work/serving.json" > "$work/service.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:18081/livez > "$work/livez"; then break; fi
+  if curl -fsS http://127.0.0.1:18081/livez > "$work/livez" 2>/dev/null; then break; fi
   sleep 1
 done
 test "$(cat "$work/livez")" = ok
+echo 'PostgreSQL 18 livez passed'
 test "$(curl -s -o "$work/readyz" -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 503
 test "$(cat "$work/readyz")" = unavailable
 test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/livez)" = 404
-docker stop "$name" >/dev/null
+echo 'PostgreSQL 18 health and public isolation passed'
+docker pause "$name" >/dev/null
 test "$(curl -s -o "$work/livez" -w '%{http_code}' http://127.0.0.1:18081/livez)" = 200
 test "$(curl -s -o "$work/readyz" -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 503
+echo 'PostgreSQL 18 outage health passed'
 kill "$pid"; wait "$pid" || true
 pid=
-docker start "$name" >/dev/null
-for i in $(seq 1 60); do
-  if docker exec "$name" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+docker unpause "$name" >/dev/null
+wait_for_pg "$name"
+migrate_when_ready "$work/migration.json"
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'ALTER TABLE public.schema_migrations OWNER TO clipp_serving' >/dev/null
+expect_ddl_role_rejected direct-owner
+echo 'Direct table ownership rejection passed'
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'ALTER TABLE public.schema_migrations OWNER TO clipp_migration' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'CREATE ROLE clipp_table_owner NOLOGIN; ALTER TABLE public.schema_migrations OWNER TO clipp_table_owner; GRANT clipp_table_owner TO clipp_serving' >/dev/null
+expect_ddl_role_rejected member-owner
+echo 'Inherited table ownership rejection passed'
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'ALTER TABLE public.schema_migrations OWNER TO clipp_migration; REVOKE clipp_table_owner FROM clipp_serving; DROP ROLE clipp_table_owner' >/dev/null
+CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
+echo 'PostgreSQL 18 integration tests passed'
+
+# Both supported majors must migrate and start with the same verified TLS policy.
+start_tls_pg "$supported_name" 17
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -c "CREATE ROLE clipp_migration LOGIN PASSWORD '$migration_pass'" >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -c "CREATE ROLE clipp_serving LOGIN PASSWORD '$serving_pass'" >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE clipp_serving SET temp_file_limit = '64MB'" >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -c 'CREATE DATABASE clipp_ticket02_smoke' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -c 'REVOKE TEMPORARY ON DATABASE clipp_ticket02_smoke FROM PUBLIC' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'ALTER SCHEMA public OWNER TO clipp_migration; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE ON SCHEMA public TO clipp_serving' >/dev/null
+supported_port=$(docker port "$supported_name" 5432/tcp | sed -n 's/.*://p')
+sed "s/\"port\":$port/\"port\":$supported_port/" "$work/migration.json" > "$work/migration17.json"
+sed "s/\"port\":$port/\"port\":$supported_port/" "$work/serving.json" > "$work/serving17.json"
+migrate_when_ready "$work/migration17.json"
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
+"$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/service17.log" 2>&1 &
+pid=$!
+for i in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:18081/livez > "$work/livez17" 2>/dev/null; then break; fi
   sleep 1
 done
-CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
+test "$(cat "$work/livez17")" = ok
+test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 503
+kill "$pid"; wait "$pid" || true
+pid=
 
-# A separate supported-TLS PostgreSQL 16 target must fail before migration.
-docker run -d --name "$wrong_name" -e POSTGRES_PASSWORD="$admin_pass" -p 127.0.0.1::5432 postgres:16 >/dev/null
-for i in $(seq 1 60); do if docker exec "$wrong_name" pg_isready -U postgres >/dev/null 2>&1; then break; fi; sleep 1; done
-docker exec "$wrong_name" pg_isready -U postgres >/dev/null
-docker cp "$work/server.crt" "$wrong_name:/var/lib/postgresql/server.crt"
-docker cp "$work/server.key" "$wrong_name:/var/lib/postgresql/server.key"
-docker exec -u root "$wrong_name" chown postgres:postgres /var/lib/postgresql/server.crt /var/lib/postgresql/server.key
-docker exec -u root "$wrong_name" chmod 600 /var/lib/postgresql/server.key
-docker exec -e PGPASSWORD="$admin_pass" "$wrong_name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl = on" >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$wrong_name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/server.crt'" >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$wrong_name" psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/server.key'" >/dev/null
-docker exec -u root "$wrong_name" sh -c 'printf "hostnossl all all all reject\nhostssl all all all scram-sha-256\n" > /tmp/clipp-hba; cat "$PGDATA/pg_hba.conf" >> /tmp/clipp-hba; cat /tmp/clipp-hba > "$PGDATA/pg_hba.conf"'
-docker restart "$wrong_name" >/dev/null
-for i in $(seq 1 60); do if docker exec "$wrong_name" pg_isready -U postgres >/dev/null 2>&1; then break; fi; sleep 1; done
-docker exec "$wrong_name" pg_isready -U postgres >/dev/null
+# A separate verified-TLS PostgreSQL 16 target must fail before migration.
+start_tls_pg "$wrong_name" 16
 docker exec -e PGPASSWORD="$admin_pass" "$wrong_name" psql -v ON_ERROR_STOP=1 -U postgres -c 'CREATE DATABASE clipp_ticket02_smoke' >/dev/null
 wrong_port=$(docker port "$wrong_name" 5432/tcp | sed -n 's/.*://p')
 printf 'postgres\n' > "$work/admin-user"
@@ -110,4 +187,4 @@ if "$work/clipp-relay" -command migrate -config "$work/wrong-major.json" > "$wor
   echo 'wrong PostgreSQL major unexpectedly accepted' >&2; exit 1
 fi
 grep -q 'unsupported PostgreSQL major' "$work/wrong-major.log"
-echo 'smoke passed: TLS PostgreSQL 18 migrate/serve/role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection'
+echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection'
