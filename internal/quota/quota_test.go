@@ -418,3 +418,98 @@ func TestPoolSaturationBoundsQuotaAdmission(t *testing.T) {
 		t.Fatalf("pool admission was unbounded: %v after %s", err, time.Since(started))
 	}
 }
+
+func TestAgedClockProbeHasBoundedPoolAdmission(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx := context.Background()
+	first, err := q.Take(ctx, id, 0, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.clock.mu.Lock()
+	q.clock.sampled = q.clock.sampled.Add(-6 * time.Minute)
+	q.clock.sampledMono = q.clock.sampledMono.Add(-6 * time.Minute)
+	q.clock.mu.Unlock()
+	var borrowed []*pgxpool.Conn
+	for range 8 {
+		conn, e := pool.Acquire(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		borrowed = append(borrowed, conn)
+	}
+	release := func() {
+		for _, conn := range borrowed {
+			conn.Release()
+		}
+	}
+	defer release()
+	result := make(chan error, 1)
+	go func() { _, e := q.Take(context.Background(), id, 0, 1024); result <- e }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrTemporary) {
+			t.Fatalf("aged clock spent or misclassified credit: %v", err)
+		}
+	case <-time.After(900 * time.Millisecond):
+		release()
+		borrowed = nil
+		<-result
+		t.Fatal("aged clock probe waited on the pool without a bound")
+	}
+	release()
+	borrowed = nil
+	q.clock.mu.Lock()
+	q.clock.sampled = q.now()
+	q.clock.sampledMono = time.Now()
+	q.clock.safe = true
+	q.clock.mu.Unlock()
+	last, err := q.Take(ctx, id, 0, 0)
+	if err != nil || last.Usable != first.Usable {
+		t.Fatalf("credit changed despite unavailable probe: %+v %v", last, err)
+	}
+}
+
+func TestCancelledWaiterCannotUseLocalCredit(t *testing.T) {
+	q, id, _ := fixture(t)
+	first, err := q.Take(context.Background(), id, 0, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := q.acquire(id)
+	defer q.release(id, b)
+	b.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			b.mu.Unlock()
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { _, e := q.Take(ctx, id, 0, 1024); result <- e }()
+	started := time.Now()
+	for {
+		q.mu.Lock()
+		refs := b.refs
+		q.mu.Unlock()
+		if refs >= 2 {
+			break
+		}
+		if time.Since(started) > time.Second {
+			t.Fatal("waiter did not reach account guard")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	b.mu.Unlock()
+	locked = false
+	if err := <-result; !errors.Is(err, ErrTemporary) {
+		t.Fatalf("cancelled waiter spent local credit: %v", err)
+	}
+	last, err := q.Take(context.Background(), id, 0, 0)
+	if err != nil || last.Usable != first.Usable {
+		t.Fatalf("local credit changed: %+v %v", last, err)
+	}
+}

@@ -2,6 +2,7 @@
 package quota
 
 import (
+	"clipp-relay/internal/database"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -48,6 +49,8 @@ func (b *balance) clearPending() {
 
 type Quota struct {
 	pool          *pgxpool.Pool
+	runtime       *database.Runtime
+	units         chan struct{}
 	mu            sync.Mutex
 	balances      map[string]*balance
 	clock         clockState
@@ -93,7 +96,7 @@ func (q *Quota) ClockHealth() (safe, warning bool, sampled time.Time) {
 }
 
 func New(pool *pgxpool.Pool) *Quota {
-	q := &Quota{pool: pool, balances: make(map[string]*balance), stop: make(chan struct{}), done: make(chan struct{})}
+	q := &Quota{pool: pool, runtime: database.NewRuntime(pool), units: make(chan struct{}, 64), balances: make(map[string]*balance), stop: make(chan struct{}), done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = q.Probe(ctx)
 	cancel()
@@ -199,7 +202,9 @@ func (q *Quota) Probe(ctx context.Context) error {
 	if q.probeQuery != nil {
 		dbTime, err = q.probeQuery(ctx)
 	} else {
-		err = q.pool.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&dbTime)
+		err = q.runtime.Unit(ctx, func(unitCtx context.Context, conn *pgxpool.Conn) error {
+			return conn.QueryRow(unitCtx, "SELECT clock_timestamp()").Scan(&dbTime)
+		})
 	}
 	after := q.now()
 	if err != nil {
@@ -273,27 +278,38 @@ func (q *Quota) clockOK() bool {
 // local balance without funding. Reporters should call repeatedly for counts
 // larger than the remaining local credit.
 func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (Result, error) {
-	if ctx.Err() != nil {
+	unitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	select {
+	case q.units <- struct{}{}:
+		defer func() { <-q.units }()
+	case <-unitCtx.Done():
+		return Result{}, ErrTemporary
+	}
+	if unitCtx.Err() != nil {
 		return Result{}, ErrTemporary
 	}
 	if bytes < 0 || bytes > BlockBytes {
+		return Result{}, ErrTemporary
+	}
+	if !q.clockOK() {
+		q.clock.mu.Lock()
+		shouldProbe := q.clock.sampled.IsZero() || time.Since(q.clock.sampledMono) >= 50*time.Second
+		q.clock.mu.Unlock()
+		if shouldProbe {
+			if err := q.Probe(unitCtx); err != nil {
+				return Result{}, ErrTemporary
+			}
+		}
+	}
+	if !q.clockOK() {
 		return Result{}, ErrTemporary
 	}
 	b := q.acquire(id)
 	defer q.release(id, b)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !q.clockOK() {
-		q.clock.mu.Lock()
-		shouldProbe := q.clock.sampled.IsZero() || time.Since(q.clock.sampledMono) >= 50*time.Second
-		q.clock.mu.Unlock()
-		if shouldProbe {
-			if err := q.Probe(ctx); err != nil {
-				return Result{}, ErrTemporary
-			}
-		}
-	}
-	if !q.clockOK() {
+	if unitCtx.Err() != nil || !q.clockOK() {
 		return Result{}, ErrTemporary
 	}
 	now := q.now()
@@ -327,7 +343,7 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 			b.pendingSequence = 0
 		}
 		epoch := b.epoch.Load()
-		receipt, err := q.fund(ctx, id, generation, b.pending, b.pendingWeek, b.pendingGeneration, b.pendingSequence)
+		receipt, err := q.fund(unitCtx, id, generation, b.pending, b.pendingWeek, b.pendingGeneration, b.pendingSequence)
 		if b.pendingWeek.IsZero() && !receipt.week.IsZero() {
 			b.pendingWeek = receipt.week
 		}
@@ -347,7 +363,7 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 		if q.beforeInstall != nil {
 			q.beforeInstall()
 		}
-		if ctx.Err() != nil || b.epoch.Load() != epoch || receipt.generation != generation || !q.now().Before(receipt.deadline) || !q.clockOK() {
+		if unitCtx.Err() != nil || b.epoch.Load() != epoch || receipt.generation != generation || !q.now().Before(receipt.deadline) || !q.clockOK() {
 			b.clearPending()
 			return Result{}, ErrTemporary
 		}
@@ -363,6 +379,9 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 	}
 	if bytes > b.usable {
 		return Result{b.committed, b.usable, b.week}, ErrTemporary
+	}
+	if unitCtx.Err() != nil {
+		return Result{}, ErrTemporary
 	}
 	b.usable -= bytes
 	return Result{b.committed, b.usable, b.week}, nil
@@ -499,7 +518,9 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 	var currentStatus string
 	var currentGeneration, currentCap int64
 	beforePost := q.now()
-	err = q.pool.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,p.weekly_bytes FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&postTime, &currentStatus, &currentGeneration, &currentCap)
+	err = q.runtime.Unit(ctx, func(unitCtx context.Context, conn *pgxpool.Conn) error {
+		return conn.QueryRow(unitCtx, `SELECT clock_timestamp(),a.status,a.credential_generation,p.weekly_bytes FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&postTime, &currentStatus, &currentGeneration, &currentCap)
+	})
 	afterPost := q.now()
 	if err != nil {
 		return funding{week: week, sequence: pendingSequence}, ErrTemporary
