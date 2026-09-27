@@ -60,7 +60,17 @@ type Server struct {
 	accountRates                   map[string]rate
 	beforeProfileRead              func()
 	commitPlan                     func(context.Context, pgx.Tx) error
+	capacitySampler                func(context.Context, string) (CapacitySample, error)
 }
+
+// CapacitySample is a separate, aggregate live observation. Nil counts mean
+// unavailable, not zero; it contains no Device Identity or session detail.
+type CapacitySample struct{ LiveSessions, ActiveLoginGrants *int }
+
+func (s *Server) SetCapacitySampler(sample func(context.Context, string) (CapacitySample, error)) {
+	s.capacitySampler = sample
+}
+
 type rate struct {
 	tokens float64
 	at     time.Time
@@ -555,7 +565,7 @@ type quotaHistory struct {
 	Committed int64  `json:"committed"`
 }
 
-var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}.doughnut{width:130px;height:130px;border-radius:50%;background:conic-gradient(#183f75 var(--used),#dbeafe 0);display:grid;place-items:center}.doughnut::before{content:'';width:82px;height:82px;background:white;border-radius:50%;grid-area:1/1}.doughnut span{z-index:1;grid-area:1/1;font-weight:700}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px;border-bottom:1px solid #e2e8f0}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><div class="doughnut" style="--used:{{.Percent}}%" role="img" aria-label="Quota committed {{.Committed}} of {{.WeeklyBytes}} bytes"><span>{{.Percent}}%</span></div><p>Quota committed: {{.Committed}} bytes</p><p>{{.UsageState}}</p><small>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</small><h3>Weekly history</h3><table><tr><th>Week starting UTC</th><th>Quota committed</th></tr>{{range .History}}<tr><td>{{.Week}}</td><td>{{.Committed}} bytes</td></tr>{{end}}</table></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
+var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}.doughnut{width:130px;height:130px;border-radius:50%;background:conic-gradient(#183f75 var(--used),#dbeafe 0);display:grid;place-items:center}.doughnut::before{content:'';width:82px;height:82px;background:white;border-radius:50%;grid-area:1/1}.doughnut span{z-index:1;grid-area:1/1;font-weight:700}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px;border-bottom:1px solid #e2e8f0}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><h3>Account capacity</h3><table><tr><th>Resource</th><th>Live count and limit</th></tr><tr><td>Relay Sessions</td><td>{{if .LiveSessionsKnown}}{{.LiveSessions}} of {{.Sessions}}{{else}}Unavailable · limit {{.Sessions}}{{end}}</td></tr><tr><td>Login Grants</td><td>{{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}</td></tr></table><small>Live counts are sampled separately from quota history.</small><div class="doughnut" style="--used:{{.Percent}}%" role="img" aria-label="Quota committed {{.Committed}} of {{.WeeklyBytes}} bytes"><span>{{.Percent}}%</span></div><p>Quota committed: {{.Committed}} bytes</p><p>{{.UsageState}}</p><small>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</small><h3>Weekly history</h3><table><tr><th>Week starting UTC</th><th>Quota committed</th></tr>{{range .History}}<tr><td>{{.Week}}</td><td>{{.Committed}} bytes</td></tr>{{end}}</table></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -624,6 +634,20 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 		fail(w, 503)
 		return
 	}
+	var liveSessions, activeGrants int
+	var liveKnown, grantsKnown bool
+	if e == nil && status == "Active" && s.capacitySampler != nil {
+		if sample, err := s.capacitySampler(r.Context(), id); err == nil {
+			if sample.LiveSessions != nil && *sample.LiveSessions >= 0 {
+				liveSessions = *sample.LiveSessions
+				liveKnown = true
+			}
+			if sample.ActiveLoginGrants != nil && *sample.ActiveLoginGrants >= 0 {
+				activeGrants = *sample.ActiveLoginGrants
+				grantsKnown = true
+			}
+		}
+	}
 	percent := int64(0)
 	usageState := "No Quota committed this week."
 	if bytesValue == 0 {
@@ -644,15 +668,17 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = page.Execute(w, struct {
-		SignedIn                         bool
-		Status, Description, Email, CSRF string
-		Active, Admin                    bool
-		WeeklyBytes                      int64
-		Sessions                         int
-		Committed, Percent               int64
-		UsageState                       string
-		History                          []quotaHistory
-	}{e == nil, status, description, email, csrf, status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history})
+		SignedIn                               bool
+		Status, Description, Email, CSRF       string
+		Active, Admin                          bool
+		WeeklyBytes                            int64
+		Sessions                               int
+		Committed, Percent                     int64
+		UsageState                             string
+		History                                []quotaHistory
+		LiveSessions, ActiveGrants, GrantLimit int
+		LiveSessionsKnown, ActiveGrantsKnown   bool
+	}{e == nil, status, description, email, csrf, status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {

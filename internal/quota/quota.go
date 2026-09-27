@@ -38,18 +38,27 @@ type balance struct {
 	pendingSequence   int64
 	epoch             atomic.Uint64
 }
+
+func (b *balance) clearPending() {
+	b.pending = ""
+	b.pendingWeek = time.Time{}
+	b.pendingGeneration = 0
+	b.pendingSequence = 0
+}
+
 type Quota struct {
-	pool         *pgxpool.Pool
-	mu           sync.Mutex
-	balances     map[string]*balance
-	clock        clockState
-	stop         chan struct{}
-	done         chan struct{}
-	beforeCommit func(context.Context, pgx.Tx) error
-	afterCommit  func() error
-	adjustTime   func(time.Time) time.Time
-	probeQuery   func(context.Context) (time.Time, error)
-	beforeLock   func()
+	pool          *pgxpool.Pool
+	mu            sync.Mutex
+	balances      map[string]*balance
+	clock         clockState
+	stop          chan struct{}
+	done          chan struct{}
+	beforeCommit  func(context.Context, pgx.Tx) error
+	afterCommit   func() error
+	adjustTime    func(time.Time) time.Time
+	probeQuery    func(context.Context) (time.Time, error)
+	beforeLock    func()
+	beforeInstall func()
 }
 
 func (q *Quota) now() time.Time {
@@ -264,6 +273,9 @@ func (q *Quota) clockOK() bool {
 // local balance without funding. Reporters should call repeatedly for counts
 // larger than the remaining local credit.
 func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (Result, error) {
+	if ctx.Err() != nil {
+		return Result{}, ErrTemporary
+	}
 	if bytes < 0 || bytes > BlockBytes {
 		return Result{}, ErrTemporary
 	}
@@ -324,10 +336,7 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 		}
 		if err != nil {
 			if errors.Is(err, ErrExhausted) || errors.Is(err, errExpiredReceipt) || errors.Is(err, errStaleOperation) {
-				b.pending = ""
-				b.pendingWeek = time.Time{}
-				b.pendingGeneration = 0
-				b.pendingSequence = 0
+				b.clearPending()
 			}
 			if errors.Is(err, errExpiredReceipt) || errors.Is(err, errStaleOperation) {
 				err = ErrTemporary
@@ -335,11 +344,11 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 			return Result{b.committed, b.usable, b.week}, err
 		}
 		// An invalidated worker, changed generation or week may not install its receipt.
-		if b.epoch.Load() != epoch || receipt.generation != generation || !q.now().Before(receipt.deadline) || !q.clockOK() {
-			b.pending = ""
-			b.pendingWeek = time.Time{}
-			b.pendingGeneration = 0
-			b.pendingSequence = 0
+		if q.beforeInstall != nil {
+			q.beforeInstall()
+		}
+		if ctx.Err() != nil || b.epoch.Load() != epoch || receipt.generation != generation || !q.now().Before(receipt.deadline) || !q.clockOK() {
+			b.clearPending()
 			return Result{}, ErrTemporary
 		}
 		if !b.week.Equal(receipt.week) {
@@ -350,9 +359,7 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 		b.generation = generation
 		b.committed = receipt.committed
 		b.usable += receipt.granted
-		b.pending = ""
-		b.pendingWeek = time.Time{}
-		b.pendingGeneration = 0
+		b.clearPending()
 	}
 	if bytes > b.usable {
 		return Result{b.committed, b.usable, b.week}, ErrTemporary
@@ -370,7 +377,9 @@ var errExpiredReceipt = errors.New("old-week receipt discarded")
 var errStaleOperation = errors.New("stale quota operation")
 
 func (q *Quota) fund(ctx context.Context, id string, generation int64, op string, pendingWeek time.Time, pendingGeneration, pendingSequence int64) (funding, error) {
-	tx, err := q.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	admissionCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	tx, err := q.pool.BeginTx(admissionCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	cancel()
 	if err != nil {
 		return funding{}, ErrTemporary
 	}
@@ -415,6 +424,12 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 		return funding{}, ErrTemporary
 	}
 	week := weekStart(dbTime)
+	end := week.AddDate(0, 0, 7)
+	until := end.Sub(dbTime) - after.Sub(before) - 6*time.Second
+	if until <= 0 {
+		return funding{week: week}, ErrTemporary
+	}
+	deadline := after.Add(until)
 	if !pendingWeek.IsZero() && !pendingWeek.Equal(week) {
 		// The previous operation settles under the account lock before a new
 		// week can allocate. Its receipt is never installed in the new week.
@@ -480,18 +495,26 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 			return funding{week: week, sequence: pendingSequence}, ErrTemporary
 		}
 	}
-	var currentWeek time.Time
+	var postTime time.Time
 	var currentStatus string
 	var currentGeneration, currentCap int64
-	err = q.pool.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,p.weekly_bytes FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&currentWeek, &currentStatus, &currentGeneration, &currentCap)
-	currentWeek = weekStart(q.dbTime(currentWeek))
-	if err != nil || !currentWeek.Equal(week) || currentStatus != "Active" || currentGeneration != generation || currentCap < committed {
+	beforePost := q.now()
+	err = q.pool.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,p.weekly_bytes FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&postTime, &currentStatus, &currentGeneration, &currentCap)
+	afterPost := q.now()
+	if err != nil {
 		return funding{week: week, sequence: pendingSequence}, ErrTemporary
 	}
-	end := week.AddDate(0, 0, 7)
-	until := end.Sub(dbTime) - 6*time.Second // conservative across permitted clock skew
-	if until <= 0 {
-		return funding{week: week}, ErrTemporary
+	postTime = q.dbTime(postTime)
+	if !weekStart(postTime).Equal(week) || currentStatus != "Active" || currentGeneration != generation || currentCap < committed {
+		return funding{week: week, sequence: pendingSequence}, ErrTemporary
 	}
-	return funding{week: week, deadline: q.now().Add(until), generation: actual, committed: committed, granted: granted, sequence: pendingSequence}, nil
+	postUntil := end.Sub(postTime) - afterPost.Sub(beforePost) - 6*time.Second
+	postDeadline := afterPost.Add(postUntil)
+	if postDeadline.Before(deadline) {
+		deadline = postDeadline
+	}
+	if !q.now().Before(deadline) {
+		return funding{week: week, sequence: pendingSequence}, ErrTemporary
+	}
+	return funding{week: week, deadline: deadline, generation: actual, committed: committed, granted: granted, sequence: pendingSequence}, nil
 }

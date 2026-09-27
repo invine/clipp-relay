@@ -31,8 +31,16 @@ func TestOwnerProfileShowsCommittedUsageAndAbsoluteHistory(t *testing.T) {
 	}
 	out := portalRequest(s, "GET", "/", cookie, nil, "")
 	body := out.Body.String()
-	if out.Code != 200 || !strings.Contains(body, "Quota committed: 65536 bytes") || !strings.Contains(body, "12345 bytes") || !strings.Contains(body, "includes unused funded credit") || strings.Contains(body, "Quota committed: 10240 bytes") {
+	if out.Code != 200 || !strings.Contains(body, "Quota committed: 65536 bytes") || !strings.Contains(body, "12345 bytes") || !strings.Contains(body, "includes unused funded credit") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Unavailable") || strings.Contains(body, "Quota committed: 10240 bytes") {
 		t.Fatalf("profile: %d %s", out.Code, body)
+	}
+	live, grants := 2, 3
+	s.SetCapacitySampler(func(context.Context, string) (auth.CapacitySample, error) {
+		return auth.CapacitySample{LiveSessions: &live, ActiveLoginGrants: &grants}, nil
+	})
+	withCounts := portalRequest(s, "GET", "/", cookie, nil, "")
+	if withCounts.Code != 200 || !strings.Contains(withCounts.Body.String(), "2 of 5") || !strings.Contains(withCounts.Body.String(), "3 of 20") {
+		t.Fatalf("aggregate counts: %d %s", withCounts.Code, withCounts.Body.String())
 	}
 	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.quota_plans(id,name,weekly_bytes,sessions) VALUES('0d083fee-7828-4ebf-8eef-70a18e8cfcda','Reduced profile',1024,5),('0d083fee-7828-4ebf-8eef-70a18e8cfcdb','Zero profile',0,0)`); err != nil {
 		t.Fatal(err)

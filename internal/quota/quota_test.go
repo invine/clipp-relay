@@ -351,3 +351,70 @@ func TestClockWarningIntervalIsVisibleWithoutClosingCredit(t *testing.T) {
 		t.Fatalf("warning alone closed credit: %v", err)
 	}
 }
+
+func TestDelayedCommitReplyCannotExtendMondayCredit(t *testing.T) {
+	q, id, pool := fixture(t)
+	boundary := weekStart(time.Now()).AddDate(0, 0, 7)
+	var shift atomic.Int64
+	shift.Store(int64(boundary.Add(-7 * time.Second).Sub(time.Now())))
+	q.adjustTime = func(t time.Time) time.Time { return t.Add(time.Duration(shift.Load())) }
+	q.clock.mu.Lock()
+	q.clock.sampled = time.Time{}
+	q.clock.sampledMono = time.Time{}
+	q.clock.safe = false
+	q.clock.mu.Unlock()
+	if err := q.Probe(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	q.afterCommit = func() error { time.Sleep(1200 * time.Millisecond); return nil }
+	if _, err := q.Take(context.Background(), id, 0, 1); !errors.Is(err, ErrTemporary) {
+		t.Fatalf("old-week credit installed after deadline: %v", err)
+	}
+	var committed int64
+	if err := pool.QueryRow(context.Background(), `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1`, id).Scan(&committed); err != nil || committed != 65536 {
+		t.Fatalf("durable debit missing: %d %v", committed, err)
+	}
+}
+
+func TestCancelledCallerCannotInstallConfirmedCredit(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q.beforeInstall = cancel
+	if _, err := q.Take(ctx, id, 0, 1); !errors.Is(err, ErrTemporary) {
+		t.Fatalf("cancelled caller installed credit: %v", err)
+	}
+	got, err := q.Take(context.Background(), id, 0, 0)
+	if err != nil || got.Usable != 0 {
+		t.Fatalf("cancelled credit remained usable: %+v %v", got, err)
+	}
+	var committed int64
+	if err := pool.QueryRow(context.Background(), `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1`, id).Scan(&committed); err != nil || committed != 65536 {
+		t.Fatalf("committed receipt missing: %d %v", committed, err)
+	}
+}
+
+func TestPoolSaturationBoundsQuotaAdmission(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx := context.Background()
+	var borrowed []*pgxpool.Conn
+	for range 8 {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		borrowed = append(borrowed, conn)
+	}
+	defer func() {
+		for _, conn := range borrowed {
+			conn.Release()
+		}
+	}()
+	limit, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	_, err := q.Take(limit, id, 0, 1)
+	if !errors.Is(err, ErrTemporary) || time.Since(started) > time.Second {
+		t.Fatalf("pool admission was unbounded: %v after %s", err, time.Since(started))
+	}
+}

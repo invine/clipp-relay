@@ -1,11 +1,21 @@
 # Clipp Relay service
 
 This repository currently implements the service foundation, Google portal
-registration, and administrator account and quota-plan operations. It provides
+registration, administrator account and quota-plan operations, and the shared
+weekly Quota operation. It provides
 explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, and separate public and private HTTP
 listeners. It does **not** yet provide Relay credentials, Relay Sessions or
 public relay transport.
+The Quota operation commits at most 64 KiB of account-week credit per block
+before making it locally usable. Callers must split larger reporter counts and
+consume any smaller remaining local balance before requesting another block.
+Committed credit is retained in PostgreSQL across restart and never refunded;
+unused process-local credit is not restored. The owner profile shows Quota
+committed and 12 completed weekly totals. Its capacity table distinguishes
+configured limits from separately sampled live counts. Live Relay Session and
+Login Grant counts show **Unavailable** until the respective runtime and grant
+providers are wired during later slices; unavailable does not mean zero.
 `/readyz` therefore remains `503 unavailable`; `/livez` is `200 ok` while the
 process runs. A later relay slice must start its listeners and publish a
 complete address snapshot before it may change readiness.
@@ -89,7 +99,9 @@ identity labels.
 containers bound only to loopback, provisions TLS and distinct roles, migrates,
 starts the process, checks health and public route isolation, stops PostgreSQL
 to check liveness, and runs the real SQL and deterministic local OIDC provider
-integration tests, including admin approval and plan assignment. It also rejects a
+integration tests, including admin approval, plan assignment, quota receipt
+replay, rollback, restart, week rollover, clock faults, and profile history.
+It also rejects a
 verified-TLS PostgreSQL 16 target. It removes only containers created by the
 script and all temporary Secret files on exit. It does not use any existing
 database or Docker volume.
