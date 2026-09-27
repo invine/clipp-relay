@@ -29,7 +29,7 @@ rather than silently changing policy or reviving an obsolete design.
 - [Relay over WSS and WebRTC Direct](issues/10-relay-over-wss-and-webrtc-direct.md) is resolved after reviewed integration and forced-transport/race verification.
 - [Delete and re-register safely](issues/16-delete-and-re-register-safely.md) has reviewed local implementation integrated and verified; it remains claimed pending an approved OCI journal for provider/IAM qualification.
 - [Rediscover and drain an ephemeral relay](issues/11-rediscover-and-drain-an-ephemeral-relay.md) is resolved after reviewed integration, real-client restart, race and disposable PostgreSQL verification.
-- [Install with external PostgreSQL](issues/18-install-with-external-postgresql.md) is claimed in an isolated worktree; local Helm/DB work proceeds while authorized cluster prerequisites are unavailable.
+- [Install with external PostgreSQL](issues/18-install-with-external-postgresql.md) has reviewed local Helm/preflight work integrated and verified; it remains claimed because isolated cluster installation and live F5/OCI/network qualification are not run under the no-deploy constraint.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
 

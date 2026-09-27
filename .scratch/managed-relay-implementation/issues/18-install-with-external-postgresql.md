@@ -23,13 +23,13 @@ Non-root/read-only root/capabilities dropped/no privilege escalation/runtime-def
 
 ## Acceptance criteria
 
-- [ ] Helm lint/render/schema tests cover explicit external mode, invalid/conflicting values, Secret references, exact hosts, listener conflicts, transport overrides and maintenance rendering.
+- [x] Helm lint/render/schema tests cover explicit external mode, invalid/conflicting values, Secret references, exact hosts, listener conflicts, transport overrides and maintenance rendering.
 - [ ] An isolated authorized installation starts only against the expected exact schema using verified TLS/SCRAM on PostgreSQL 17 and 18; wrong CA/hostname/role/schema fails closed.
-- [ ] Render and inspect distinct portal/WSS/TCP/UDP/private surfaces, stable network resources, singleton nonoverlap and narrowly scoped watch RBAC.
+- [x] Render and inspect distinct portal/WSS/TCP/UDP/private surfaces, stable network resources, singleton nonoverlap and narrowly scoped watch RBAC.
 - [ ] Prove read-only/non-root security and configured resource/nofile envelope; no Secret contents, secret-derived annotations, runtime DDL or privileged credentials reach serving.
-- [ ] Provide a non-mutating preflight distinguishing rendered facts, existing cluster prerequisites and required live checks; absent inputs stay explicit operator tasks.
+- [x] Provide a non-mutating preflight distinguishing rendered facts, existing cluster prerequisites and required live checks; absent inputs stay explicit operator tasks.
 - [ ] Test private operations budgets/probes under public pressure and verify readiness does not depend on DB availability or self-dial.
-- [ ] Document exact F5/OCI/network-policy prerequisites and an isolated install/uninstall procedure preserving operator-owned resources; no production deployment is performed by this ticket.
+- [x] Document exact F5/OCI/network-policy prerequisites and an isolated install/uninstall procedure preserving operator-owned resources; no production deployment is performed by this ticket.
 
 ## Demonstration
 
@@ -57,3 +57,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 11 resolution (`a9e941a`); assigned to a fresh isolated Go/Helm implementation agent. Local chart, schema, rendering and disposable database work can proceed without an external cluster. Authorized isolated installation and live ingress/network checks require operator-provided prerequisites; resolution awaits those and integrated review/evidence.
+
+- Reviewed implementation commits `87c6224`, `2a121ab`, `c372f4e`, and `87606c6` were merged centrally as `3270c3d`. Independent Spec and Standards reviews reproduced malformed-host, unused-infrastructure, YAML-injection, and preflight-target defects; fixes and adversarial tests passed focused independent rechecks. On the merged tree with Helm 4.3.0, Go 1.27.1 darwin/arm64 and Docker 29.8.0: `bash scripts/test-chart.sh`, explicit-target static `bash scripts/preflight-external.sh charts/clipp-relay/examples/external-values.yaml isolated clipp-isolated`, `GOPROXY=off GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...`, `go vet ./...`, `go build ./...`, and `bash scripts/smoke-postgres.sh` passed. The smoke used disposable verified-TLS/SCRAM PostgreSQL 18.6 and 17.11, tested wrong CA/hostname/role/schema and ownership rejection, and rejected PostgreSQL 16.15. Render and preflight checks did not contact a cluster. **Not run:** authorized isolated installation, actual F5/OCI/CNI/NSG/TLS/Secret/image/nofile verification, live HTTPS discovery/TCP/WSS/UDP and private-pressure/drain checks. The user forbids deployment; no cluster context or authorization was supplied. The ticket remains claimed and downstream tickets remain blocked. No push, publication, deployment or external load occurred.
