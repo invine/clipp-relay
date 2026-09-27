@@ -4,7 +4,7 @@
 
 **Blocked by:** [07: Relay authenticated TCP traffic](07-relay-authenticated-tcp-traffic.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I4, I11.
@@ -38,12 +38,12 @@ bounded labels, no peer/account. This slice retains v1; no protocol retirement.
 
 ## Acceptance criteria
 
-- [ ] Real wire clients register/lookup/unregister using each version and receive byte-identical verified envelopes.
-- [ ] Unreserved, unauthenticated exact connection, signature/subject mismatch and no-current-relay-route registration fail without retaining record.
-- [ ] Cross-account exact lookup works; misses/expired/unregistered are indistinguishable and no enumeration route exists.
-- [ ] Lease expiry follows earliest bound; loss/replacement/late timer races cannot delete a newer owner.
-- [ ] Input/output encoded/raw bounds, invalid numeric bytes, duplicate keys, extra frames and slow read/write are tested with bounded allocation/work.
-- [ ] Protocol negotiation test falls back v2→v1 only for unsupported multistream, never auth/quota/timeout/server errors; version metrics contain no identity.
+- [x] Real wire clients register/lookup/unregister using each version and receive byte-identical verified envelopes.
+- [x] Unreserved, unauthenticated exact connection, signature/subject mismatch and no-current-relay-route registration fail without retaining record.
+- [x] Cross-account exact lookup works; misses/expired/unregistered are indistinguishable and no enumeration route exists.
+- [x] Lease expiry follows earliest bound; loss/replacement/late timer races cannot delete a newer owner.
+- [x] Input/output encoded/raw bounds, invalid numeric bytes, duplicate keys, extra frames and slow read/write are tested with bounded allocation/work.
+- [x] Protocol negotiation test falls back v2→v1 only for unsupported multistream, never auth/quota/timeout/server errors; version metrics contain no identity.
 
 ## Demonstration
 
@@ -71,3 +71,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 07 resolution (`49eed87`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved centrally on 2026-09-27 after TDD implementation (`75cb192`, `713e506`, `770cadc`, `d81f7a2`), independent specification and standards reviews, and integration merges (`8db97c8`, `f83c848`). The final specification recheck found no remaining concrete defect. Go 1.27.1 on darwin/arm64: `go test -count=1 ./...`, `go test -race -count=1 ./internal/relay`, `go vet ./...`, `go build ./...`, `gofmt -l cmd internal`, and `git diff --check` passed on the integrated branch with local loopback and offline Go module cache. Real libp2p wire tests cover both versions, cross-account lookup, limits, and v2-first fallback error classes; protocol metrics contain bounded version labels. No schema change required a PostgreSQL smoke run. The open-write v2 compatibility path rejects extra bytes already queued during its bounded probe; bytes first sent after the response cannot be rejected retroactively, and this limit is documented in the service README. Production Clipp client fallback remains scoped to tickets 12–15. No push, publication, deployment, or external load occurred.

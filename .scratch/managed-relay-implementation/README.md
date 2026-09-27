@@ -24,7 +24,8 @@ rather than silently changing policy or reviving an obsolete design.
 - [Authorize and renew Clipp credentials](issues/05-authorize-and-renew-clipp-credentials.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 - [Commit weekly quota and show usage](issues/06-commit-weekly-quota-and-show-usage.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 - [Relay authenticated TCP traffic](issues/07-relay-authenticated-tcp-traffic.md) is resolved after reviewed integration, TCP/JS interop, race and disposable PostgreSQL verification.
-- [Register and find peers](issues/08-register-and-find-peers.md) and [Revoke access and change live quotas](issues/09-revoke-access-and-change-live-quotas.md) are claimed in separate isolated Go worktrees.
+- [Register and find peers](issues/08-register-and-find-peers.md) is resolved after reviewed integration and full/race Go verification.
+- [Revoke access and change live quotas](issues/09-revoke-access-and-change-live-quotas.md) is claimed in an isolated Go worktree.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
 
