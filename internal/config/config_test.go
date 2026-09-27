@@ -66,7 +66,7 @@ func TestLoadRejectsNoncanonicalOrigin(t *testing.T) {
 func TestMissingSecretFailsWithoutPathDisclosure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	body := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/missing/private-identity","password_file":"/missing/private-password","ca_file":"/missing/ca"},"secrets":{"google_client_id_file":"/missing/google-id","google_client_secret_file":"/missing/google-secret","admin_allowlist_file":"/missing/allowlist","pepper_keyring_file":"/missing/keyring"}}`
+	body := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/missing/private-identity","password_file":"/missing/private-password","ca_file":"/missing/ca"},"secrets":{"google_client_id_file":"/missing/google-id","google_client_secret_file":"/missing/google-secret","admin_allowlist_file":"/missing/allowlist","pepper_keyring_file":"/missing/keyring"}}`
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}

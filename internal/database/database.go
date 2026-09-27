@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 4
+const ExpectedRevision = 5
 
 type migration struct {
 	revision int
@@ -109,7 +109,71 @@ ALTER TABLE public.audit_events ADD COLUMN client_type text CHECK (client_type I
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event='account_created' OR (reason IS NOT NULL AND actor_email IS NOT NULL));
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
 INSERT INTO public.quota_plans (id,name,weekly_bytes,sessions) VALUES ('6dd09395-51a0-451c-96b3-716e6038e870','Baseline',1073741824,5);
-REVOKE ALL ON public.quota_plans FROM PUBLIC`}}
+REVOKE ALL ON public.quota_plans FROM PUBLIC`}, {5, `CREATE TABLE public.authorization_codes (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ pepper_version bigint NOT NULL CHECK (pepper_version>0),
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ credential_generation bigint NOT NULL,
+ client_type text NOT NULL CHECK (client_type IN ('electron','android','extension')),
+ redirect_uri text NOT NULL CHECK (length(redirect_uri) BETWEEN 1 AND 512),
+ challenge text NOT NULL CHECK (length(challenge)=43),
+ issued_at timestamptz NOT NULL,
+ expires_at timestamptz NOT NULL,
+ consumed_at timestamptz
+);
+CREATE INDEX authorization_codes_expiry ON public.authorization_codes (expires_at);
+CREATE INDEX authorization_codes_account ON public.authorization_codes (account_id);
+CREATE TABLE public.login_grants (
+ id uuid PRIMARY KEY,
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ credential_generation bigint NOT NULL,
+ client_type text NOT NULL CHECK (client_type IN ('electron','android','extension')),
+ current_refresh_generation bigint NOT NULL DEFAULT 1 CHECK (current_refresh_generation>0),
+ created_at timestamptz NOT NULL,
+ last_used_at timestamptz NOT NULL,
+ idle_expires_at timestamptz NOT NULL,
+ absolute_expires_at timestamptz NOT NULL,
+ terminated_at timestamptz
+);
+CREATE INDEX login_grants_account ON public.login_grants (account_id);
+CREATE INDEX login_grants_expiry ON public.login_grants (idle_expires_at,absolute_expires_at);
+CREATE INDEX login_grants_absolute_expiry ON public.login_grants (absolute_expires_at);
+CREATE INDEX login_grants_terminated ON public.login_grants (terminated_at) WHERE terminated_at IS NOT NULL;
+CREATE TABLE public.refresh_generations (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ pepper_version bigint NOT NULL CHECK (pepper_version>0),
+ grant_id uuid NOT NULL REFERENCES public.login_grants(id),
+ generation bigint NOT NULL CHECK (generation>0),
+ issued_at timestamptz NOT NULL,
+ consumed_at timestamptz,
+ UNIQUE(grant_id,generation)
+);
+CREATE INDEX refresh_generations_grant ON public.refresh_generations (grant_id);
+CREATE UNIQUE INDEX refresh_generations_one_current ON public.refresh_generations (grant_id) WHERE consumed_at IS NULL;
+CREATE TABLE public.relay_access_tokens (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ pepper_version bigint NOT NULL CHECK (pepper_version>0),
+ grant_id uuid NOT NULL REFERENCES public.login_grants(id),
+ issued_at timestamptz NOT NULL,
+ expires_at timestamptz NOT NULL
+);
+CREATE INDEX relay_access_tokens_grant ON public.relay_access_tokens (grant_id);
+CREATE INDEX relay_access_tokens_expiry ON public.relay_access_tokens (expires_at);
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_event_check;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned','credential_blocked','grant_cap','refresh_reuse'));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse') OR (reason IS NOT NULL AND actor_email IS NOT NULL));
+ALTER TABLE public.authorization_transactions ADD COLUMN flow_kind text NOT NULL DEFAULT 'google' CHECK (flow_kind IN ('google','clipp'));
+ALTER TABLE public.authorization_transactions ADD COLUMN client_type text CHECK (client_type IN ('electron','android','extension'));
+ALTER TABLE public.authorization_transactions ADD COLUMN redirect_uri text CHECK (redirect_uri IS NULL OR length(redirect_uri) BETWEEN 1 AND 512);
+ALTER TABLE public.authorization_transactions ADD COLUMN challenge text CHECK (challenge IS NULL OR length(challenge)=43);
+ALTER TABLE public.authorization_transactions ADD COLUMN client_state_digest bytea CHECK (client_state_digest IS NULL OR octet_length(client_state_digest)=32);
+ALTER TABLE public.authorization_transactions ADD COLUMN account_id uuid REFERENCES public.accounts(id);
+ALTER TABLE public.authorization_transactions ADD COLUMN credential_generation bigint;
+ALTER TABLE public.authorization_transactions ADD CONSTRAINT clipp_transaction_complete CHECK (flow_kind='google' OR (client_type IS NOT NULL AND redirect_uri IS NOT NULL AND challenge IS NOT NULL AND client_state_digest IS NOT NULL AND account_id IS NOT NULL AND credential_generation IS NOT NULL));
+REVOKE ALL ON public.authorization_codes,public.login_grants,public.refresh_generations,public.relay_access_tokens FROM PUBLIC`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
