@@ -49,3 +49,14 @@ func TestReadinessMetricTracksHealth(t *testing.T) {
 		}
 	}
 }
+
+func TestRendezvousMetricsHaveOnlyFixedVersionLabels(t *testing.T) {
+	s := service.New()
+	s.SetRendezvousMetrics(func() uint64 { return 7 }, func() uint64 { return 11 })
+	metric := httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(metric, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := metric.Body.String()
+	if metric.Code != 200 || !strings.Contains(body, `clipp_relay_rendezvous_requests_total{version="1"} 7`) || !strings.Contains(body, `clipp_relay_rendezvous_requests_total{version="2"} 11`) || strings.Contains(body, "peer=") || strings.Contains(body, "account=") {
+		t.Fatalf("metrics: %d %q", metric.Code, body)
+	}
+}

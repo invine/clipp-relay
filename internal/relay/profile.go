@@ -53,12 +53,14 @@ func TCPProfile() rcmgr.Limiter {
 			"libp2p.identify":  limits(limitSpec{streams: 4096, streamsInbound: 2048, streamsOutbound: 2048, memory: 64 * mib}),
 			"libp2p.ping":      limits(limitSpec{streams: 1024, streamsInbound: 1024, streamsOutbound: 512, memory: 16 * mib}),
 			"clipp.relay-auth": limits(limitSpec{streams: 512, streamsInbound: 512, memory: 8 * mib}),
+			"clipp.rendezvous": limits(limitSpec{streams: 2048, streamsInbound: 2048, memory: 64 * mib}),
 		},
 		ServicePeer: map[string]rcmgr.ResourceLimits{
 			"libp2p.relay/v2":  limits(limitSpec{streams: 32, streamsInbound: 32, streamsOutbound: 32, memory: 2 * mib}),
 			"libp2p.identify":  limits(limitSpec{streams: 8, streamsInbound: 4, streamsOutbound: 4, memory: mib}),
 			"libp2p.ping":      limits(limitSpec{streams: 4, streamsInbound: 4, streamsOutbound: 2, memory: 256 * kib}),
 			"clipp.relay-auth": limits(limitSpec{streams: 8, streamsInbound: 8, memory: 256 * kib}),
+			"clipp.rendezvous": limits(limitSpec{streams: 8, streamsInbound: 8, memory: 2 * mib}),
 		},
 		Protocol: map[protocol.ID]rcmgr.ResourceLimits{
 			"/libp2p/circuit/relay/0.2.0/hop":  limits(limitSpec{streams: 12288, streamsInbound: 12288, memory: 64 * mib}),
@@ -67,6 +69,8 @@ func TCPProfile() rcmgr.Limiter {
 			"/ipfs/id/push/1.0.0":              limits(limitSpec{streams: 2048, streamsInbound: 1024, streamsOutbound: 1024, memory: 32 * mib}),
 			"/ipfs/ping/1.0.0":                 limits(limitSpec{streams: 1024, streamsInbound: 1024, streamsOutbound: 512, memory: 16 * mib}),
 			"/clipp/relay-auth/1.0.0":          limits(limitSpec{streams: 512, streamsInbound: 512, memory: 8 * mib}),
+			RendezvousV1Protocol:               limits(limitSpec{streams: 1024, streamsInbound: 1024, memory: 32 * mib}),
+			RendezvousV2Protocol:               limits(limitSpec{streams: 2048, streamsInbound: 2048, memory: 64 * mib}),
 		},
 		ProtocolPeer: map[protocol.ID]rcmgr.ResourceLimits{
 			"/libp2p/circuit/relay/0.2.0/hop":  limits(limitSpec{streams: 32, streamsInbound: 32, memory: mib}),
@@ -75,6 +79,8 @@ func TCPProfile() rcmgr.Limiter {
 			"/ipfs/id/push/1.0.0":              limits(limitSpec{streams: 4, streamsInbound: 2, streamsOutbound: 2, memory: 512 * kib}),
 			"/ipfs/ping/1.0.0":                 limits(limitSpec{streams: 4, streamsInbound: 4, streamsOutbound: 2, memory: 256 * kib}),
 			"/clipp/relay-auth/1.0.0":          limits(limitSpec{streams: 8, streamsInbound: 8, memory: 256 * kib}),
+			RendezvousV1Protocol:               limits(limitSpec{streams: 4, streamsInbound: 4, memory: mib}),
+			RendezvousV2Protocol:               limits(limitSpec{streams: 8, streamsInbound: 8, memory: 2 * mib}),
 		},
 	}
 	return rcmgr.NewFixedLimiter(p.Build(rcmgr.ConcreteLimitConfig{}))

@@ -72,6 +72,7 @@ func TestEveryEnabledScopeMatchesAcceptedFixedLimits(t *testing.T) {
 		{"libp2p.identify", 4096, 2048, 2048, 64 * mib, 8, 4, 4, mib},
 		{"libp2p.ping", 1024, 1024, 512, 16 * mib, 4, 4, 2, 256 * kib},
 		{"clipp.relay-auth", 512, 512, 0, 8 * mib, 8, 8, 0, 256 * kib},
+		{"clipp.rendezvous", 2048, 2048, 0, 64 * mib, 8, 8, 0, 2 * mib},
 	} {
 		check(row.name, l.GetServiceLimits(row.name), expected{sc: row.sc, si: row.si, so: row.so, memory: row.memory})
 		check(row.name+" peer", l.GetServicePeerLimits(row.name), expected{sc: row.pc, si: row.pi, so: row.po, memory: row.pm})
@@ -89,6 +90,8 @@ func TestEveryEnabledScopeMatchesAcceptedFixedLimits(t *testing.T) {
 		{"/ipfs/id/push/1.0.0", 2048, 1024, 1024, 32 * mib, 4, 2, 2, 512 * kib},
 		{"/ipfs/ping/1.0.0", 1024, 1024, 512, 16 * mib, 4, 4, 2, 256 * kib},
 		{AuthProtocol, 512, 512, 0, 8 * mib, 8, 8, 0, 256 * kib},
+		{RendezvousV1Protocol, 1024, 1024, 0, 32 * mib, 4, 4, 0, mib},
+		{RendezvousV2Protocol, 2048, 2048, 0, 64 * mib, 8, 8, 0, 2 * mib},
 	} {
 		check(string(row.name), l.GetProtocolLimits(row.name), expected{sc: row.sc, si: row.si, so: row.so, memory: row.memory})
 		check(string(row.name)+" peer", l.GetProtocolPeerLimits(row.name), expected{sc: row.pc, si: row.pi, so: row.po, memory: row.pm})
@@ -103,7 +106,7 @@ func TestRelayEnablesOnlyRequiredTCPProtocols(t *testing.T) {
 	defer s.Close()
 	got := s.Host.Mux().Protocols()
 	slices.Sort(got)
-	want := []protocol.ID{AuthProtocol, hopProtocol, "/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0", "/ipfs/ping/1.0.0"}
+	want := []protocol.ID{AuthProtocol, RendezvousV1Protocol, RendezvousV2Protocol, hopProtocol, "/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0", "/ipfs/ping/1.0.0"}
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("enabled protocol inventory = %v; want %v", got, want)

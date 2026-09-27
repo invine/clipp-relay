@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"clipp-relay/internal/auth"
@@ -58,24 +59,29 @@ type session struct {
 }
 
 type Server struct {
-	Host        host.Host
-	stock       *relay.Relay
-	manager     network.ResourceManager
-	tracer      *circuitTracer
-	authority   Authority
-	credit      Credit
-	maxSessions int
-	mu          sync.Mutex
-	byConn      map[network.Conn]*session
-	byPeer      map[peer.ID]*session
-	byAccount   map[string]map[*session]struct{}
-	preauth     map[network.Conn]*time.Timer
-	peerGuards  [256]sync.Mutex
-	globalRate  tokenBucket
-	connRate    map[network.Conn]tokenBucket
-	closing     bool
-	hopHandlers int
-	closeOnce   sync.Once
+	Host         host.Host
+	stock        *relay.Relay
+	manager      network.ResourceManager
+	tracer       *circuitTracer
+	authority    Authority
+	credit       Credit
+	maxSessions  int
+	mu           sync.Mutex
+	byConn       map[network.Conn]*session
+	byPeer       map[peer.ID]*session
+	byAccount    map[string]map[*session]struct{}
+	preauth      map[network.Conn]*time.Timer
+	peerGuards   [256]sync.Mutex
+	globalRate   tokenBucket
+	connRate     map[network.Conn]tokenBucket
+	rvGlobalRate tokenBucket
+	rvConnRate   map[network.Conn]tokenBucket
+	rvCounts     [2]atomic.Uint64
+	reservations map[peer.ID]reservationOwner
+	leases       map[peer.ID]*rendezvousLease
+	closing      bool
+	hopHandlers  int
+	closeOnce    sync.Once
 }
 
 type tokenBucket struct {
@@ -102,9 +108,10 @@ func (b *tokenBucket) allow(now time.Time, rate, burst float64) bool {
 
 type gatedHost struct {
 	host.Host
-	check    func(network.Stream) bool
-	doneHop  func()
-	stopConn func(peer.ID) network.Conn
+	check              func(network.Stream) bool
+	doneHop            func()
+	observeReservation func(network.Stream) network.Stream
+	stopConn           func(peer.ID) network.Conn
 }
 
 func (h gatedHost) SetStreamHandler(id protocol.ID, handler network.StreamHandler) {
@@ -113,6 +120,9 @@ func (h gatedHost) SetStreamHandler(id protocol.ID, handler network.StreamHandle
 			if !h.check(s) {
 				hopStatus(s, pbv2.Status_PERMISSION_DENIED)
 				return
+			}
+			if h.observeReservation != nil {
+				s = h.observeReservation(s)
 			}
 			handler(s)
 			h.doneHop()
@@ -193,7 +203,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	h, err := libp2p.New(libp2p.Identity(key), libp2p.NoTransports,
 		libp2p.Transport(tcp.NewTCPTransport), libp2p.ListenAddrStrings(opts.ListenAddress),
@@ -206,8 +216,10 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	s.Host = h
 	h.Network().Notify(&network.NotifyBundle{ConnectedF: s.connected, DisconnectedF: s.disconnected})
 	h.SetStreamHandler(AuthProtocol, s.handleAuth)
+	h.SetStreamHandler(RendezvousV1Protocol, s.handleRendezvous)
+	h.SetStreamHandler(RendezvousV2Protocol, s.handleRendezvous)
 	resources := relay.Resources{Limit: &relay.RelayLimit{Duration: 120 * time.Second, Data: 2 << 20}, ReservationTTL: 30 * time.Minute, MaxReservations: 6000, MaxCircuits: 16, BufferSize: 2048, MaxReservationsPerPeer: 1, MaxReservationsPerIP: 6000, MaxReservationsPerASN: 6000}
-	s.stock, err = relay.New(gatedHost{Host: h, check: s.permitted, doneHop: s.doneHop, stopConn: s.authoritativeConn}, relay.WithResources(resources), relay.WithMetricsTracer(s.tracer), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
+	s.stock, err = relay.New(gatedHost{Host: h, check: s.permitted, doneHop: s.doneHop, stopConn: s.authoritativeConn, observeReservation: func(st network.Stream) network.Stream { return &reservationStream{Stream: st, server: s} }}, relay.WithResources(resources), relay.WithMetricsTracer(s.tracer), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
 	if err != nil {
 		_ = h.Close()
 		_ = manager.Close()
@@ -262,15 +274,21 @@ func (s *Server) disconnected(_ network.Network, c network.Conn) {
 		delete(s.preauth, c)
 	}
 	delete(s.connRate, c)
+	delete(s.rvConnRate, c)
 	if old := s.byConn[c]; old != nil {
 		s.removeLocked(old)
 	}
 	s.mu.Unlock()
 }
 
-func (s *Server) removeLocked(v *session) {
+func (s *Server) removeLocked(v *session) { s.removeSessionLocked(v, false) }
+
+func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 	if s.byConn[v.conn] != v {
 		return
+	}
+	if !preserveRendezvous {
+		s.removeRendezvousLocked(v)
 	}
 	delete(s.byConn, v.conn)
 	if s.byPeer[v.conn.RemotePeer()] == v {
@@ -422,7 +440,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 		}
 	}
 	if current != nil {
-		s.removeLocked(current)
+		s.removeSessionLocked(current, true)
 	}
 	if replaced != nil && replaced != current {
 		s.removeLocked(replaced)
@@ -430,6 +448,11 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	v := &session{conn: c, account: credential.AccountID, generation: credential.Generation, deadline: deadline}
 	s.byConn[c] = v
 	s.byPeer[c.RemotePeer()] = v
+	if current != nil {
+		if lease := s.leases[c.RemotePeer()]; lease != nil && lease.owner == current {
+			lease.owner = v
+		}
+	}
 	if s.byAccount[v.account] == nil {
 		s.byAccount[v.account] = map[*session]struct{}{}
 	}
