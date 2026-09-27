@@ -29,6 +29,8 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/util"
 	"github.com/libp2p/go-libp2p/p2p/security/noise"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
+	libp2pwebrtc "github.com/libp2p/go-libp2p/p2p/transport/webrtc"
+	"github.com/libp2p/go-libp2p/p2p/transport/websocket"
 	"github.com/libp2p/go-libp2p/x/rate"
 	ma "github.com/multiformats/go-multiaddr"
 	multistream "github.com/multiformats/go-multistream"
@@ -46,8 +48,11 @@ type Credit interface {
 }
 
 type Options struct {
-	ListenAddress string // complete TCP multiaddr; port zero is accepted for isolated tests
-	MaxSessions   int
+	ListenAddress          string // complete TCP multiaddr; port zero is accepted for isolated tests
+	WebSocketListenAddress string // internal plaintext WS behind exact-hostname public TLS
+	WebRTCListenAddress    string // WebRTC Direct UDP; the listener supplies its process certhash
+	WebSocketHostname      string // exact public TLS name; validated with every WSS snapshot
+	MaxSessions            int
 }
 
 type session struct {
@@ -59,29 +64,33 @@ type session struct {
 }
 
 type Server struct {
-	Host         host.Host
-	stock        *relay.Relay
-	manager      network.ResourceManager
-	tracer       *circuitTracer
-	authority    Authority
-	credit       Credit
-	maxSessions  int
-	mu           sync.Mutex
-	byConn       map[network.Conn]*session
-	byPeer       map[peer.ID]*session
-	byAccount    map[string]map[*session]struct{}
-	preauth      map[network.Conn]*time.Timer
-	peerGuards   [256]sync.Mutex
-	globalRate   tokenBucket
-	connRate     map[network.Conn]tokenBucket
-	rvGlobalRate tokenBucket
-	rvConnRate   map[network.Conn]tokenBucket
-	rvCounts     [2]atomic.Uint64
-	reservations map[peer.ID]reservationOwner
-	leases       map[peer.ID]*rendezvousLease
-	closing      bool
-	hopHandlers  int
-	closeOnce    sync.Once
+	Host              host.Host
+	stock             *relay.Relay
+	manager           network.ResourceManager
+	tracer            *circuitTracer
+	authority         Authority
+	credit            Credit
+	maxSessions       int
+	tcpEnabled        bool
+	wsEnabled         bool
+	webrtcEnabled     bool
+	webSocketHostname string
+	mu                sync.Mutex
+	byConn            map[network.Conn]*session
+	byPeer            map[peer.ID]*session
+	byAccount         map[string]map[*session]struct{}
+	preauth           map[network.Conn]*time.Timer
+	peerGuards        [256]sync.Mutex
+	globalRate        tokenBucket
+	connRate          map[network.Conn]tokenBucket
+	rvGlobalRate      tokenBucket
+	rvConnRate        map[network.Conn]tokenBucket
+	rvCounts          [2]atomic.Uint64
+	reservations      map[peer.ID]reservationOwner
+	leases            map[peer.ID]*rendezvousLease
+	closing           bool
+	hopHandlers       int
+	closeOnce         sync.Once
 }
 
 type tokenBucket struct {
@@ -177,11 +186,11 @@ func hopStatus(s network.Stream, status pbv2.Status) {
 	}
 }
 
-// New starts an inbound-only, Noise-authenticated TCP relay with a new in-RAM
+// New starts an inbound-only, Noise-authenticated relay with a new in-RAM
 // identity. It returns only after the listener and fixed resource profile exist.
 func New(a Authority, credit Credit, opts Options) (*Server, error) {
-	if opts.ListenAddress == "" {
-		return nil, errors.New("TCP listener required")
+	if opts.ListenAddress == "" && opts.WebSocketListenAddress == "" && opts.WebRTCListenAddress == "" {
+		return nil, errors.New("relay listener required")
 	}
 	if opts.MaxSessions == 0 {
 		opts.MaxSessions = 6000
@@ -203,12 +212,26 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
-	h, err := libp2p.New(libp2p.Identity(key), libp2p.NoTransports,
-		libp2p.Transport(tcp.NewTCPTransport), libp2p.ListenAddrStrings(opts.ListenAddress),
+	listen := make([]string, 0, 3)
+	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
 		libp2p.Security(noise.ID, noise.New), libp2p.DisableRelay(), libp2p.DisableIdentifyAddressDiscovery(),
-		libp2p.ConnectionManager(&connmgr.NullConnMgr{}), libp2p.ResourceManager(manager), libp2p.BandwidthReporter(reporter))
+		libp2p.ConnectionManager(&connmgr.NullConnMgr{}), libp2p.ResourceManager(manager), libp2p.BandwidthReporter(reporter)}
+	if opts.ListenAddress != "" {
+		listen = append(listen, opts.ListenAddress)
+		transportOptions = append(transportOptions, libp2p.Transport(tcp.NewTCPTransport))
+	}
+	if opts.WebSocketListenAddress != "" {
+		listen = append(listen, opts.WebSocketListenAddress)
+		transportOptions = append(transportOptions, libp2p.Transport(websocket.New, websocket.WithHandshakeTimeout(10*time.Second)))
+	}
+	if opts.WebRTCListenAddress != "" {
+		listen = append(listen, opts.WebRTCListenAddress)
+		transportOptions = append(transportOptions, libp2p.Transport(libp2pwebrtc.New))
+	}
+	transportOptions = append(transportOptions, libp2p.ListenAddrStrings(listen...))
+	h, err := libp2p.New(transportOptions...)
 	if err != nil {
 		_ = manager.Close()
 		return nil, err
@@ -615,9 +638,40 @@ func (s *Server) AccountSessions(account string) int {
 // ListenAddress gives the bound TCP multiaddr; discovery adds the current Peer ID.
 func (s *Server) ListenAddress() (ma.Multiaddr, error) {
 	for _, a := range s.Host.Addrs() {
-		if _, err := a.ValueForProtocol(ma.P_TCP); err == nil {
+		if _, err := a.ValueForProtocol(ma.P_TCP); err == nil && !hasProtocol(a, ma.P_WS) {
 			return a, nil
 		}
 	}
 	return nil, net.ErrClosed
+}
+
+// ListenAddressFor reports the bound address of an enabled listener. WebRTC's
+// returned address includes the ephemeral certificate hash generated at startup.
+func (s *Server) ListenAddressFor(transport string) (ma.Multiaddr, error) {
+	for _, a := range s.Host.Addrs() {
+		switch transport {
+		case "websocket":
+			if hasProtocol(a, ma.P_WS) {
+				return a, nil
+			}
+		case "webrtc-direct":
+			if hasProtocol(a, ma.P_WEBRTC_DIRECT) && hasProtocol(a, ma.P_CERTHASH) {
+				return a, nil
+			}
+		case "tcp":
+			if _, err := a.ValueForProtocol(ma.P_TCP); err == nil && !hasProtocol(a, ma.P_WS) {
+				return a, nil
+			}
+		}
+	}
+	return nil, net.ErrClosed
+}
+
+func hasProtocol(a ma.Multiaddr, code int) bool {
+	for _, p := range a.Protocols() {
+		if p.Code == code {
+			return true
+		}
+	}
+	return false
 }

@@ -36,7 +36,7 @@ func limits(spec limitSpec) rcmgr.ResourceLimits {
 }
 
 // TCPProfile fixes every enabled scope, including unknown and allowlisted
-// scopes. Additional transports may add protocols but may not inherit defaults.
+// scopes. TCP, WSS and WebRTC Direct use the same service and protocol limits.
 func TCPProfile() rcmgr.Limiter {
 	block := limits(limitSpec{})
 	p := rcmgr.PartialLimitConfig{
