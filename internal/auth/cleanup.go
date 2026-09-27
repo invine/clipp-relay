@@ -11,6 +11,11 @@ const cleanupBatchSize = 500
 // A full batch schedules another pass shortly, so a backlog cannot persist just
 // because a single hourly pass reached its batch limit.
 var cleanupQueries = []string{
+	`DELETE FROM public.authorization_codes WHERE credential_digest IN (SELECT credential_digest FROM public.authorization_codes WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT 500)`,
+	`DELETE FROM public.relay_access_tokens WHERE credential_digest IN (SELECT credential_digest FROM public.relay_access_tokens WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT 500)`,
+	`DELETE FROM public.relay_access_tokens WHERE credential_digest IN (SELECT t.credential_digest FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id WHERE g.terminated_at<clock_timestamp()-interval '1 hour' ORDER BY g.terminated_at LIMIT 500)`,
+	`DELETE FROM public.refresh_generations WHERE credential_digest IN (SELECT f.credential_digest FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE g.terminated_at<clock_timestamp()-interval '1 hour' OR (g.terminated_at IS NULL AND (g.idle_expires_at<clock_timestamp()-interval '1 hour' OR g.absolute_expires_at<clock_timestamp()-interval '1 hour')) LIMIT 500)`,
+	`DELETE FROM public.login_grants WHERE id IN (SELECT g.id FROM public.login_grants g WHERE (g.terminated_at<clock_timestamp()-interval '1 hour' OR g.idle_expires_at<clock_timestamp()-interval '1 hour' OR g.absolute_expires_at<clock_timestamp()-interval '1 hour') AND NOT EXISTS(SELECT 1 FROM public.refresh_generations f WHERE f.grant_id=g.id) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens t WHERE t.grant_id=g.id) LIMIT 500)`,
 	`DELETE FROM public.authorization_transactions WHERE id IN (SELECT id FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT 500)`,
 	`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour' ORDER BY idle_expires_at LIMIT 500)`,
 	`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE absolute_expires_at<clock_timestamp()-interval '1 hour' ORDER BY absolute_expires_at LIMIT 500)`,

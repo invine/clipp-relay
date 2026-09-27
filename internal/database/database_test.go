@@ -85,7 +85,7 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	}
 	defer p.Close()
 	// The fixture is intentionally disposable. Reset only this owned test table.
-	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
+	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
 		t.Fatal(e)
 	}
 	var wg sync.WaitGroup
@@ -173,7 +173,7 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	if _, e = p.Exec(ctx, "UPDATE public.schema_migrations SET checksum=$1 WHERE revision=1", checksum(migrations[0].sql)); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = p.Exec(ctx, "INSERT INTO public.schema_migrations(revision,checksum) VALUES (5,repeat('0',64))"); e != nil {
+	if _, e = p.Exec(ctx, "INSERT INTO public.schema_migrations(revision,checksum) VALUES ($1,repeat('0',64))", ExpectedRevision+1); e != nil {
 		t.Fatal(e)
 	}
 	if e = VerifyServing(ctx, sp); e == nil {

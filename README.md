@@ -44,6 +44,10 @@ are rejected. An example shape is:
   "version": 1,
   "portal_origin": "https://portal.example.com",
   "wss_hostname": "wss.example.com",
+  "public_clients": {
+    "android_redirect": "clipp-relay://oauth/callback",
+    "extension_redirect": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
+  },
   "listeners": { "public": ":8080", "private": ":8081" },
   "database": {
     "mode": "external",

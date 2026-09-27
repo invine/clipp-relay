@@ -42,24 +42,31 @@ func Google() Provider {
 }
 
 type Server struct {
-	Pool                           *pgxpool.Pool
-	Origin, ClientID, ClientSecret string
-	AdminAllowlistFile             string
-	Peppers                        map[uint64][]byte
-	CurrentPepper                  uint64
-	provider                       Provider
-	client                         *http.Client
-	providerSlots                  chan struct{}
-	mu                             sync.Mutex
-	keyMu                          sync.Mutex
-	flows                          map[string]flow
-	keys                           map[string]*rsa.PublicKey
-	keysUntil                      time.Time
-	lastKeyFetch                   time.Time
-	globalRate                     rate
-	accountRates                   map[string]rate
-	beforeProfileRead              func()
-	commitPlan                     func(context.Context, pgx.Tx) error
+	Pool                               *pgxpool.Pool
+	Origin, ClientID, ClientSecret     string
+	AndroidRedirect, ExtensionRedirect string
+	AdminAllowlistFile                 string
+	Peppers                            map[uint64][]byte
+	CurrentPepper                      uint64
+	provider                           Provider
+	client                             *http.Client
+	providerSlots                      chan struct{}
+	mu                                 sync.Mutex
+	identityMu                         sync.Mutex
+	fenceKey                           [32]byte
+	fences                             map[[32]byte]identityFence
+	flowSeq                            uint64
+	flowEpoch                          uint64
+	keyMu                              sync.Mutex
+	flows                              map[string]flow
+	consents                           map[string]oauthConsent
+	keys                               map[string]*rsa.PublicKey
+	keysUntil                          time.Time
+	lastKeyFetch                       time.Time
+	globalRate                         rate
+	accountRates                       map[string]rate
+	beforeProfileRead                  func()
+	commitPlan                         func(context.Context, pgx.Tx) error
 }
 type rate struct {
 	tokens float64
@@ -89,6 +96,13 @@ var errInvalidSession = errors.New("invalid session")
 type flow struct {
 	state, nonce, binding string
 	expires               time.Time
+	intent                *oauthIntent
+	seq, epoch            uint64
+}
+
+type identityFence struct {
+	seq   uint64
+	until time.Time
 }
 
 func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provider) *Server {
@@ -97,7 +111,42 @@ func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provid
 		client = &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{MaxResponseHeaderBytes: 16 << 10}}
 	}
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	return &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), flows: map[string]flow{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}}
+	s := &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}}
+	if _, err := rand.Read(s.fenceKey[:]); err != nil {
+		panic("identity fence key unavailable")
+	}
+	return s
+}
+func (s *Server) identityKey(subject string) [32]byte {
+	h := hmac.New(sha256.New, s.fenceKey[:])
+	h.Write([]byte(googleIssuer + "\x00" + subject))
+	var key [32]byte
+	copy(key[:], h.Sum(nil))
+	return key
+}
+
+// WithIdentityFence serializes a security mutation against Google callback completion.
+// It fences every older continuation even if work returns an uncertain error.
+func (s *Server) WithIdentityFence(subject string, work func() error) error {
+	s.identityMu.Lock()
+	defer s.identityMu.Unlock()
+	s.mu.Lock()
+	now := time.Now()
+	for key, fence := range s.fences {
+		if !now.Before(fence.until) {
+			delete(s.fences, key)
+		}
+	}
+	key := s.identityKey(subject)
+	if len(s.fences) >= 4096 && s.fences[key].until.IsZero() {
+		s.flowEpoch++
+		s.flows = map[string]flow{}
+		s.consents = map[string]oauthConsent{}
+		s.fences = map[[32]byte]identityFence{}
+	}
+	s.fences[key] = identityFence{seq: s.flowSeq, until: now.Add(10 * time.Minute)}
+	s.mu.Unlock()
+	return work()
 }
 func opaque() (string, error) {
 	b := make([]byte, 32)
@@ -169,6 +218,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /", s.home)
 	mux.HandleFunc("GET /auth/login", s.login)
 	mux.HandleFunc("GET /auth/callback", s.callback)
+	mux.HandleFunc("GET /oauth/authorize", s.authorize)
+	mux.HandleFunc("POST /oauth/authorize", s.confirmAuthorization)
+	mux.HandleFunc("POST /oauth/token", s.token)
 	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.HandleFunc("GET /admin", s.adminHome)
 	mux.HandleFunc("POST /admin/accounts/{id}", s.adminAccount)
@@ -177,6 +229,9 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) })
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	s.loginFlow(w, r, nil)
+}
+func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauthIntent) {
 	select {
 	case s.providerSlots <- struct{}{}:
 		defer func() { <-s.providerSlots }()
@@ -217,12 +272,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			delete(s.flows, k)
 		}
 	}
-	if len(s.flows) >= 1024 {
+	if len(s.flows)+len(s.consents) >= 1024 {
 		s.mu.Unlock()
 		fail(w, 503)
 		return
 	}
-	s.flows[state] = flow{state, nonce, binding, now.Add(10 * time.Minute)}
+	s.flowSeq++
+	s.flows[state] = flow{state: state, nonce: nonce, binding: binding, expires: now.Add(10 * time.Minute), intent: intent, seq: s.flowSeq, epoch: s.flowEpoch}
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
@@ -279,6 +335,20 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401)
 		return
 	}
+	if !time.Now().Before(f.expires) {
+		fail(w, 401)
+		return
+	}
+	s.identityMu.Lock()
+	defer s.identityMu.Unlock()
+	s.mu.Lock()
+	fence := s.fences[s.identityKey(claims.Subject)]
+	blocked := f.epoch != s.flowEpoch || (fence.seq >= f.seq && !fence.until.IsZero())
+	s.mu.Unlock()
+	if blocked {
+		fail(w, 401)
+		return
+	}
 	if !s.allowAccount(claims.Subject) {
 		fail(w, 429)
 		return
@@ -329,6 +399,10 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie(w, sessionCookie, credential, 0)
+	if f.intent != nil {
+		s.presentConsent(w, r, accountID, credential, *f.intent)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 

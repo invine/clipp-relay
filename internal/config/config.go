@@ -15,10 +15,14 @@ import (
 )
 
 type Config struct {
-	Version      int    `json:"version"`
-	PortalOrigin string `json:"portal_origin"`
-	WSSHostname  string `json:"wss_hostname"`
-	Listeners    struct {
+	Version       int    `json:"version"`
+	PortalOrigin  string `json:"portal_origin"`
+	WSSHostname   string `json:"wss_hostname"`
+	PublicClients struct {
+		AndroidRedirect   string `json:"android_redirect"`
+		ExtensionRedirect string `json:"extension_redirect"`
+	} `json:"public_clients"`
+	Listeners struct {
 		Public  string `json:"public"`
 		Private string `json:"private"`
 	} `json:"listeners"`
@@ -205,6 +209,19 @@ func (c Config) Validate() error {
 	}
 	if !hostname(c.WSSHostname) || strings.EqualFold(c.WSSHostname, u.Hostname()) {
 		return errors.New("wss_hostname must be a distinct exact hostname")
+	}
+	android, err := url.Parse(c.PublicClients.AndroidRedirect)
+	if err != nil || android.Scheme == "" || android.Scheme == "http" || android.Scheme == "https" || android.Host == "" || android.User != nil || android.RawQuery != "" || android.Fragment != "" || android.RawFragment != "" || android.Opaque != "" || android.String() != c.PublicClients.AndroidRedirect {
+		return errors.New("android_redirect must be a fixed private application URI")
+	}
+	extension, err := url.Parse(c.PublicClients.ExtensionRedirect)
+	if err != nil || extension.Scheme != "https" || extension.User != nil || extension.Port() != "" || extension.Path != "/clipp-relay" || extension.RawPath != "" || extension.RawQuery != "" || extension.Fragment != "" || extension.String() != c.PublicClients.ExtensionRedirect || !strings.HasSuffix(extension.Hostname(), ".chromiumapp.org") || len(strings.TrimSuffix(extension.Hostname(), ".chromiumapp.org")) != 32 {
+		return errors.New("extension_redirect must be an exact chromiumapp callback")
+	}
+	for _, ch := range strings.TrimSuffix(extension.Hostname(), ".chromiumapp.org") {
+		if ch < 'a' || ch > 'p' {
+			return errors.New("extension_redirect must contain a Chrome extension ID")
+		}
 	}
 	pub, err := listenerPort(c.Listeners.Public)
 	if err != nil {
