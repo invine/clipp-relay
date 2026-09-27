@@ -23,6 +23,7 @@ rather than silently changing policy or reviving an obsolete design.
 - [Approve accounts and assign plans](issues/04-approve-accounts-and-assign-plans.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 - [Authorize and renew Clipp credentials](issues/05-authorize-and-renew-clipp-credentials.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 - [Commit weekly quota and show usage](issues/06-commit-weekly-quota-and-show-usage.md) is resolved after reviewed integration and disposable PostgreSQL verification.
+- [Relay authenticated TCP traffic](issues/07-relay-authenticated-tcp-traffic.md) is claimed in an isolated Go worktree.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
 

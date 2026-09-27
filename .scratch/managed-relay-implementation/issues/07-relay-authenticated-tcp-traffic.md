@@ -4,7 +4,7 @@
 
 **Blocked by:** [05: Authorize and renew Clipp credentials](05-authorize-and-renew-clipp-credentials.md); [06: Commit weekly quota and show usage](06-commit-weekly-quota-and-show-usage.md).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I1, I4, I5, I8, I11.
@@ -103,3 +103,5 @@ provisioning, publication or load generation against an unapproved target.
 ## Comments
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
+
+- Claimed centrally on 2026-09-27 after ticket 05 (`925cfe7`) and ticket 06 (`2306330`) resolution; assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
