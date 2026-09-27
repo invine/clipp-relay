@@ -1,12 +1,12 @@
 # Clipp Relay service
 
-This repository currently implements the service foundation, Google portal
-registration, administrator account and quota-plan operations, and the shared
-weekly Quota operation. It provides
+This repository implements the service foundation, Google portal registration,
+administrator account and quota-plan operations, shared weekly Quota operation,
+and authenticated TCP Circuit Relay v2 traffic. It provides
 explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
-Access Tokens, and separate public and private HTTP listeners. It does **not**
-yet provide Relay Sessions or public relay transport.
+Access Tokens, separate public and private HTTP listeners, bearer discovery,
+exact-connection Relay Sessions, and stock HOP/STOP forwarding.
 The Quota operation commits at most 64 KiB of account-week credit per block
 before making it locally usable. Callers must split larger reporter counts and
 consume any smaller remaining local balance before requesting another block.
@@ -14,11 +14,13 @@ Committed credit is retained in PostgreSQL across restart and never refunded;
 unused process-local credit is not restored. The owner profile shows Quota
 committed and 12 completed weekly totals. Its capacity table distinguishes
 configured limits from separately sampled live counts. Active Login Grants are
-sampled from PostgreSQL; live Relay Sessions show **Unavailable** until the
-relay session runtime is wired. Unavailable does not mean zero.
-`/readyz` therefore remains `503 unavailable`; `/livez` is `200 ok` while the
-process runs. A later relay slice must start its listeners and publish a
-complete address snapshot before it may change readiness.
+sampled from PostgreSQL; live Relay Sessions are sampled from this process.
+`/readyz` is `200 ok` only after the TCP listener and a complete address
+snapshot are available; otherwise it is `503 unavailable`. `/livez` is
+`200 ok` while the process runs. Public relay discovery is withdrawn during
+drain or when the address snapshot expires.
+Relay Authentication sends one length-delimited JSON request and half-closes
+its write side; the relay checks end of request before returning its response.
 
 ## Run
 
@@ -46,8 +48,10 @@ transaction-compatible migration with its revision marker. Stop serving before
 a schema change.
 
 The single non-secret JSON configuration is versioned. No environment or flag
-overrides affect policy. All fields are required; unknown and duplicate fields
-are rejected. An example shape is:
+overrides affect policy. Unknown and duplicate fields are rejected. Serving
+requires `relay_tcp.listen`; migration accepts an omitted `relay_tcp` section
+because it does not start a listener. Public addresses must be supplied for
+discovery and readiness. An example shape is:
 
 ```json
 {
@@ -59,6 +63,10 @@ are rejected. An example shape is:
     "extension_redirect": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
   },
   "listeners": { "public": ":8080", "private": ":8081" },
+  "relay_tcp": {
+    "listen": "/ip4/0.0.0.0/tcp/4001",
+    "public_addresses": ["/dns4/relay.example.com/tcp/4001"]
+  },
   "database": {
     "mode": "external",
     "host": "db.internal.example.com",

@@ -427,9 +427,11 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		fail(w, 409)
 		return
 	}
+	var weeklyBytes int64
+	var sessionLimit int
 	if action != "deny" {
 		var archived bool
-		e = tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL FROM public.quota_plans WHERE id=$1 FOR UPDATE`, plan).Scan(&archived)
+		e = tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL,weekly_bytes,sessions FROM public.quota_plans WHERE id=$1 FOR UPDATE`, plan).Scan(&archived, &weeklyBytes, &sessionLimit)
 		if e == pgx.ErrNoRows || archived {
 			fail(w, 409)
 			return
@@ -471,7 +473,22 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		auditPlan = plan
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id,plan_id,reason,actor_email) VALUES($1,clock_timestamp(),$2,$3,$4,$5,$6)`, auditID, event, target, auditPlan, r.PostForm.Get("reason"), actor.email)
-	if e != nil || tx.Commit(ctx) != nil {
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	var commitErr error
+	if s.commitAccount != nil {
+		commitErr = s.commitAccount(ctx, tx)
+	} else {
+		commitErr = tx.Commit(ctx)
+	}
+	// A failed Commit may be ambiguous. The callback conservatively closes and
+	// invalidates then; successful plan edits apply only their cap deltas.
+	if s.accountChanged != nil {
+		s.accountChanged(AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: action == "deny" || commitErr != nil, DiscardCredit: action == "deny" || commitErr != nil})
+	}
+	if commitErr != nil {
 		fail(w, 503)
 		return
 	}

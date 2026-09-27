@@ -52,6 +52,19 @@ func fixture(t *testing.T) (*Quota, string, *pgxpool.Pool) {
 	return q, id, p
 }
 
+func TestPlanCapChangePreservesCreditAtEqualityAndIncrease(t *testing.T) {
+	b := &balance{week: weekStart(time.Now()), committed: BlockBytes, usable: 1234}
+	q := &Quota{balances: map[string]*balance{"account": b}}
+	for _, cap := range []int64{BlockBytes, 2 * BlockBytes} {
+		if q.InvalidateAbove("account", cap) || b.usable != 1234 {
+			t.Fatalf("cap %d discarded funded remainder", cap)
+		}
+	}
+	if !q.InvalidateAbove("account", BlockBytes-1) || b.usable != 0 {
+		t.Fatal("reduced cap retained local credit")
+	}
+}
+
 func TestRestartDoesNotRestoreOrRefundFundedCredit(t *testing.T) {
 	q, id, pool := fixture(t)
 	first, err := q.Take(context.Background(), id, 0, 1024)
@@ -99,6 +112,18 @@ func TestConfirmedCreditIsSharedAndCommittedOnFunding(t *testing.T) {
 	last, err := q.Take(ctx, id, 0, 0)
 	if err != nil || last.Committed != 65536 || last.Usable != 53248 {
 		t.Fatalf("shared credit = %+v, %v", last, err)
+	}
+}
+
+func TestEnsureFundsWithoutInventingTraffic(t *testing.T) {
+	q, id, _ := fixture(t)
+	ready, err := q.Ensure(context.Background(), id, 0)
+	if err != nil || ready.Committed != BlockBytes || ready.Usable != BlockBytes {
+		t.Fatalf("funding without traffic = %+v, %v", ready, err)
+	}
+	charged, err := q.Take(context.Background(), id, 0, 17)
+	if err != nil || charged.Committed != BlockBytes || charged.Usable != BlockBytes-17 {
+		t.Fatalf("real endpoint charge = %+v, %v", charged, err)
 	}
 }
 

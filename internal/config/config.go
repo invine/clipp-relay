@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	ma "github.com/multiformats/go-multiaddr"
 	"io"
 	"net"
 	"net/url"
@@ -26,6 +27,10 @@ type Config struct {
 		Public  string `json:"public"`
 		Private string `json:"private"`
 	} `json:"listeners"`
+	RelayTCP struct {
+		Listen          string   `json:"listen"`
+		PublicAddresses []string `json:"public_addresses"`
+	} `json:"relay_tcp"`
 	Database struct {
 		Mode         string `json:"mode"`
 		Host         string `json:"host"`
@@ -231,6 +236,21 @@ func (c Config) Validate() error {
 	if err != nil || pub == priv {
 		return errors.New("invalid or conflicting private listener")
 	}
+	if c.RelayTCP.Listen != "" {
+		if !relayTCPAddress(c.RelayTCP.Listen, true) {
+			return errors.New("invalid relay TCP listener")
+		}
+	} else if len(c.RelayTCP.PublicAddresses) > 0 {
+		return errors.New("relay TCP publication requires listener")
+	}
+	if len(c.RelayTCP.PublicAddresses) > 16 {
+		return errors.New("too many relay TCP addresses")
+	}
+	for _, address := range c.RelayTCP.PublicAddresses {
+		if !relayTCPAddress(address, false) {
+			return errors.New("invalid public relay TCP address")
+		}
+	}
 	if (c.Database.Mode != "external" && c.Database.Mode != "bundled") || !hostname(c.Database.Host) || c.Database.Port == 0 || c.Database.Name == "" || strings.ContainsAny(c.Database.Name, " /\t\n") {
 		return errors.New("invalid database target")
 	}
@@ -240,6 +260,23 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func relayTCPAddress(value string, listen bool) bool {
+	a, err := ma.NewMultiaddr(value)
+	if err != nil || a.String() != value {
+		return false
+	}
+	parts := a.Protocols()
+	if len(parts) != 2 || (parts[0].Code != ma.P_IP4 && parts[0].Code != ma.P_IP6 && (listen || parts[0].Code != ma.P_DNS4 && parts[0].Code != ma.P_DNS6)) || parts[1].Code != ma.P_TCP {
+		return false
+	}
+	portText, err := a.ValueForProtocol(ma.P_TCP)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(portText)
+	return err == nil && port >= 1024 && port <= 65535
 }
 
 func listenerPort(addr string) (int, error) {

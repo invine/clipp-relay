@@ -67,7 +67,9 @@ type Server struct {
 	accountRates                       map[string]rate
 	beforeProfileRead                  func()
 	commitPlan                         func(context.Context, pgx.Tx) error
+	commitAccount                      func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
+	accountChanged                     func(AccountChange)
 }
 
 // CapacitySample is a separate, aggregate live observation. Nil counts mean
@@ -77,6 +79,18 @@ type CapacitySample struct{ LiveSessions, ActiveLoginGrants *int }
 func (s *Server) SetCapacitySampler(sample func(context.Context, string) (CapacitySample, error)) {
 	s.capacitySampler = sample
 }
+
+// SetAccountChanged installs the in-process invalidation path for committed
+// account policy changes. It must be set before serving HTTP requests.
+type AccountChange struct {
+	AccountID     string
+	WeeklyBytes   int64
+	SessionLimit  int
+	CloseAll      bool
+	DiscardCredit bool
+}
+
+func (s *Server) SetAccountChanged(changed func(AccountChange)) { s.accountChanged = changed }
 
 // SampleActiveGrants reads only an aggregate live count, separately from the
 // profile's policy and quota snapshot. The portal treats a failed sample as

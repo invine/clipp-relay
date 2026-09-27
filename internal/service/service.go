@@ -32,6 +32,7 @@ func New() *Service {
 }
 
 func (s *Service) SetPublicHandler(handler http.Handler) { s.public = handler }
+func (s *Service) SetReady(ready bool)                   { s.ready.Store(ready) }
 
 func (s *Service) PublicHandler() http.Handler {
 	if s.public != nil {
@@ -90,7 +91,11 @@ func (s *Service) PrivateHandler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = w.Write([]byte("# HELP clipp_relay_ready Relay readiness.\n# TYPE clipp_relay_ready gauge\nclipp_relay_ready 0\n"))
+		ready := "0"
+		if s.ready.Load() {
+			ready = "1"
+		}
+		_, _ = w.Write([]byte("# HELP clipp_relay_ready Relay readiness.\n# TYPE clipp_relay_ready gauge\nclipp_relay_ready " + ready + "\n"))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -138,8 +143,8 @@ type limitedConn struct {
 
 func (c *limitedConn) Close() error { e := c.Conn.Close(); c.once.Do(c.release); return e }
 
-// Run binds both HTTP listeners. Ready remains false until a future relay slice
-// starts transport listeners and publishes a complete address snapshot.
+// Run binds both HTTP listeners. The caller controls readiness from the relay
+// listener and its complete public address snapshot.
 func (s *Service) Run(ctx context.Context, publicAddr, privateAddr string) error {
 	pub, e := net.Listen("tcp", publicAddr)
 	if e != nil {

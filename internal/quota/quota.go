@@ -177,6 +177,21 @@ func (q *Quota) Invalidate(id string) {
 	q.release(id, b)
 }
 
+// InvalidateAbove discards credit only when a committed debit exceeds the new
+// weekly cap. Equal and larger caps preserve the funded remainder.
+func (q *Quota) InvalidateAbove(id string, cap int64) bool {
+	b := q.acquire(id)
+	b.mu.Lock()
+	above := b.committed > cap
+	if above {
+		b.epoch.Add(1)
+		b.usable = 0
+	}
+	b.mu.Unlock()
+	q.release(id, b)
+	return above
+}
+
 func (q *Quota) probeLoop() {
 	defer close(q.done)
 	ticker := time.NewTicker(time.Minute)
@@ -278,6 +293,16 @@ func (q *Quota) clockOK() bool {
 // local balance without funding. Reporters should call repeatedly for counts
 // larger than the remaining local credit.
 func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (Result, error) {
+	return q.take(ctx, id, generation, bytes, false)
+}
+
+// Ensure commits credit before relay permission is granted, without counting
+// a byte that has not been reported by the stock Circuit Relay endpoint.
+func (q *Quota) Ensure(ctx context.Context, id string, generation int64) (Result, error) {
+	return q.take(ctx, id, generation, 0, true)
+}
+
+func (q *Quota) take(ctx context.Context, id string, generation, bytes int64, ensure bool) (Result, error) {
 	unitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	select {
@@ -325,10 +350,10 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 		b.deadline = time.Time{}
 		b.committed = 0
 	}
-	if bytes == 0 {
+	if bytes == 0 && !ensure {
 		return Result{b.committed, b.usable, b.week}, nil
 	}
-	if bytes > b.usable {
+	if bytes > b.usable || ensure && b.usable == 0 {
 		// A caller may not consume a partial block or pre-fund its next block.
 		if b.usable > 0 {
 			return Result{b.committed, b.usable, b.week}, ErrTemporary
