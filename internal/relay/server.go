@@ -395,6 +395,10 @@ func (s *Server) expire(v *session) {
 
 func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string) {
 	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return time.Time{}, 0, "temporarily_unavailable"
+	}
 	allowed := s.globalRate.allow(time.Now(), 200, 400)
 	b := s.connRate[c]
 	allowed = b.allow(time.Now(), 1, 2) && allowed

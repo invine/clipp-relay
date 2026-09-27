@@ -11,6 +11,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
+	"strings"
 )
 
 func TestDrainWaitsForStockCircuitAndForceCloses(t *testing.T) {
@@ -50,6 +51,35 @@ func TestDrainWaitsForStockCircuitAndForceCloses(t *testing.T) {
 		}
 		cancel()
 		_ = s.Close()
+	}
+}
+
+func TestDrainRejectsRenewalAndReservationOnExistingSession(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if err = h.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"ok":true`) {
+		t.Fatal(response)
+	}
+	s.StartDrain()
+	if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+		t.Fatal(response)
+	}
+	if _, err = client.Reserve(ctx, h, ai); err == nil || !strings.Contains(err.Error(), "PERMISSION_DENIED") {
+		t.Fatalf("reserve during drain: %v", err)
 	}
 }
 

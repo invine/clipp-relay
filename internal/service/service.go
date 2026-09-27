@@ -18,12 +18,14 @@ var portal embed.FS
 type Service struct {
 	live              atomic.Bool
 	ready             atomic.Bool
+	routing           atomic.Bool
 	requests          chan struct{}
 	scrapes           chan struct{}
 	servers           []*http.Server
 	once              sync.Once
 	public            http.Handler
 	publicRequests    chan struct{}
+	readinessCheck    func() bool
 	rendezvousCountV1 func() uint64
 	rendezvousCountV2 func() uint64
 	deletionMetrics   func(context.Context) (DeletionSample, error)
@@ -44,11 +46,20 @@ func (s *Service) SetDeletionMetrics(sample func(context.Context) (DeletionSampl
 func New() *Service {
 	s := &Service{requests: make(chan struct{}, 16), scrapes: make(chan struct{}, 2), publicRequests: make(chan struct{}, 128)}
 	s.live.Store(true)
+	s.routing.Store(true)
 	return s
 }
 
 func (s *Service) SetPublicHandler(handler http.Handler) { s.public = handler }
 func (s *Service) SetReady(ready bool)                   { s.ready.Store(ready) }
+func (s *Service) SetRouting(routing bool)               { s.routing.Store(routing) }
+func (s *Service) SetReadinessCheck(check func() bool)   { s.readinessCheck = check }
+func (s *Service) readyNow() bool {
+	if !s.ready.Load() || !s.routing.Load() {
+		return false
+	}
+	return s.readinessCheck == nil || s.readinessCheck()
+}
 func (s *Service) SetRendezvousMetrics(v1, v2 func() uint64) {
 	s.rendezvousCountV1, s.rendezvousCountV2 = v1, v2
 }
@@ -97,7 +108,7 @@ func (s *Service) PrivateHandler() http.Handler {
 		}
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) { health(s.live.Load())(w, r) })
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) { health(s.ready.Load())(w, r) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) { health(s.readyNow())(w, r) })
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case s.scrapes <- struct{}{}:
@@ -111,7 +122,7 @@ func (s *Service) PrivateHandler() http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		ready := "0"
-		if s.ready.Load() {
+		if s.readyNow() {
 			ready = "1"
 		}
 		_, _ = w.Write([]byte("# HELP clipp_relay_ready Relay readiness.\n# TYPE clipp_relay_ready gauge\nclipp_relay_ready " + ready + "\n"))
@@ -192,12 +203,14 @@ func (s *Service) Run(ctx context.Context, publicAddr, privateAddr string) error
 		_ = pub.Close()
 		return errors.New("private listener unavailable")
 	}
+	s.routing.Store(true)
 	s.servers = []*http.Server{{Handler: s.PublicHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}, {Handler: s.PrivateHandler(), ReadHeaderTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second}}
 	errCh := make(chan error, 2)
 	go func() { errCh <- s.servers[0].Serve(&limitedListener{Listener: pub, slots: make(chan struct{}, 512)}) }()
 	go func() { errCh <- s.servers[1].Serve(&limitedListener{Listener: priv, slots: make(chan struct{}, 32)}) }()
 	select {
 	case <-ctx.Done():
+		s.routing.Store(false)
 		s.ready.Store(false)
 		s.live.Store(false)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -207,6 +220,7 @@ func (s *Service) Run(ctx context.Context, publicAddr, privateAddr string) error
 		}
 		return nil
 	case e := <-errCh:
+		s.routing.Store(false)
 		s.ready.Store(false)
 		s.live.Store(false)
 		_ = pub.Close()

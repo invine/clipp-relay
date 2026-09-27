@@ -62,6 +62,41 @@ func TestPrivateHealthDoesNotClaimRelayReadiness(t *testing.T) {
 	}
 }
 
+func TestReadyRequiresLocalRoutingAndPublication(t *testing.T) {
+	s := service.New()
+	s.SetRouting(false)
+	s.SetReady(true)
+	r := httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if r.Code != 503 {
+		t.Fatalf("unbound readiness: %d", r.Code)
+	}
+	s.SetRouting(true)
+	r = httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if r.Code != 200 {
+		t.Fatalf("bound readiness: %d", r.Code)
+	}
+}
+
+func TestReadyChecksPublicationFreshnessAtProbeTime(t *testing.T) {
+	s := service.New()
+	s.SetReady(true)
+	fresh := false
+	s.SetReadinessCheck(func() bool { return fresh })
+	r := httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if r.Code != 503 {
+		t.Fatalf("stale readiness: %d", r.Code)
+	}
+	fresh = true
+	r = httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if r.Code != 200 {
+		t.Fatalf("fresh readiness: %d", r.Code)
+	}
+}
+
 func TestReadinessMetricTracksHealth(t *testing.T) {
 	s := service.New()
 	for _, ready := range []bool{false, true, false} {

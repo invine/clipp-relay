@@ -29,6 +29,7 @@ type Config struct {
 	} `json:"listeners"`
 	RelayTCP struct {
 		Listen          string   `json:"listen"`
+		PublicPort      uint16   `json:"public_port"`
 		PublicAddresses []string `json:"public_addresses"`
 	} `json:"relay_tcp"`
 	RelayWebSocket struct {
@@ -37,8 +38,16 @@ type Config struct {
 	} `json:"relay_websocket"`
 	RelayWebRTC struct {
 		Listen          string   `json:"listen"`
+		PublicPort      uint16   `json:"public_port"`
 		PublicAddresses []string `json:"public_addresses"`
 	} `json:"relay_webrtc_direct"`
+	RelayServices struct {
+		Namespace string `json:"namespace"`
+		TCPName   string `json:"tcp_name"`
+		UDPName   string `json:"udp_name"`
+		TokenFile string `json:"token_file"`
+		CAFile    string `json:"ca_file"`
+	} `json:"relay_services"`
 	Database struct {
 		Mode         string `json:"mode"`
 		Host         string `json:"host"`
@@ -287,8 +296,18 @@ func (c Config) Validate() error {
 		return errors.New("WebRTC Direct publication requires listener")
 	}
 	if (c.RelayWebSocket.Listen != "" && len(c.RelayWebSocket.PublicAddresses) == 0) || len(c.RelayWebSocket.PublicAddresses) > 16 ||
-		(c.RelayWebRTC.Listen != "" && len(c.RelayWebRTC.PublicAddresses) == 0) || len(c.RelayWebRTC.PublicAddresses) > 16 {
+		len(c.RelayWebRTC.PublicAddresses) > 16 {
 		return errors.New("incomplete or excessive relay transport addresses")
+	}
+	watchTCP := c.RelayTCP.Listen != "" && len(c.RelayTCP.PublicAddresses) == 0
+	watchUDP := c.RelayWebRTC.Listen != "" && len(c.RelayWebRTC.PublicAddresses) == 0
+	if watchTCP && c.RelayTCP.PublicPort == 0 || watchUDP && c.RelayWebRTC.PublicPort == 0 || !watchTCP && c.RelayTCP.PublicPort != 0 || !watchUDP && c.RelayWebRTC.PublicPort != 0 {
+		return errors.New("public_port required only for watched transport")
+	}
+	if watchTCP || watchUDP {
+		if !dnsLabel(c.RelayServices.Namespace) || !strings.HasPrefix(c.RelayServices.TokenFile, "/") || !strings.HasPrefix(c.RelayServices.CAFile, "/") || watchTCP && !dnsLabel(c.RelayServices.TCPName) || watchUDP && !dnsLabel(c.RelayServices.UDPName) {
+			return errors.New("watched relay transport requires named Service and API Secret files")
+		}
 	}
 	for _, address := range c.RelayWebSocket.PublicAddresses {
 		if !relayWSSAddress(address, c.WSSHostname) {
@@ -337,6 +356,10 @@ func (c Config) Validate() error {
 		return errors.New("incomplete OCI journal configuration")
 	}
 	return nil
+}
+
+func dnsLabel(s string) bool {
+	return len(s) > 0 && len(s) <= 63 && hostname(s) && !strings.Contains(s, ".")
 }
 
 func relayWebSocketListen(value string) bool {

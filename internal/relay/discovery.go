@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,9 +39,19 @@ func NewDiscovery(server *Server, authority Authority, host string, addresses []
 // Publish replaces the whole set after validating every address and binding
 // it to the live Peer ID. An empty set deliberately withdraws discovery.
 func (d *Discovery) Publish(addresses []ma.Multiaddr) error {
+	return d.PublishAt(addresses, time.Now())
+}
+
+// PublishAt retains the oldest source verification time when a snapshot is
+// assembled from independent Service watches. Reuse cannot renew stale data.
+func (d *Discovery) PublishAt(addresses []ma.Multiaddr, verified time.Time) error {
 	if len(addresses) == 0 {
 		d.withdraw()
 		return nil
+	}
+	if verified.IsZero() || time.Since(verified) > 5*time.Minute {
+		d.withdraw()
+		return errors.New("relay address snapshot unverified or stale")
 	}
 	if !d.server.Serving() || len(d.server.Host.Network().ListenAddresses()) == 0 {
 		d.withdraw()
@@ -89,7 +100,7 @@ func (d *Discovery) Publish(addresses []ma.Multiaddr) error {
 			parts = parts[:len(parts)-1]
 		}
 		switch {
-		case len(parts) == 2 && parts[1].Code == ma.P_TCP && d.server.tcpEnabled:
+		case len(parts) == 2 && parts[1].Code == ma.P_TCP && d.server.tcpEnabled && (parts[0].Code == ma.P_IP4 || parts[0].Code == ma.P_IP6 || parts[0].Code == ma.P_DNS || parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6):
 			kind = "tcp"
 		case len(parts) == 4 && parts[1].Code == ma.P_TCP && parts[2].Code == ma.P_TLS && parts[3].Code == ma.P_WS && d.server.wsEnabled:
 			name, err := a.ValueForProtocol(parts[0].Code)
@@ -97,7 +108,7 @@ func (d *Discovery) Publish(addresses []ma.Multiaddr) error {
 				kind = "websocket"
 			}
 		case (len(parts) == 3 || len(parts) == 4) && parts[1].Code == ma.P_UDP && parts[2].Code == ma.P_WEBRTC_DIRECT && d.server.webrtcEnabled:
-			if parts[0].Code == ma.P_IP4 || parts[0].Code == ma.P_IP6 || parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6 {
+			if parts[0].Code == ma.P_IP4 || parts[0].Code == ma.P_IP6 || parts[0].Code == ma.P_DNS || parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6 {
 				kind = "webrtc-direct"
 				if len(parts) == 4 {
 					if parts[3].Code != ma.P_CERTHASH {
@@ -135,11 +146,29 @@ func (d *Discovery) Publish(addresses []ma.Multiaddr) error {
 	for a := range set {
 		complete = append(complete, a)
 	}
+	sort.Strings(complete)
+	size := 256
+	for _, address := range complete {
+		size += len(address) + 3
+	}
+	if size > 16<<10 {
+		d.withdraw()
+		return errors.New("relay address snapshot exceeds discovery limit")
+	}
 	d.mu.Lock()
 	d.addresses = complete
-	d.verified = time.Now()
+	d.verified = verified
 	d.mu.Unlock()
 	return nil
+}
+
+// Published reports whether the complete snapshot is still fresh and the
+// process is admitting traffic. It uses only local state for readiness.
+func (d *Discovery) Published() bool {
+	d.mu.RLock()
+	complete, verified := len(d.addresses) != 0, d.verified
+	d.mu.RUnlock()
+	return complete && time.Since(verified) <= 5*time.Minute && d.server.Serving()
 }
 
 func (d *Discovery) withdraw() {
@@ -169,6 +198,10 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		discoveryError(w, 400, "invalid_request")
 		return
 	}
+	if !d.server.Serving() {
+		discoveryError(w, 503, "temporarily_unavailable")
+		return
+	}
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") || strings.Count(authHeader, " ") != 1 {
 		discoveryError(w, 401, "authentication_failed")
@@ -189,16 +222,16 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		discoveryError(w, 503, "temporarily_unavailable")
 		return
 	}
-	if d.server.ActiveSessions() >= d.server.maxSessions {
-		discoveryError(w, 429, "rate_limited")
-		return
-	}
 	d.mu.RLock()
 	addresses := append([]string(nil), d.addresses...)
 	verified := d.verified
 	d.mu.RUnlock()
 	if len(addresses) == 0 || time.Since(verified) > 5*time.Minute {
 		discoveryError(w, 503, "temporarily_unavailable")
+		return
+	}
+	if d.server.ActiveSessions() >= d.server.maxSessions {
+		discoveryError(w, 429, "rate_limited")
 		return
 	}
 	expiry := time.Now().Add(time.Minute)
