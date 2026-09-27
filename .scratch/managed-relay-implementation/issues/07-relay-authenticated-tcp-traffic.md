@@ -4,7 +4,7 @@
 
 **Blocked by:** [05: Authorize and renew Clipp credentials](05-authorize-and-renew-clipp-credentials.md); [06: Commit weekly quota and show usage](06-commit-weekly-quota-and-show-usage.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I1, I4, I5, I8, I11.
@@ -70,14 +70,14 @@ transport and relay-side hole punching. No new relay-initiated peer dials.
 
 ## Acceptance criteria
 
-- [ ] Real JS/libp2p clients use bearer discovery, verify Noise Peer ID before sending token, reserve/connect over TCP and transfer actual opaque relayed bytes.
-- [ ] Unauthenticated second physical connection cannot use HOP even when its Peer ID has another authenticated session; stock PERMISSION_DENIED/resource statuses remain wire compatible.
-- [ ] Cross-account and same-account endpoint tests show conservative charging and closure, no DB per copied buffer or fabricated exact byte statistics.
-- [ ] Initial auth/renewal/account-change/expiry/replacement races obey deadlines, counts and captured-owner cleanup; failed replacement preserves old session.
-- [ ] Real DB failure rejects new authentication and allows only existing confirmed local credit/deadlines, with temporary versus quota outcomes distinguished.
-- [ ] Explicit RM/service/protocol limits, rates, descriptor check and malformed/oversize controls are asserted; no default autoscaling/hidden IP buckets.
-- [ ] Discovery uses 16KiB bound, full current peer addresses, no account/capacity fields and no cache; global cap differs from account quota and rate overload.
-- [ ] Go race and real TCP wire tests pass, including full-capacity one-for-one replacement under an isolated smaller test profile.
+- [x] Real JS/libp2p clients use bearer discovery, verify Noise Peer ID before sending token, reserve/connect over TCP and transfer actual opaque relayed bytes.
+- [x] Unauthenticated second physical connection cannot use HOP even when its Peer ID has another authenticated session; stock PERMISSION_DENIED/resource statuses remain wire compatible.
+- [x] Cross-account and same-account endpoint tests show conservative charging and closure, no DB per copied buffer or fabricated exact byte statistics.
+- [x] Initial auth/renewal/account-change/expiry/replacement races obey deadlines, counts and captured-owner cleanup; failed replacement preserves old session.
+- [x] Real DB failure rejects new authentication and allows only existing confirmed local credit/deadlines, with temporary versus quota outcomes distinguished.
+- [x] Explicit RM/service/protocol limits, rates, descriptor check and malformed/oversize controls are asserted; no default autoscaling/hidden IP buckets.
+- [x] Discovery uses 16KiB bound, full current peer addresses, no account/capacity fields and no cache; global cap differs from account quota and rate overload.
+- [x] Go race and real TCP wire tests pass, including full-capacity one-for-one replacement under an isolated smaller test profile.
 
 ## Demonstration
 
@@ -105,3 +105,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 05 (`925cfe7`) and ticket 06 (`2306330`) resolution; assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved on 2026-09-27 after implementation commits `70ead40`, `d6e29d0` and integration merge `d24b159`. Independent spec and standards reviews rechecked connection-pinned STOP, drain, plan-change invalidation, publication withdrawal, readiness and framing with no remaining actionable findings. Grant-local refresh replay intentionally leaves existing fixed-deadline Relay Sessions running under I3. On the merged branch, `CLIPP_JS_NODE_MODULES=/Users/invine/src/js/clipp/node_modules GOPROXY=off GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...`, the corresponding `go test -race -count=1 ./internal/relay ./internal/quota ./internal/auth`, `go vet ./...`, `go build ./...`, and `git diff --check HEAD^..HEAD` passed with Go 1.27.1 darwin/arm64 and Node 26.10.0. The JS/libp2p 3.1.2 harness verified bearer discovery, Noise Peer ID before token, reservation, a cross-account TCP circuit and 29 opaque bytes. `bash scripts/smoke-postgres.sh` passed against disposable verified-TLS, SCRAM PostgreSQL 18.6 and 17.11 and rejected 16.15; it exercised real auth/admin/quota SQL. Docker 29.8.0 was local and disposable. No push, publication or deployment occurred.
