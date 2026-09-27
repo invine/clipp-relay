@@ -2,7 +2,7 @@
 
 This repository implements the service foundation, Google portal registration,
 administrator account and quota-plan operations, shared weekly Quota operation,
-and authenticated TCP Circuit Relay v2 traffic. It provides
+and authenticated TCP, WSS and WebRTC Direct Circuit Relay v2 traffic. It provides
 explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
 Access Tokens, separate public and private HTTP listeners, bearer discovery,
@@ -15,8 +15,8 @@ unused process-local credit is not restored. The owner profile shows Quota
 committed and 12 completed weekly totals. Its capacity table distinguishes
 configured limits from separately sampled live counts. Active Login Grants are
 sampled from PostgreSQL; live Relay Sessions are sampled from this process.
-`/readyz` is `200 ok` only after the TCP listener and a complete address
-snapshot are available; otherwise it is `503 unavailable`. `/livez` is
+`/readyz` is `200 ok` only after every enabled relay listener and a complete
+public address snapshot are available; otherwise it is `503 unavailable`. `/livez` is
 `200 ok` while the process runs. Public relay discovery is withdrawn during
 drain or when the address snapshot expires.
 Relay Authentication sends one length-delimited JSON request and half-closes
@@ -56,9 +56,13 @@ a schema change.
 
 The single non-secret JSON configuration is versioned. No environment or flag
 overrides affect policy. Unknown and duplicate fields are rejected. Serving
-requires `relay_tcp.listen`; migration accepts an omitted `relay_tcp` section
-because it does not start a listener. Public addresses must be supplied for
-discovery and readiness. An example shape is:
+requires at least one of `relay_tcp.listen`, `relay_websocket.listen`, or
+`relay_webrtc_direct.listen`; migration does not start a relay listener.
+Every enabled transport needs public addresses for discovery and readiness.
+The WebSocket listener is internal plaintext behind public TLS termination on
+the distinct exact `wss_hostname`; it does not serve portal or private routes.
+The service adds the current Peer ID to all published addresses and the current
+process certificate hash to WebRTC Direct addresses. An example shape is:
 
 ```json
 {
@@ -73,6 +77,14 @@ discovery and readiness. An example shape is:
   "relay_tcp": {
     "listen": "/ip4/0.0.0.0/tcp/4001",
     "public_addresses": ["/dns4/relay.example.com/tcp/4001"]
+  },
+  "relay_websocket": {
+    "listen": "/ip4/0.0.0.0/tcp/4002/ws",
+    "public_addresses": ["/dns4/wss.example.com/tcp/443/tls/ws"]
+  },
+  "relay_webrtc_direct": {
+    "listen": "/ip4/0.0.0.0/udp/4003/webrtc-direct",
+    "public_addresses": ["/dns4/relay.example.com/udp/443/webrtc-direct"]
   },
   "database": {
     "mode": "external",

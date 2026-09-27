@@ -361,7 +361,11 @@ func relayWebRTCAddress(value string, listen bool) bool {
 	}
 	portText, err := a.ValueForProtocol(ma.P_UDP)
 	port, parseErr := strconv.Atoi(portText)
-	return err == nil && parseErr == nil && port >= 1024 && port <= 65535
+	minimum := 1
+	if listen {
+		minimum = 1024
+	}
+	return err == nil && parseErr == nil && port >= minimum && port <= 65535
 }
 
 func relayTCPAddress(value string, listen bool) bool {

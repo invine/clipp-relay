@@ -130,6 +130,8 @@ func runAccountCutoff(t *testing.T, opts Options, transport string) {
 }
 
 func TestWSSAndWebRTCAccountWideCutoff(t *testing.T) {
+	// The stock transport may deliver an already-buffered tail after cutoff.
+	// This probe asserts account-wide closure, not an unproven exact byte cap.
 	for _, tc := range []struct {
 		name string
 		opts Options

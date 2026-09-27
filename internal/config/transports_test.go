@@ -52,6 +52,10 @@ func TestEnabledTransportRequiresCompleteExactPublicAddress(t *testing.T) {
 			c.RelayWebRTC.Listen = "/ip4/127.0.0.1/udp/18083/webrtc-direct"
 			c.RelayWebRTC.PublicAddresses = []string{"/dns4/relay.example.test/udp/18083/webrtc-direct"}
 		}, true},
+		{"webrtc public UDP 443", func(c *config.Config) {
+			c.RelayWebRTC.Listen = "/ip4/127.0.0.1/udp/18083/webrtc-direct"
+			c.RelayWebRTC.PublicAddresses = []string{"/dns4/relay.example.test/udp/443/webrtc-direct"}
+		}, true},
 		{"webrtc caller certhash", func(c *config.Config) {
 			c.RelayWebRTC.Listen = "/ip4/127.0.0.1/udp/18083/webrtc-direct"
 			c.RelayWebRTC.PublicAddresses = []string{"/dns4/relay.example.test/udp/18083/webrtc-direct/certhash/uEiAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
