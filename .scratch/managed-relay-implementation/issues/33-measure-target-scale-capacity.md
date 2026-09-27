@@ -4,7 +4,7 @@
 
 **Blocked by:** [29: Produce a verified multi-architecture candidate](29-produce-a-verified-multi-architecture-candidate.md).
 
-**Status:** ready-for-agent
+**Status:** deferred
 
 Repository scope: Both repositories; separately authorized load environment.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I11, I12; revised Q337; Testing.
@@ -54,3 +54,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Kept explicitly deferred on 2026-09-27 during managed-relay implementation coordination. The candidate dependency and separately authorized load environment are not available; this ticket is outside the initial release frontier and has not been claimed or run.
