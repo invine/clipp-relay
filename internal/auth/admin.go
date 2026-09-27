@@ -273,7 +273,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	rows, err := s.Pool.Query(r.Context(), `SELECT status,count(*) FROM public.accounts GROUP BY status`)
+	rows, err := s.Pool.Query(r.Context(), `SELECT status,count(*) FROM public.accounts WHERE deletion_started_at IS NULL GROUP BY status`)
 	if err != nil {
 		fail(w, 503)
 		return
@@ -303,7 +303,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	rows, err = s.Pool.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
+	rows, err = s.Pool.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
 	if err != nil {
 		fail(w, 503)
 		return
@@ -329,7 +329,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	}
 	if data.Selected != "" {
 		var selected adminAccountRow
-		err = s.Pool.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id=$1`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.WeeklyOverride, &selected.SessionOverride, &selected.Revision)
+		err = s.Pool.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.WeeklyOverride, &selected.SessionOverride, &selected.Revision)
 		if err == pgx.ErrNoRows {
 			fail(w, 404)
 			return
@@ -406,7 +406,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if spec.security {
 		var subject string
-		if e := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, target).Scan(&subject); e != nil {
+		if e := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, target).Scan(&subject); e != nil {
 			fail(w, 503)
 			return
 		}
@@ -459,8 +459,10 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		return
 	}
 	var status string
+	var deleting bool
 	var actual int64
-	e = tx.QueryRow(ctx, `SELECT status,revision FROM public.accounts WHERE id=$1`, target).Scan(&status, &actual)
+	var oldGeneration int64
+	e = tx.QueryRow(ctx, `SELECT status,revision,deletion_started_at IS NOT NULL,credential_generation FROM public.accounts WHERE id=$1`, target).Scan(&status, &actual, &deleting, &oldGeneration)
 	if e == pgx.ErrNoRows {
 		fail(w, 404)
 		return
@@ -469,7 +471,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		fail(w, 503)
 		return
 	}
-	if actual != expected {
+	if deleting || actual != expected {
 		fail(w, 409)
 		return
 	}
@@ -594,7 +596,11 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		s.installIdentityFence(subject)
 	}
 	if commitErr != nil {
-		s.uncertainAccounts.Store(target, struct{}{})
+		newGeneration := oldGeneration
+		if security {
+			newGeneration++
+		}
+		s.uncertainAccounts.Store(target, uncertainMutation{revision: actual + 1, generation: newGeneration, status: newStatus})
 	}
 	// The caller performs local invalidation and connection I/O after releasing
 	// the identity and account guards, before sending success or uncertainty.

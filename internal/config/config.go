@@ -40,6 +40,18 @@ type Config struct {
 		PasswordFile string `json:"password_file"`
 		CAFile       string `json:"ca_file"`
 	} `json:"database"`
+	Journal struct {
+		Region         string `json:"region"`
+		Namespace      string `json:"namespace"`
+		Bucket         string `json:"bucket"`
+		RepositoryID   string `json:"repository_id"`
+		CoverageFloor  int64  `json:"coverage_floor"`
+		CoverageHash   string `json:"coverage_hash"`
+		TenancyOCID    string `json:"tenancy_ocid"`
+		UserOCID       string `json:"user_ocid"`
+		Fingerprint    string `json:"fingerprint"`
+		PrivateKeyFile string `json:"private_key_file"`
+	} `json:"journal"`
 	Secrets struct {
 		GoogleClientIDFile     string `json:"google_client_id_file"`
 		GoogleClientSecretFile string `json:"google_client_secret_file"`
@@ -55,6 +67,7 @@ type Material struct {
 	GoogleClientSecret     string
 	CurrentPepper          uint64
 	Peppers                map[uint64][]byte
+	JournalSigningKey      []byte
 }
 
 // AdminAllowlist is read from the mounted Secret on each administrative request.
@@ -259,6 +272,18 @@ func (c Config) Validate() error {
 			return errors.New("missing or invalid Secret-file reference")
 		}
 	}
+	if c.Journal.Region != "" {
+		if !hostname(c.Journal.Region+".oraclecloud.com") || strings.Contains(c.Journal.Region, ".") || c.Journal.Namespace == "" || c.Journal.Bucket == "" || c.Journal.RepositoryID == "" || c.Journal.CoverageFloor < 0 || len(c.Journal.CoverageHash) != 64 || !strings.HasPrefix(c.Journal.TenancyOCID, "ocid1.tenancy.") || !strings.HasPrefix(c.Journal.UserOCID, "ocid1.user.") || c.Journal.Fingerprint == "" || !strings.HasPrefix(c.Journal.PrivateKeyFile, "/") {
+			return errors.New("invalid OCI journal configuration")
+		}
+		for _, ch := range c.Journal.CoverageHash {
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return errors.New("invalid OCI journal coverage hash")
+			}
+		}
+	} else if c.Journal.Namespace != "" || c.Journal.Bucket != "" || c.Journal.RepositoryID != "" || c.Journal.CoverageFloor != 0 || c.Journal.CoverageHash != "" || c.Journal.TenancyOCID != "" || c.Journal.UserOCID != "" || c.Journal.Fingerprint != "" || c.Journal.PrivateKeyFile != "" {
+		return errors.New("incomplete OCI journal configuration")
+	}
 	return nil
 }
 
@@ -364,6 +389,12 @@ func (c Config) ReadMaterial() (Material, error) {
 	}
 	if m.GoogleClientID == "" || m.GoogleClientSecret == "" {
 		return m, errors.New("Google client material empty")
+	}
+	if c.Journal.Region != "" {
+		m.JournalSigningKey, err = readSecret(c.Journal.PrivateKeyFile)
+		if err != nil || len(m.JournalSigningKey) > 16<<10 {
+			return m, errors.New("OCI signing key unavailable or too large")
+		}
 	}
 	if _, err := LoadAdminAllowlist(c.Secrets.AdminAllowlistFile); err != nil {
 		return m, err

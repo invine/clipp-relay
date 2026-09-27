@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 7
+const ExpectedRevision = 8
 
 type migration struct {
 	revision int
@@ -191,7 +191,56 @@ ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (e
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
-ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked') OR (reason IS NOT NULL AND actor_email IS NOT NULL));`}}
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked') OR (reason IS NOT NULL AND actor_email IS NOT NULL));`}, {8, `ALTER TABLE public.accounts ADD COLUMN deletion_started_at timestamptz;
+ALTER TABLE public.accounts ADD COLUMN deleted_at timestamptz;
+ALTER TABLE public.accounts ALTER COLUMN issuer DROP NOT NULL;
+ALTER TABLE public.accounts ALTER COLUMN subject DROP NOT NULL;
+ALTER TABLE public.accounts ALTER COLUMN email DROP NOT NULL;
+ALTER TABLE public.accounts ALTER COLUMN email_verified DROP NOT NULL;
+ALTER TABLE public.accounts ADD CONSTRAINT detached_account CHECK (
+ (deleted_at IS NULL AND issuer IS NOT NULL AND issuer='https://accounts.google.com' AND subject IS NOT NULL AND email IS NOT NULL AND email_verified IS NOT NULL)
+ OR (deleted_at IS NOT NULL AND deletion_started_at IS NOT NULL AND issuer IS NULL AND subject IS NULL AND email IS NULL AND email_verified IS NULL AND hosted_domain IS NULL AND plan_id IS NULL AND weekly_bytes_override IS NULL AND sessions_override IS NULL)
+);
+CREATE INDEX accounts_deletion_pending ON public.accounts (deletion_started_at) WHERE deletion_started_at IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX accounts_deleted_expiry ON public.accounts (deleted_at) WHERE deleted_at IS NOT NULL;
+CREATE TABLE public.deletion_operations (
+ id uuid PRIMARY KEY,
+ account_id uuid NOT NULL UNIQUE REFERENCES public.accounts(id),
+ admitted_at timestamptz NOT NULL,
+ next_attempt_at timestamptz NOT NULL,
+ attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+ event_sequence bigint CHECK (event_sequence > 0),
+ event_hash bytea CHECK (event_hash IS NULL OR octet_length(event_hash)=32),
+ event_data bytea CHECK (event_data IS NULL OR octet_length(event_data) BETWEEN 1 AND 4096),
+ journal_generation bigint CHECK (journal_generation >= 0),
+ completed_at timestamptz,
+ CHECK ((event_sequence IS NULL AND event_hash IS NULL AND event_data IS NULL AND journal_generation IS NULL) OR (event_sequence IS NOT NULL AND event_hash IS NOT NULL AND event_data IS NOT NULL AND journal_generation IS NOT NULL))
+);
+CREATE INDEX deletion_operations_due ON public.deletion_operations (next_attempt_at,admitted_at,id) WHERE completed_at IS NULL;
+CREATE TABLE public.deletion_capacity (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), pending integer NOT NULL DEFAULT 0 CHECK (pending BETWEEN 0 AND 1024));
+INSERT INTO public.deletion_capacity(singleton,pending) VALUES (true,0);
+CREATE TABLE public.retained_quota_usage (
+ pepper_version bigint NOT NULL CHECK (pepper_version > 0),
+ identity_digest bytea NOT NULL CHECK (octet_length(identity_digest)=32),
+ week_start date NOT NULL CHECK (EXTRACT(ISODOW FROM week_start)=1),
+ committed_bytes bigint NOT NULL CHECK (committed_bytes >= 0),
+ PRIMARY KEY (pepper_version,identity_digest,week_start)
+);
+CREATE INDEX retained_quota_usage_expiry ON public.retained_quota_usage (week_start);
+ALTER TABLE public.weekly_quota_usage ALTER COLUMN latest_operation_id DROP NOT NULL;
+ALTER TABLE public.weekly_quota_usage DROP CONSTRAINT weekly_quota_usage_sequence_check;
+ALTER TABLE public.weekly_quota_usage DROP CONSTRAINT weekly_quota_usage_latest_granted_bytes_check;
+ALTER TABLE public.weekly_quota_usage DROP CONSTRAINT weekly_quota_usage_check;
+ALTER TABLE public.weekly_quota_usage ADD CONSTRAINT weekly_quota_usage_sequence_check CHECK (sequence >= 0);
+ALTER TABLE public.weekly_quota_usage ADD CONSTRAINT weekly_quota_usage_latest_granted_bytes_check CHECK (latest_granted_bytes BETWEEN 0 AND 65536);
+ALTER TABLE public.weekly_quota_usage ADD CONSTRAINT weekly_quota_usage_check CHECK (committed_bytes >= latest_granted_bytes AND ((sequence=0 AND latest_operation_id IS NULL AND latest_granted_bytes=0) OR (sequence>0 AND latest_operation_id IS NOT NULL AND latest_granted_bytes>0)));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_event_check;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted'));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked','account_deleted') OR (reason IS NOT NULL AND actor_email IS NOT NULL));
+REVOKE ALL ON public.deletion_operations,public.deletion_capacity,public.retained_quota_usage FROM PUBLIC;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
