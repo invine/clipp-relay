@@ -69,6 +69,7 @@ func main() {
 	logger.Info("service starting", "schema_revision", database.ExpectedRevision)
 	srv := service.New()
 	portal := auth.New(pool, c, material, auth.Google())
+	portal.SetCapacitySampler(portal.SampleActiveGrants)
 	srv.SetPublicHandler(portal.Handler())
 	go portal.Maintain(ctx)
 	if err = srv.Run(ctx, c.Listeners.Public, c.Listeners.Private); err != nil {
