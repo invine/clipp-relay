@@ -43,6 +43,9 @@ func authResponse(t *testing.T, ctx context.Context, h host.Host, id peer.ID, to
 	if _, err = st.Write(frame(fmt.Sprintf(`{"accessToken":%q}`, token))); err != nil {
 		t.Fatal(err)
 	}
+	if err = st.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
 	n, err := readSize(st)
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +57,41 @@ func authResponse(t *testing.T, ctx context.Context, h host.Host, id peer.ID, to
 	return string(data)
 }
 func readSize(r io.Reader) (uint64, error) { return binary.ReadUvarint(byteReader{r}) }
+
+func TestDelayedExtraAuthFrameIsRejected(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := h.NewStream(ctx, s.Host.ID(), AuthProtocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err = st.Write(frame(`{"accessToken":"authorized"}`)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err = st.Write(frame(`{"accessToken":"authorized"}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.CloseWrite()
+	_, err = readSize(st)
+	if err == nil || s.ActiveSessions() != 0 {
+		t.Fatalf("extra frame accepted: read=%v sessions=%d", err, s.ActiveSessions())
+	}
+}
 
 func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 	for _, tc := range []struct {

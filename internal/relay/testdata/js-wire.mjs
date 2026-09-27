@@ -53,6 +53,7 @@ async function connectWithToken(node, token) {
   const stream = await connection.newStream('/clipp/relay-auth/1.0.0', { signal: AbortSignal.timeout(10000) })
   const reply = response(stream)
   stream.send(frame({ accessToken: token }))
+  await stream.close()
   const auth = await reply
   if (auth.ok !== true || typeof auth.sessionExpiresAt !== 'string') throw new Error(`auth: ${JSON.stringify(auth)}`)
   return doc.relay.addresses[0]

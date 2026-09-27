@@ -97,3 +97,6 @@ func (s *Server) closeAccount(account string) {
 		_ = v.conn.Close()
 	}
 }
+
+// CloseAccount invalidates all live sessions after an account policy change.
+func (s *Server) CloseAccount(account string) { s.closeAccount(account) }

@@ -177,6 +177,21 @@ func (q *Quota) Invalidate(id string) {
 	q.release(id, b)
 }
 
+// InvalidateAbove discards credit only when a committed debit exceeds the new
+// weekly cap. Equal and larger caps preserve the funded remainder.
+func (q *Quota) InvalidateAbove(id string, cap int64) bool {
+	b := q.acquire(id)
+	b.mu.Lock()
+	above := b.committed > cap
+	if above {
+		b.epoch.Add(1)
+		b.usable = 0
+	}
+	b.mu.Unlock()
+	q.release(id, b)
+	return above
+}
+
 func (q *Quota) probeLoop() {
 	defer close(q.done)
 	ticker := time.NewTicker(time.Minute)

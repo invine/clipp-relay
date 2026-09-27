@@ -46,8 +46,19 @@ func main() {
 		logger.Error("Secret material rejected", "reason", err.Error())
 		os.Exit(1)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+	forceCtx, force := context.WithCancel(context.Background())
+	defer force()
+	go func() {
+		<-signals
+		stop()
+		<-signals
+		force()
+	}()
 	pool, err := database.NewPool(ctx, c, material, maintenance)
 	if err != nil {
 		logger.Error("database configuration rejected")
@@ -93,6 +104,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer dataPlane.Close()
+	portal.SetAccountChanged(func(change auth.AccountChange) {
+		if change.DiscardCredit {
+			credit.Invalidate(change.AccountID)
+		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
+			change.CloseAll = true
+		}
+		if change.CloseAll || dataPlane.AccountSessions(change.AccountID) > change.SessionLimit {
+			dataPlane.CloseAccount(change.AccountID)
+		}
+	})
 	portal.SetCapacitySampler(func(ctx context.Context, account string) (auth.CapacitySample, error) {
 		sample, err := portal.SampleActiveGrants(ctx, account)
 		if err != nil {
@@ -129,6 +150,9 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if ctx.Err() != nil {
+					return
+				}
 				if err := discovery.Publish(addresses); err != nil {
 					srv.SetReady(false)
 				} else {
@@ -137,9 +161,20 @@ func main() {
 			}
 		}
 	}()
-	go func() { <-ctx.Done(); srv.SetReady(false); _ = dataPlane.Close() }()
+	serveCtx, stopServing := context.WithCancel(context.Background())
+	defer stopServing()
+	go func() {
+		<-ctx.Done()
+		srv.SetReady(false)
+		dataPlane.StartDrain()
+		_ = discovery.Publish(nil)
+		drainCtx, cancel := context.WithTimeout(forceCtx, 30*time.Second)
+		defer cancel()
+		_ = dataPlane.Drain(drainCtx)
+		stopServing()
+	}()
 	go portal.Maintain(ctx)
-	if err = srv.Run(ctx, c.Listeners.Public, c.Listeners.Private); err != nil {
+	if err = srv.Run(serveCtx, c.Listeners.Public, c.Listeners.Private); err != nil {
 		logger.Error("service stopped", "reason", "listener failure")
 		os.Exit(1)
 	}

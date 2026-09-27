@@ -3,6 +3,7 @@ package relay
 import (
 	"clipp-relay/internal/auth"
 	"context"
+	"encoding/json"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"net/http"
@@ -34,6 +35,39 @@ func TestDiscoveryPublishesOnlyCurrentPeerAddresses(t *testing.T) {
 	d.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), s.Host.ID().String()) || strings.Contains(w.Body.String(), "account") || len(w.Body.Bytes()) > 16<<10 {
 		t.Fatalf("discovery: %d %s", w.Code, w.Body.String())
+	}
+	d.verified = time.Now().Add(-4 * time.Minute)
+	before := httptest.NewRecorder()
+	d.ServeHTTP(before, r)
+	var first struct {
+		ValidUntil string `json:"validUntil"`
+	}
+	if err = json.Unmarshal(before.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	bad, err := ma.NewMultiaddr("/ip4/127.0.0.1/udp/9999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.Publish([]ma.Multiaddr{bad}); err == nil {
+		t.Fatal("accepted incomplete TCP snapshot")
+	}
+	after := httptest.NewRecorder()
+	d.ServeHTTP(after, r)
+	if first.ValidUntil == "" || after.Code != 503 || !d.verified.IsZero() {
+		t.Fatalf("incomplete snapshot stayed published: %d %s", after.Code, after.Body.String())
+	}
+	if err = d.Publish([]ma.Multiaddr{addr}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	if err = d.Publish([]ma.Multiaddr{addr}); err == nil || !d.verified.IsZero() {
+		t.Fatal("closed TCP listener refreshed publication")
+	}
+	closed := httptest.NewRecorder()
+	d.ServeHTTP(closed, r)
+	if closed.Code != 503 {
+		t.Fatalf("closed listener remained published: %d", closed.Code)
 	}
 }
 

@@ -52,6 +52,19 @@ func fixture(t *testing.T) (*Quota, string, *pgxpool.Pool) {
 	return q, id, p
 }
 
+func TestPlanCapChangePreservesCreditAtEqualityAndIncrease(t *testing.T) {
+	b := &balance{week: weekStart(time.Now()), committed: BlockBytes, usable: 1234}
+	q := &Quota{balances: map[string]*balance{"account": b}}
+	for _, cap := range []int64{BlockBytes, 2 * BlockBytes} {
+		if q.InvalidateAbove("account", cap) || b.usable != 1234 {
+			t.Fatalf("cap %d discarded funded remainder", cap)
+		}
+	}
+	if !q.InvalidateAbove("account", BlockBytes-1) || b.usable != 0 {
+		t.Fatal("reduced cap retained local credit")
+	}
+}
+
 func TestRestartDoesNotRestoreOrRefundFundedCredit(t *testing.T) {
 	q, id, pool := fixture(t)
 	first, err := q.Take(context.Background(), id, 0, 1024)

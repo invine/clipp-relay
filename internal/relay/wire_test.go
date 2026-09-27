@@ -52,6 +52,9 @@ func sendWireToken(t *testing.T, ctx context.Context, h host.Host, id peer.ID, t
 	if _, err = st.Write(frame(fmt.Sprintf(`{"accessToken":%q}`, token))); err != nil {
 		t.Fatal(err)
 	}
+	if err = st.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
 	n, err := binary.ReadUvarint(byteReader{st})
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +175,57 @@ func TestFullCapacitySamePeerReplacementIsOneForOne(t *testing.T) {
 	if _, err = client.Reserve(ctx, second, ai); err != nil {
 		t.Fatalf("replacement denied: %v", err)
 	}
+}
+
+func TestSTOPPinsAuthenticatedPhysicalConnection(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	key, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	parallel, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parallel.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if err = destination.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	sendWireAuth(t, ctx, destination, s.Host.ID())
+	if _, err = client.Reserve(ctx, destination, ai); err != nil {
+		t.Fatal(err)
+	}
+	owned := s.authoritativeConn(destination.ID())
+	if owned == nil {
+		t.Fatal("missing authenticated connection")
+	}
+	if err = parallel.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s.Host.Network().ConnsToPeer(destination.ID())); n != 2 {
+		t.Fatalf("want two physical connections, got %d", n)
+	}
+	adapter := gatedHost{Host: s.Host, stopConn: s.authoritativeConn}
+	st, err := adapter.NewStream(ctx, destination.ID(), "/libp2p/circuit/relay/0.2.0/stop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Conn() != owned {
+		t.Fatal("STOP selected unauthenticated parallel connection")
+	}
+	_ = st.Reset()
 }
 
 type sameAccountAuthority struct{}

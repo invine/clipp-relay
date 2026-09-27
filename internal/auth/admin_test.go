@@ -92,6 +92,8 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	write(`{"revision":1,"emails":["admin@gmail.com"]}`)
 	d := newProvider(t)
 	s := auth.New(db.Pool, c, m, d.endpoints())
+	var accountChanges []auth.AccountChange
+	s.SetAccountChanged(func(change auth.AccountChange) { accountChanges = append(accountChanges, change) })
 	admin := loginAs(t, s, d, "admin-test", "Admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	workspace := portalRequest(s, "GET", "/admin", admin, nil, "")
@@ -180,6 +182,9 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+userID, admin, approve, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("user approval = %d", out.Code)
 	}
+	if len(accountChanges) == 0 || accountChanges[len(accountChanges)-1].AccountID != userID {
+		t.Fatal("approval did not invalidate the affected account")
+	}
 	var auditActor, auditReason string
 	var auditClient *string
 	if e := db.Pool.QueryRow(context.Background(), `SELECT actor_email,reason,client_type FROM public.audit_events WHERE account_id=$1 AND event='account_approved'`, userID).Scan(&auditActor, &auditReason, &auditClient); e != nil || auditActor != "admin@gmail.com" || auditReason != "routine_administration" || auditClient != nil {
@@ -207,6 +212,9 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+userID, admin, assign, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("explicit replacement = %d", out.Code)
 	}
+	if accountChanges[len(accountChanges)-1].AccountID != userID || accountChanges[len(accountChanges)-1].CloseAll || accountChanges[len(accountChanges)-1].DiscardCredit || accountChanges[len(accountChanges)-1].WeeklyBytes != 1073741824 || accountChanges[len(accountChanges)-1].SessionLimit != 5 {
+		t.Fatal("plan assignment did not invalidate account")
+	}
 	if out := portalRequest(s, "GET", "/", user, nil, ""); !strings.Contains(out.Body.String(), "1073741824 bytes") {
 		t.Fatalf("replacement allowance absent: %s", out.Body.String())
 	}
@@ -218,6 +226,9 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	deny := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"deny"}, "revision": {"1"}}
 	if out := portalRequest(s, "POST", "/admin/accounts/"+deniedID, admin, deny, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("deny pending = %d", out.Code)
+	}
+	if accountChanges[len(accountChanges)-1].AccountID != deniedID || !accountChanges[len(accountChanges)-1].CloseAll || !accountChanges[len(accountChanges)-1].DiscardCredit {
+		t.Fatal("denial did not invalidate account")
 	}
 	if out := portalRequest(s, "GET", "/", denied, nil, ""); !strings.Contains(out.Body.String(), "not approved") || strings.Contains(out.Body.String(), "policy_enforcement") || strings.Contains(out.Body.String(), "Admin@gmail.com") {
 		t.Fatalf("denied profile exposed policy detail: %s", out.Body.String())

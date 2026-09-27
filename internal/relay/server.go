@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"io"
 	"net"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/libp2p/go-libp2p/x/rate"
 	ma "github.com/multiformats/go-multiaddr"
+	multistream "github.com/multiformats/go-multistream"
 )
 
 const AuthProtocol protocol.ID = "/clipp/relay-auth/1.0.0"
@@ -59,6 +61,7 @@ type Server struct {
 	Host        host.Host
 	stock       *relay.Relay
 	manager     network.ResourceManager
+	tracer      *circuitTracer
 	authority   Authority
 	credit      Credit
 	maxSessions int
@@ -71,6 +74,7 @@ type Server struct {
 	globalRate  tokenBucket
 	connRate    map[network.Conn]tokenBucket
 	closing     bool
+	hopHandlers int
 	closeOnce   sync.Once
 }
 
@@ -98,7 +102,9 @@ func (b *tokenBucket) allow(now time.Time, rate, burst float64) bool {
 
 type gatedHost struct {
 	host.Host
-	check func(network.Stream) bool
+	check    func(network.Stream) bool
+	doneHop  func()
+	stopConn func(peer.ID) network.Conn
 }
 
 func (h gatedHost) SetStreamHandler(id protocol.ID, handler network.StreamHandler) {
@@ -109,12 +115,47 @@ func (h gatedHost) SetStreamHandler(id protocol.ID, handler network.StreamHandle
 				return
 			}
 			handler(s)
+			h.doneHop()
 		})
 		return
 	}
 	h.Host.SetStreamHandler(id, handler)
 }
 func (h gatedHost) RemoveStreamHandler(id protocol.ID) { h.Host.RemoveStreamHandler(id) }
+
+// Stock relay requests only STOP. Pin its stream to the authoritative physical
+// connection instead of allowing the swarm to select another connection.
+func (h gatedHost) NewStream(ctx context.Context, id peer.ID, protocols ...protocol.ID) (network.Stream, error) {
+	if len(protocols) != 1 || protocols[0] != "/libp2p/circuit/relay/0.2.0/stop" {
+		return nil, errors.New("relay-initiated protocol denied")
+	}
+	conn := h.stopConn(id)
+	if conn == nil {
+		return nil, network.ErrNoConn
+	}
+	st, err := conn.NewStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make(chan error, 1)
+	go func() { result <- multistream.SelectProtoOrFail(protocols[0], st) }()
+	select {
+	case err = <-result:
+	case <-ctx.Done():
+		_ = st.Reset()
+		<-result
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		_ = st.Reset()
+		return nil, err
+	}
+	if err = st.SetProtocol(protocols[0]); err != nil {
+		_ = st.Reset()
+		return nil, err
+	}
+	return st, nil
+}
 
 func hopStatus(s network.Stream, status pbv2.Status) {
 	_ = s.SetWriteDeadline(time.Now().Add(time.Second))
@@ -152,7 +193,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, authority: a, credit: credit, maxSessions: opts.MaxSessions, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}}
 	reporter := &endpointReporter{server: s}
 	h, err := libp2p.New(libp2p.Identity(key), libp2p.NoTransports,
 		libp2p.Transport(tcp.NewTCPTransport), libp2p.ListenAddrStrings(opts.ListenAddress),
@@ -166,7 +207,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	h.Network().Notify(&network.NotifyBundle{ConnectedF: s.connected, DisconnectedF: s.disconnected})
 	h.SetStreamHandler(AuthProtocol, s.handleAuth)
 	resources := relay.Resources{Limit: &relay.RelayLimit{Duration: 120 * time.Second, Data: 2 << 20}, ReservationTTL: 30 * time.Minute, MaxReservations: 6000, MaxCircuits: 16, BufferSize: 2048, MaxReservationsPerPeer: 1, MaxReservationsPerIP: 6000, MaxReservationsPerASN: 6000}
-	s.stock, err = relay.New(gatedHost{Host: h, check: s.permitted}, relay.WithResources(resources), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
+	s.stock, err = relay.New(gatedHost{Host: h, check: s.permitted, doneHop: s.doneHop, stopConn: s.authoritativeConn}, relay.WithResources(resources), relay.WithMetricsTracer(s.tracer), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
 	if err != nil {
 		_ = h.Close()
 		_ = manager.Close()
@@ -248,7 +289,55 @@ func (s *Server) permitted(st network.Stream) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.byConn[st.Conn()]
-	return !s.closing && v != nil && time.Now().Before(v.deadline)
+	if s.closing || v == nil || !time.Now().Before(v.deadline) {
+		return false
+	}
+	s.hopHandlers++
+	return true
+}
+
+func (s *Server) doneHop() {
+	s.mu.Lock()
+	s.hopHandlers--
+	s.mu.Unlock()
+}
+
+// Drain stops admission and waits for stock circuits to finish. Existing
+// physical connections remain usable until the last circuit is gone.
+func (s *Server) StartDrain() {
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+}
+
+func (s *Server) Drain(ctx context.Context) error {
+	s.StartDrain()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		pending := s.hopHandlers
+		s.mu.Unlock()
+		if pending == 0 && s.tracer.active.Load() == 0 {
+			return s.Close()
+		}
+		select {
+		case <-ctx.Done():
+			_ = s.Close()
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Server) authoritativeConn(id peer.ID) network.Conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.byPeer[id]
+	if s.closing || v == nil || !time.Now().Before(v.deadline) || v.conn.IsClosed() {
+		return nil
+	}
+	return v.conn
 }
 
 func (s *Server) expire(v *session) {
@@ -273,7 +362,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	if !allowed {
 		return time.Time{}, 0, "rate_limited"
 	}
-	guard := &s.peerGuards[uint8(c.RemotePeer()[0])]
+	guard := &s.peerGuards[peerGuardIndex(c.RemotePeer())]
 	guard.Lock()
 	defer guard.Unlock()
 	credential, err := s.authority.AuthenticateRelay(ctx, raw)
@@ -358,6 +447,12 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	return deadline, time.Duration(float64(lifetime) * renewFraction), ""
 }
 
+func peerGuardIndex(id peer.ID) uint8 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return uint8(h.Sum32())
+}
+
 type byteReader struct{ io.Reader }
 
 var errBadFrame = errors.New("bad relay auth frame")
@@ -430,25 +525,25 @@ func (s *Server) handleAuth(st network.Stream) {
 	defer st.Scope().ReleaseMemory(4096)
 	_ = st.SetDeadline(time.Now().Add(10 * time.Second))
 	raw, err := readAuth(st)
+	if err == nil || errors.Is(err, errInvalidRequest) {
+		var extra [1]byte
+		if n, tailErr := st.Read(extra[:]); n != 0 || tailErr != io.EOF {
+			_ = st.Reset()
+			_ = st.Conn().Close()
+			return
+		}
+	}
 	if err != nil {
 		if errors.Is(err, errInvalidRequest) {
 			_ = writeAuth(st, map[string]any{"ok": false, "code": "invalid_request"})
 			_ = st.CloseWrite()
-			_ = st.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-			_, _ = io.Copy(io.Discard, st)
 			_ = st.Close()
+			time.Sleep(100 * time.Millisecond)
 			_ = st.Conn().Close()
 		} else {
 			_ = st.Reset()
 			_ = st.Conn().Close()
 		}
-		return
-	}
-	_ = st.SetReadDeadline(time.Now().Add(time.Millisecond))
-	var extra [1]byte
-	if n, _ := st.Read(extra[:]); n > 0 {
-		_ = st.Reset()
-		_ = st.Conn().Close()
 		return
 	}
 	_ = st.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -461,10 +556,9 @@ func (s *Server) handleAuth(st network.Stream) {
 		} else {
 			_ = st.CloseWrite()
 			if !s.isAuthenticated(st.Conn()) {
-				// Let the peer consume the framed error before tearing down the
-				// underlying connection; closing it immediately resets the stream.
-				_ = st.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-				_, _ = io.Copy(io.Discard, st)
+				// Give the peer time to consume the framed error before closing
+				// its whole connection; half-closed requests reach EOF immediately.
+				time.Sleep(100 * time.Millisecond)
 			}
 			_ = st.Close()
 		}

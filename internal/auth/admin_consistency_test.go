@@ -85,6 +85,38 @@ func internalRequest(s *Server, method, path string, cookie *http.Cookie, form u
 	return w
 }
 
+func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	target, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Pool.Exec(context.Background(), `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at) VALUES($1,'https://accounts.google.com',$2,'target@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp())`, target, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, target)
+	})
+	var changed AccountChange
+	s.SetAccountChanged(func(change AccountChange) { changed = change })
+	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("lost commit acknowledgment")
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"routine_administration"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
+	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
+	if out.Code != 503 || changed.AccountID != target || !changed.CloseAll || !changed.DiscardCredit {
+		t.Fatalf("ambiguous commit response=%d invalidated=%+v", out.Code, changed)
+	}
+	var status string
+	if err = db.Pool.QueryRow(context.Background(), `SELECT status FROM public.accounts WHERE id=$1`, target).Scan(&status); err != nil || status != "Active" {
+		t.Fatalf("commit status=%q error=%v", status, err)
+	}
+}
+
 func TestOwnerProfileUsesOnePolicySnapshotAcrossConcurrentChange(t *testing.T) {
 	s, cookie, db, _ := adminFixture(t)
 	planID, err := uuid()

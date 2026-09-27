@@ -38,21 +38,33 @@ func NewDiscovery(server *Server, authority Authority, host string, addresses []
 // Publish replaces the whole set after validating every address and binding
 // it to the live Peer ID. An empty set deliberately withdraws discovery.
 func (d *Discovery) Publish(addresses []ma.Multiaddr) error {
+	if len(addresses) == 0 {
+		d.withdraw()
+		return nil
+	}
+	if !d.server.Serving() || len(d.server.Host.Network().ListenAddresses()) == 0 {
+		d.withdraw()
+		return errors.New("relay TCP listener unavailable")
+	}
 	set := map[string]bool{}
 	for _, a := range addresses {
 		if a == nil {
+			d.withdraw()
 			return errors.New("nil relay address")
 		}
 		if _, err := a.ValueForProtocol(ma.P_TCP); err != nil {
+			d.withdraw()
 			return errors.New("non-TCP address in TCP snapshot")
 		}
 		if pid, err := a.ValueForProtocol(ma.P_P2P); err == nil && pid != d.server.Host.ID().String() {
+			d.withdraw()
 			return errors.New("address names another relay")
 		}
 		if _, err := a.ValueForProtocol(ma.P_P2P); err != nil {
 			var join error
 			a, join = ma.NewMultiaddr(a.String() + "/p2p/" + d.server.Host.ID().String())
 			if join != nil {
+				d.withdraw()
 				return join
 			}
 		}
@@ -67,6 +79,13 @@ func (d *Discovery) Publish(addresses []ma.Multiaddr) error {
 	d.verified = time.Now()
 	d.mu.Unlock()
 	return nil
+}
+
+func (d *Discovery) withdraw() {
+	d.mu.Lock()
+	d.addresses = nil
+	d.verified = time.Time{}
+	d.mu.Unlock()
 }
 
 func discoveryError(w http.ResponseWriter, status int, code string) {
