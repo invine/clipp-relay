@@ -89,7 +89,11 @@ The allowlist file contains `{"revision":1,"emails":[]}`. The keyring file
 contains `{"current":1,"keys":[{"version":1,"material":"<base64 of at least 32 bytes>"}]}`.
 The Google client and pepper files supply portal registration and sign-in.
 An allowlisted administrator opens `/admin` to create or archive immutable
-quota plans, then approve a Pending account with a plan or deny it. The seeded
+quota plans, approve a Pending account with a plan, suspend or deny access,
+return Denied accounts to Pending review, reactivate Suspended accounts,
+revoke credentials, and reassign plans or set per-account quota overrides.
+Owners can sign out of the portal alone or sign out everywhere, which revokes
+their relay credentials and closes live Relay Sessions. The seeded
 Baseline plan provides exactly 1,073,741,824 bytes per week and five sessions.
 Admin mutations require a Portal Session with Google authentication no older
 than ten minutes, a valid Origin and CSRF token, an enumerated reason, and the

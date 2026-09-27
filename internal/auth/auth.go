@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,9 @@ type Server struct {
 	providerSlots                      chan struct{}
 	mu                                 sync.Mutex
 	identityGuards                     [4096]sync.Mutex
+	accountGuards                      sync.Map
+	accountUnits                       chan struct{}
+	uncertainAccounts                  sync.Map
 	fenceKey                           [32]byte
 	fences                             map[[32]byte]identityFence
 	flowSeq                            uint64
@@ -70,6 +74,38 @@ type Server struct {
 	commitAccount                      func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange)
+}
+
+// WithAccountGuards orders all local account operations before their SQL row
+// locks. Relay admission holds the same guard through registry installation.
+func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func()) bool {
+	select {
+	case s.accountUnits <- struct{}{}:
+		defer func() { <-s.accountUnits }()
+	case <-ctx.Done():
+		return false
+	}
+	ordered := append([]string(nil), ids...)
+	sort.Strings(ordered)
+	guards := make([]*sync.Mutex, 0, len(ordered))
+	var previous string
+	for _, id := range ordered {
+		if len(guards) > 0 && id == previous {
+			continue
+		}
+		previous = id
+		value, _ := s.accountGuards.LoadOrStore(id, &sync.Mutex{})
+		guard := value.(*sync.Mutex)
+		guard.Lock()
+		guards = append(guards, guard)
+	}
+	defer func() {
+		for i := len(guards) - 1; i >= 0; i-- {
+			guards[i].Unlock()
+		}
+	}()
+	work()
+	return true
 }
 
 // CapacitySample is a separate, aggregate live observation. Nil counts mean
@@ -149,7 +185,7 @@ func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provid
 		client = &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{MaxResponseHeaderBytes: 16 << 10}}
 	}
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	s := &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}}
+	s := &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), accountUnits: make(chan struct{}, 64), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
@@ -169,10 +205,24 @@ func (s *Server) identityGuard(key [32]byte) *sync.Mutex {
 // WithIdentityFence serializes a security mutation against Google callback completion.
 // It fences every older continuation even if work returns an uncertain error.
 func (s *Server) WithIdentityFence(subject string, work func() error) error {
+	return s.withIdentityGuard(subject, func() error {
+		s.installIdentityFence(subject)
+		return work()
+	})
+}
+
+func (s *Server) withIdentityGuard(subject string, work func() error) error {
 	key := s.identityKey(subject)
 	guard := s.identityGuard(key)
 	guard.Lock()
 	defer guard.Unlock()
+	return work()
+}
+
+// The caller holds the identity guard. Installing this after a security commit
+// also fences flows started while the database transaction was in progress.
+func (s *Server) installIdentityFence(subject string) {
+	key := s.identityKey(subject)
 	s.mu.Lock()
 	now := time.Now()
 	for key, fence := range s.fences {
@@ -188,7 +238,6 @@ func (s *Server) WithIdentityFence(subject string, work func() error) error {
 	}
 	s.fences[key] = identityFence{seq: s.flowSeq, until: now.Add(10 * time.Minute)}
 	s.mu.Unlock()
-	return work()
 }
 func opaque() (string, error) {
 	b := make([]byte, 32)
@@ -264,6 +313,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /oauth/authorize", s.confirmAuthorization)
 	mux.HandleFunc("POST /oauth/token", s.token)
 	mux.HandleFunc("POST /auth/logout", s.logout)
+	mux.HandleFunc("POST /auth/revoke", s.revokeOwner)
 	mux.HandleFunc("GET /admin", s.adminHome)
 	mux.HandleFunc("POST /admin/accounts/{id}", s.adminAccount)
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
@@ -673,7 +723,7 @@ type quotaHistory struct {
 	Committed int64  `json:"committed"`
 }
 
-var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}.doughnut{width:130px;height:130px;border-radius:50%;background:conic-gradient(#183f75 var(--used),#dbeafe 0);display:grid;place-items:center}.doughnut::before{content:'';width:82px;height:82px;background:white;border-radius:50%;grid-area:1/1}.doughnut span{z-index:1;grid-area:1/1;font-weight:700}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px;border-bottom:1px solid #e2e8f0}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><h3>Account capacity</h3><table><tr><th>Resource</th><th>Live count and limit</th></tr><tr><td>Relay Sessions</td><td>{{if .LiveSessionsKnown}}{{.LiveSessions}} of {{.Sessions}}{{else}}Unavailable · limit {{.Sessions}}{{end}}</td></tr><tr><td>Login Grants</td><td>{{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}</td></tr></table><small>Live counts are sampled separately from quota history.</small><div class="doughnut" style="--used:{{.Percent}}%" role="img" aria-label="Quota committed {{.Committed}} of {{.WeeklyBytes}} bytes"><span>{{.Percent}}%</span></div><p>Quota committed: {{.Committed}} bytes</p><p>{{.UsageState}}</p><small>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</small><h3>Weekly history</h3><table><tr><th>Week starting UTC</th><th>Quota committed</th></tr>{{range .History}}<tr><td>{{.Week}}</td><td>{{.Committed}} bytes</td></tr>{{end}}</table></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
+var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}.doughnut{width:130px;height:130px;border-radius:50%;background:conic-gradient(#183f75 var(--used),#dbeafe 0);display:grid;place-items:center}.doughnut::before{content:'';width:82px;height:82px;background:white;grid-area:1/1}.doughnut span{z-index:1;grid-area:1/1;font-weight:700}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px;border-bottom:1px solid #e2e8f0}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><h3>Account capacity</h3><table><tr><th>Resource</th><th>Live count and limit</th></tr><tr><td>Relay Sessions</td><td>{{if .LiveSessionsKnown}}{{.LiveSessions}} of {{.Sessions}}{{else}}Unavailable · limit {{.Sessions}}{{end}}</td></tr><tr><td>Login Grants</td><td>{{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}</td></tr></table><small>Live counts are sampled separately from quota history.</small><div class="doughnut" style="--used:{{.Percent}}%" role="img" aria-label="Quota committed {{.Committed}} of {{.WeeklyBytes}} bytes"><span>{{.Percent}}%</span></div><p>Quota committed: {{.Committed}} bytes</p><p>{{.UsageState}}</p><small>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</small><h3>Weekly history</h3><table><tr><th>Week starting UTC</th><th>Quota committed</th></tr>{{range .History}}<tr><td>{{.Week}}</td><td>{{.Committed}} bytes</td></tr>{{end}}</table></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form><form method="post" action="/auth/revoke"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out everywhere</button></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -701,7 +751,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			s.beforeProfileRead()
 		}
 		err := s.Pool.QueryRow(r.Context(), `WITH current_week AS MATERIALIZED (SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date AS monday)
-SELECT a.status,a.email,a.email_verified,a.hosted_domain,p.weekly_bytes,p.sessions,
+SELECT a.status,a.email,a.email_verified,a.hosted_domain,COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions),
 COALESCE((SELECT u.committed_bytes FROM public.weekly_quota_usage u WHERE u.account_id=a.id AND u.week_start=(SELECT monday FROM current_week)),0),
 (SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'committed',COALESCE(u.committed_bytes,0)) ORDER BY w.week_start DESC)
  FROM (SELECT ((SELECT monday FROM current_week)-7*n)::date AS week_start FROM generate_series(0,12) n) w
@@ -820,4 +870,92 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	cookie(w, sessionCookie, "", -1)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Origin") != s.Origin {
+		fail(w, 403)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if r.ParseForm() != nil {
+		fail(w, 400)
+		return
+	}
+	id, version, _, _, csrf, err := s.session(r)
+	if err != nil {
+		fail(w, 401)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		fail(w, 403)
+		return
+	}
+	var subject string
+	if err := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, id).Scan(&subject); err != nil {
+		fail(w, 503)
+		return
+	}
+	_ = s.withIdentityGuard(subject, func() error {
+		if !s.WithAccountGuards(r.Context(), []string{id}, func() {
+			ctx := r.Context()
+			tx, e := s.Pool.Begin(ctx)
+			if e != nil {
+				fail(w, 503)
+				return
+			}
+			defer tx.Rollback(ctx)
+			var email string
+			e = tx.QueryRow(ctx, `SELECT email FROM public.accounts WHERE id=$1 FOR UPDATE`, id).Scan(&email)
+			if e != nil {
+				fail(w, 503)
+				return
+			}
+			var live bool
+			e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.account_id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp())`, id, s.sessionDigest(r, version), version).Scan(&live)
+			if e != nil || !live {
+				fail(w, 401)
+				return
+			}
+			_, e = tx.Exec(ctx, `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE id=$1`, id)
+			if e == nil {
+				_, e = tx.Exec(ctx, `UPDATE public.login_grants SET terminated_at=clock_timestamp() WHERE account_id=$1 AND terminated_at IS NULL`, id)
+			}
+			if e == nil {
+				_, e = tx.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id=$1`, id)
+			}
+			if e == nil {
+				var auditID string
+				auditID, e = uuid()
+				if e == nil {
+					_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id,reason,actor_email) VALUES($1,clock_timestamp(),'credentials_revoked',$2,'security_response',$3)`, auditID, id, email)
+				}
+			}
+			if e != nil {
+				fail(w, 503)
+				return
+			}
+			if s.commitAccount != nil {
+				e = s.commitAccount(ctx, tx)
+			} else {
+				e = tx.Commit(ctx)
+			}
+			s.installIdentityFence(subject)
+			if e != nil {
+				s.uncertainAccounts.Store(id, struct{}{})
+			}
+			if s.accountChanged != nil {
+				s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
+			}
+			cookie(w, sessionCookie, "", -1)
+			if e != nil {
+				uncertainResponse(w)
+				return
+			}
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+		}) {
+			fail(w, 503)
+		}
+		return nil
+	})
 }

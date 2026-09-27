@@ -80,6 +80,134 @@ func addPlanOperation(t *testing.T, form url.Values, body string) {
 	}
 }
 
+func TestAccountSecurityActionsThroughPortal(t *testing.T) {
+	c, m, db := fixture(t)
+	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
+	if err := os.WriteFile(c.Secrets.AdminAllowlistFile, []byte(`{"revision":1,"emails":["security@gmail.com"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d := newProvider(t)
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	admin := loginAs(t, s, d, "security-admin", "security@gmail.com", "")
+	adminCSRF := csrfFrom(t, s, admin)
+	subject := "security-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	owner := loginAs(t, s, d, subject, "owner@example.test", "")
+	ownerCSRF := csrfFrom(t, s, owner)
+	var id string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	change := func(action, revision string, want int) {
+		t.Helper()
+		form := url.Values{"csrf": {adminCSRF}, "reason": {"security_response"}, "action": {action}, "revision": {revision}}
+		if action == "approve" || action == "reactivate" {
+			form.Set("plan_id", "6dd09395-51a0-451c-96b3-716e6038e870")
+		}
+		if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, form, c.PortalOrigin); out.Code != want {
+			t.Fatalf("%s at revision %s: %d, want %d", action, revision, out.Code, want)
+		}
+	}
+	change("approve", "1", 303)
+	state, binding := start(t, s, nil)
+	change("suspend", "1", 409)
+	if out := complete(s, state, binding); out.Code != 303 {
+		t.Fatalf("stale revision fenced a valid Google login: %d", out.Code)
+	}
+	change("suspend", "2", 303)
+	if out := portalRequest(s, "GET", "/", owner, nil, ""); out.Code != 200 || strings.Contains(out.Body.String(), "Your relay account") {
+		t.Fatalf("blocked owner Portal Session survived: %d", out.Code)
+	}
+	change("reactivate", "3", 303)
+	change("deny", "4", 303)
+	change("approve", "5", 409)
+	change("review", "5", 303)
+	change("approve", "6", 303)
+	owner = loginAs(t, s, d, subject, "owner@example.test", "")
+	ownerCSRF = csrfFrom(t, s, owner)
+	form := url.Values{"csrf": {ownerCSRF}}
+	if out := portalRequest(s, "POST", "/auth/revoke", owner, form, c.PortalOrigin); out.Code != 303 {
+		t.Fatalf("owner Sign out everywhere: %d", out.Code)
+	} else if !strings.Contains(out.Header().Get("Set-Cookie"), "Max-Age=0") {
+		t.Fatalf("owner cookie not cleared: %s", out.Header().Get("Set-Cookie"))
+	}
+	if out := portalRequest(s, "GET", "/", owner, nil, ""); out.Code != 200 || strings.Contains(out.Body.String(), "Your relay account") {
+		t.Fatalf("owner Portal Session survived revocation: %d", out.Code)
+	}
+	change("revoke", "7", 303)
+	var status string
+	var revision, generation int64
+	if err := db.Pool.QueryRow(context.Background(), `SELECT status,revision,credential_generation FROM public.accounts WHERE id=$1`, id).Scan(&status, &revision, &generation); err != nil || status != "Active" || revision != 8 || generation != 4 {
+		t.Fatalf("final account state=%q revision=%d generation=%d err=%v", status, revision, generation, err)
+	}
+}
+
+func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
+	c, m, db := fixture(t)
+	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
+	if err := os.WriteFile(c.Secrets.AdminAllowlistFile, []byte(`{"revision":1,"emails":["quota-admin@gmail.com"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d := newProvider(t)
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	var changes []auth.AccountChange
+	s.SetAccountChanged(func(change auth.AccountChange) { changes = append(changes, change) })
+	admin := loginAs(t, s, d, "quota-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "quota-admin@gmail.com", "")
+	csrf := csrfFrom(t, s, admin)
+	subject := "quota-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	owner := loginAs(t, s, d, subject, "quota-owner@example.test", "")
+	var id string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	approve := url.Values{"csrf": {csrf}, "reason": {"routine_administration"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
+	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, approve, c.PortalOrigin); out.Code != 303 {
+		t.Fatalf("approve: %d", out.Code)
+	}
+	_, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,1000,1,'3ec305cd-15c4-4d3d-83ee-e47ec7febf10',1000)`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(rev, bytes, sessions string, close, discard bool) {
+		t.Helper()
+		form := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {rev}, "weekly_bytes_override": {bytes}, "sessions_override": {sessions}}
+		if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, form, c.PortalOrigin); out.Code != 303 {
+			t.Fatalf("override %s: %d %s", bytes, out.Code, out.Body.String())
+		}
+		change := changes[len(changes)-1]
+		if change.CloseAll != close || change.DiscardCredit != discard || change.WeeklyBytes != mustInt64(t, bytes) || change.SessionLimit != mustInt(t, sessions) {
+			t.Fatalf("override %s callback: %+v", bytes, change)
+		}
+	}
+	set("2", "1000", "5", false, false)
+	set("3", "999", "0", true, true)
+	profile := portalRequest(s, "GET", "/", owner, nil, "")
+	if profile.Code != 200 || !strings.Contains(profile.Body.String(), "Quota committed: 1000 bytes") || !strings.Contains(profile.Body.String(), "999 bytes") || !strings.Contains(profile.Body.String(), "Relay Sessions: 0") {
+		t.Fatalf("owner quota profile: %d %s", profile.Code, profile.Body.String())
+	}
+	var generation, committed int64
+	if err := db.Pool.QueryRow(context.Background(), `SELECT a.credential_generation,u.committed_bytes FROM public.accounts a JOIN public.weekly_quota_usage u ON u.account_id=a.id WHERE a.id=$1`, id).Scan(&generation, &committed); err != nil || generation != 0 || committed != 1000 {
+		t.Fatalf("quota edit changed credentials or usage: generation=%d committed=%d err=%v", generation, committed, err)
+	}
+}
+
+func mustInt64(t *testing.T, s string) int64 {
+	t.Helper()
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func mustInt(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	c, m, db := fixture(t)
 	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
