@@ -38,6 +38,13 @@ type Provider struct {
 	Client                              *http.Client
 }
 
+// SetAccountCommitHookForTest injects an account-mutation commit result so
+// integration tests can exercise a lost acknowledgment after PostgreSQL commits.
+// Serving code leaves this unset.
+func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
+	s.commitAccount = commit
+}
+
 func Google() Provider {
 	return Provider{AuthorizationURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", KeysURL: "https://www.googleapis.com/oauth2/v3/certs"}
 }
@@ -909,8 +916,8 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer tx.Rollback(ctx)
-			var email string
-			e = tx.QueryRow(ctx, `SELECT email FROM public.accounts WHERE id=$1 FOR UPDATE`, id).Scan(&email)
+			var locked string
+			e = tx.QueryRow(ctx, `SELECT id FROM public.accounts WHERE id=$1 FOR UPDATE`, id).Scan(&locked)
 			if e != nil {
 				fail(w, 503)
 				return
@@ -921,18 +928,12 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				fail(w, 401)
 				return
 			}
-			_, e = tx.Exec(ctx, `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE id=$1`, id)
-			if e == nil {
-				_, e = tx.Exec(ctx, `UPDATE public.login_grants SET terminated_at=clock_timestamp() WHERE account_id=$1 AND terminated_at IS NULL`, id)
-			}
-			if e == nil {
-				_, e = tx.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id=$1`, id)
-			}
+			e = revokeAccountCredentials(ctx, tx, id)
 			if e == nil {
 				var auditID string
 				auditID, e = uuid()
 				if e == nil {
-					_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id,reason,actor_email) VALUES($1,clock_timestamp(),'credentials_revoked',$2,'security_response',$3)`, auditID, id, email)
+					_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES($1,clock_timestamp(),'owner_credentials_revoked',$2)`, auditID, id)
 				}
 			}
 			if e != nil {

@@ -187,11 +187,11 @@ CREATE INDEX weekly_quota_history ON public.weekly_quota_usage (account_id,week_
 REVOKE ALL ON public.weekly_quota_usage FROM PUBLIC`}, {7, `ALTER TABLE public.accounts ADD COLUMN weekly_bytes_override bigint CHECK (weekly_bytes_override >= 0);
 ALTER TABLE public.accounts ADD COLUMN sessions_override integer CHECK (sessions_override >= 0);
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_event_check;
-ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','quota_overridden'));
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden'));
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
-ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','quota_overridden') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
-ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse') OR (reason IS NOT NULL AND actor_email IS NOT NULL));`}}
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked') OR (reason IS NOT NULL AND actor_email IS NOT NULL));`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

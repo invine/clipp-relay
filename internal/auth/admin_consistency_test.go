@@ -118,6 +118,49 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 	}
 }
 
+func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	target, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at,status,plan_id) VALUES($1,'https://accounts.google.com',$2,'target@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp(),'Active','6dd09395-51a0-451c-96b3-716e6038e870')`, target, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.audit_events WHERE account_id=$1`, target)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id=$1`, target)
+	})
+	var changed AccountChange
+	closed := false
+	s.SetAccountChanged(func(change AccountChange) func() {
+		changed = change
+		return func() { closed = true }
+	})
+	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("lost commit acknowledgment")
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {"1"}}
+	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
+	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !changed.DiscardCredit || !closed {
+		t.Fatalf("ambiguous security mutation response=%d callback=%+v closed=%t", out.Code, changed, closed)
+	}
+	var status string
+	var generation int64
+	var audited bool
+	if err := db.Pool.QueryRow(ctx, `SELECT a.status,a.credential_generation,EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_suspended') FROM public.accounts a WHERE a.id=$1`, target).Scan(&status, &generation, &audited); err != nil || status != "Suspended" || generation != 1 || !audited {
+		t.Fatalf("commit state=%s generation=%d audited=%t err=%v", status, generation, audited, err)
+	}
+	if _, quarantined := s.uncertainAccounts.Load(target); !quarantined {
+		t.Fatal("lost security commit did not quarantine admission")
+	}
+}
+
 func TestSuspensionWaitsForAccountRowLockAndRevokesRelayCredential(t *testing.T) {
 	s, cookie, db, origin := adminFixture(t)
 	target, err := uuid()

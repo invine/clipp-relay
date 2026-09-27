@@ -27,6 +27,25 @@ type adminIdentity struct {
 	version         uint64
 }
 
+type accountActionSpec struct {
+	states       map[string]bool
+	event        string
+	nextStatus   string
+	security     bool
+	planRequired bool
+}
+
+var accountActions = map[string]accountActionSpec{
+	"approve":    {map[string]bool{"Pending": true}, "account_approved", "Active", false, true},
+	"deny":       {map[string]bool{"Pending": true, "Active": true, "Suspended": true}, "account_denied", "Denied", true, false},
+	"assign":     {map[string]bool{"Active": true}, "plan_assigned", "", false, true},
+	"suspend":    {map[string]bool{"Active": true}, "account_suspended", "Suspended", true, false},
+	"reactivate": {map[string]bool{"Suspended": true}, "account_reactivated", "Active", false, false},
+	"review":     {map[string]bool{"Denied": true}, "account_reviewed", "Pending", false, false},
+	"revoke":     {map[string]bool{"Pending": true, "Active": true, "Suspended": true, "Denied": true}, "credentials_revoked", "", true, false},
+	"override":   {map[string]bool{"Active": true}, "quota_overridden", "", false, false},
+}
+
 func reasonOK(reason string) bool {
 	switch reason {
 	case "routine_administration", "policy_enforcement", "suspected_abuse", "security_response", "support_correction":
@@ -161,8 +180,8 @@ func (s *Server) sessionDigest(r *http.Request, version uint64) []byte {
 }
 
 type adminAccountRow struct {
-	ID, Email, Status, PlanID string
-	Revision                  int64
+	ID, Email, Status, PlanID, WeeklyOverride, SessionOverride string
+	Revision                                                   int64
 }
 type adminPlanRow struct {
 	ID, Name string
@@ -185,7 +204,7 @@ type adminPageData struct {
 	OperationID, OperationProof        string
 }
 
-var adminPage = template.Must(template.New("admin").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay administration</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:1200px;margin:3vh auto;padding:28px;background:white;border:1px solid #e2e8f0;border-radius:18px}section{margin:20px 0;padding:18px;border:1px solid #e2e8f0;border-radius:12px}table{border-collapse:collapse;width:100%}th,td{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}input,select,button{font:inherit;padding:6px;margin:3px}button{background:#183f75;color:white;border:0;border-radius:8px}.muted{color:#64748b}</style><main class="shell"><a href="/">Your account</a><h1>Relay administration</h1><p class="muted">Applied allowlist revision {{.PolicyRevision}}</p><section><h2>Service totals</h2><p>Pending {{.Pending}} · Active {{.Active}} · Suspended {{.Suspended}} · Denied {{.Denied}}</p></section><section><h2>Accounts</h2><table><tr><th>Email</th><th>Status</th><th>Revision</th><th>Plan</th><th></th></tr>{{range .Accounts}}<tr><td>{{.Email}}</td><td>{{.Status}}</td><td>{{.Revision}}</td><td>{{.PlanID}}</td><td><a href="/admin?selected={{.ID}}&accounts_after={{$.AccountCursor}}&plans_after={{$.PlanCursor}}&limit={{$.Limit}}">Select</a></td></tr>{{end}}</table>{{if .NextAccount}}<a href="/admin?accounts_after={{.NextAccount}}&plans_after={{.PlanCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next accounts</a>{{end}}</section><section><h2>Selected account</h2>{{with .SelectedAccount}}<p>{{.Email}} · {{.Status}} · revision {{.Revision}}</p><form method="post" action="/admin/accounts/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><label>Action <select name="action"><option value="approve">Approve</option><option value="suspend">Suspend</option><option value="reactivate">Reactivate</option><option value="deny">Deny</option><option value="review">Return to pending review</option><option value="revoke">Revoke credentials</option><option value="assign">Assign replacement plan</option><option value="override">Set quota overrides</option></select></label><label>Plan <select name="plan_id">{{range $.Plans}}{{if not .Archived}}<option value="{{.ID}}">{{.Name}} ({{.Bytes}} bytes/week, {{.Sessions}} sessions)</option>{{end}}{{end}}</select></label><label>Weekly byte override (blank uses plan) <input name="weekly_bytes_override" type="number" min="0"></label><label>Session override (blank uses plan) <input name="sessions_override" type="number" min="0"></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><button>Apply</button></form>{{end}}</section><section><h2>Quota Plans</h2><table><tr><th>Name</th><th>Weekly bytes</th><th>Sessions</th><th>Revision</th><th>State</th><th></th></tr>{{range .Plans}}<tr><td>{{.Name}}</td><td>{{.Bytes}}</td><td>{{.Sessions}}</td><td>{{.Revision}}</td><td>{{if .Archived}}Archived{{else}}Available{{end}}</td><td>{{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><button>Archive</button></form>{{end}}</td></tr>{{end}}</table>{{if .NextPlan}}<a href="/admin?plans_after={{.NextPlan}}&accounts_after={{.AccountCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next plans</a>{{end}}<h3>Create plan</h3><form method="post" action="/admin/plans"><label>Name <input name="name" maxlength="120" required></label><label>Weekly bytes <input name="weekly_bytes" type="number" min="0" required></label><label>Sessions <input name="sessions" type="number" min="0" required></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="operation_id" value="{{.OperationID}}"><input type="hidden" name="operation_proof" value="{{.OperationProof}}"><button>Create</button></form></section></main></html>`))
+var adminPage = template.Must(template.New("admin").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay administration</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:1200px;margin:3vh auto;padding:28px;background:white;border:1px solid #e2e8f0;border-radius:18px}section{margin:20px 0;padding:18px;border:1px solid #e2e8f0;border-radius:12px}table{border-collapse:collapse;width:100%}th,td{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}input,select,button{font:inherit;padding:6px;margin:3px}button{background:#183f75;color:white;border:0;border-radius:8px}.muted{color:#64748b}</style><main class="shell"><a href="/">Your account</a><h1>Relay administration</h1><p class="muted">Applied allowlist revision {{.PolicyRevision}}</p><section><h2>Service totals</h2><p>Pending {{.Pending}} · Active {{.Active}} · Suspended {{.Suspended}} · Denied {{.Denied}}</p></section><section><h2>Accounts</h2><table><tr><th>Email</th><th>Status</th><th>Revision</th><th>Plan</th><th></th></tr>{{range .Accounts}}<tr><td>{{.Email}}</td><td>{{.Status}}</td><td>{{.Revision}}</td><td>{{.PlanID}}</td><td><a href="/admin?selected={{.ID}}&accounts_after={{$.AccountCursor}}&plans_after={{$.PlanCursor}}&limit={{$.Limit}}">Select</a></td></tr>{{end}}</table>{{if .NextAccount}}<a href="/admin?accounts_after={{.NextAccount}}&plans_after={{.PlanCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next accounts</a>{{end}}</section><section><h2>Selected account</h2>{{with .SelectedAccount}}<p>{{.Email}} · {{.Status}} · revision {{.Revision}}</p><form method="post" action="/admin/accounts/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><label>Action <select name="action"><option value="approve">Approve</option><option value="suspend">Suspend</option><option value="reactivate">Reactivate</option><option value="deny">Deny</option><option value="review">Return to pending review</option><option value="revoke">Revoke credentials</option><option value="assign">Assign replacement plan</option><option value="override">Set quota overrides</option></select></label><label>Plan <select name="plan_id">{{range $.Plans}}{{if not .Archived}}<option value="{{.ID}}">{{.Name}} ({{.Bytes}} bytes/week, {{.Sessions}} sessions)</option>{{end}}{{end}}</select></label><label>Weekly byte override (blank uses plan) <input name="weekly_bytes_override" type="number" min="0" value="{{.WeeklyOverride}}"></label><label>Session override (blank uses plan) <input name="sessions_override" type="number" min="0" value="{{.SessionOverride}}"></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><button>Apply</button></form>{{end}}</section><section><h2>Quota Plans</h2><table><tr><th>Name</th><th>Weekly bytes</th><th>Sessions</th><th>Revision</th><th>State</th><th></th></tr>{{range .Plans}}<tr><td>{{.Name}}</td><td>{{.Bytes}}</td><td>{{.Sessions}}</td><td>{{.Revision}}</td><td>{{if .Archived}}Archived{{else}}Available{{end}}</td><td>{{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><button>Archive</button></form>{{end}}</td></tr>{{end}}</table>{{if .NextPlan}}<a href="/admin?plans_after={{.NextPlan}}&accounts_after={{.AccountCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next plans</a>{{end}}<h3>Create plan</h3><form method="post" action="/admin/plans"><label>Name <input name="name" maxlength="120" required></label><label>Weekly bytes <input name="weekly_bytes" type="number" min="0" required></label><label>Sessions <input name="sessions" type="number" min="0" required></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="operation_id" value="{{.OperationID}}"><input type="hidden" name="operation_proof" value="{{.OperationProof}}"><button>Create</button></form></section></main></html>`))
 
 var planRetryPage = template.Must(template.New("plan-retry").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Retry plan creation</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033}.shell{max-width:680px;margin:8vh auto;padding:28px;background:white;border:1px solid #e2e8f0;border-radius:18px}button{background:#183f75;color:white;border:0;border-radius:8px;padding:10px 16px;font:inherit}</style><main class="shell"><h1>Plan result could not be confirmed</h1><p>Retry this same operation to check or finish it. Do not start a new plan form for this attempt.</p><form method="post" action="/admin/plans"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="operation_id" value="{{.OperationID}}"><input type="hidden" name="operation_proof" value="{{.OperationProof}}"><input type="hidden" name="reason" value="{{.Reason}}"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="weekly_bytes" value="{{.Bytes}}"><input type="hidden" name="sessions" value="{{.Sessions}}"><button>Retry this plan</button></form></main></html>`))
 
@@ -284,14 +303,14 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	rows, err = s.Pool.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),revision FROM public.accounts WHERE id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
+	rows, err = s.Pool.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
 	if err != nil {
 		fail(w, 503)
 		return
 	}
 	for rows.Next() {
 		var x adminAccountRow
-		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.Revision) != nil {
+		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.WeeklyOverride, &x.SessionOverride, &x.Revision) != nil {
 			rows.Close()
 			fail(w, 503)
 			return
@@ -310,7 +329,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	}
 	if data.Selected != "" {
 		var selected adminAccountRow
-		err = s.Pool.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),revision FROM public.accounts WHERE id=$1`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.Revision)
+		err = s.Pool.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id=$1`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.WeeklyOverride, &selected.SessionOverride, &selected.Revision)
 		if err == pgx.ErrNoRows {
 			fail(w, 404)
 			return
@@ -365,12 +384,13 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	target := r.PathValue("id")
 	expected, valid := revision(r.PostForm.Get("revision"))
 	action := r.PostForm.Get("action")
-	if !idPattern.MatchString(target) || !valid || (action != "approve" && action != "deny" && action != "assign" && action != "suspend" && action != "reactivate" && action != "review" && action != "revoke" && action != "override") {
+	spec, known := accountActions[action]
+	if !idPattern.MatchString(target) || !valid || !known {
 		fail(w, 400)
 		return
 	}
 	plan := r.PostForm.Get("plan_id")
-	if (action == "approve" || action == "assign") && !idPattern.MatchString(plan) {
+	if spec.planRequired && !idPattern.MatchString(plan) {
 		fail(w, 400)
 		return
 	}
@@ -379,12 +399,12 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	var securitySubject string
 	var closeConnections func()
 	update := func() {
-		s.adminAccountUpdate(w, r, actor, target, expected, action, plan, securitySubject, &applied, &uncertain)
+		s.adminAccountUpdate(w, r, actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
 		if applied != nil && s.accountChanged != nil {
 			closeConnections = s.accountChanged(*applied)
 		}
 	}
-	if action == "deny" || action == "suspend" || action == "revoke" {
+	if spec.security {
 		var subject string
 		if e := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, target).Scan(&subject); e != nil {
 			fail(w, 503)
@@ -412,7 +432,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action, plan, subject string, applied **AccountChange, uncertain *bool) {
+func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action string, spec accountActionSpec, plan, subject string, applied **AccountChange, uncertain *bool) {
 	ctx := r.Context()
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
@@ -453,12 +473,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		fail(w, 409)
 		return
 	}
-	allowed := map[string]bool{
-		"approve": status == "Pending", "deny": status == "Pending" || status == "Active" || status == "Suspended",
-		"assign": status == "Active", "suspend": status == "Active", "reactivate": status == "Suspended",
-		"review": status == "Denied", "revoke": true, "override": status == "Active",
-	}
-	if !allowed[action] {
+	if !spec.states[status] {
 		fail(w, 409)
 		return
 	}
@@ -496,48 +511,32 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		sessionLimit = *oldSessions
 	}
 	newStatus := status
-	event := "plan_assigned"
-	if action == "approve" {
-		newStatus = "Active"
-		event = "account_approved"
+	if spec.nextStatus != "" {
+		newStatus = spec.nextStatus
 	}
-	if action == "deny" {
-		newStatus = "Denied"
-		event = "account_denied"
-	}
-	security := action == "deny" || action == "suspend" || action == "revoke"
-	switch action {
-	case "suspend":
-		newStatus, event = "Suspended", "account_suspended"
-	case "reactivate":
-		newStatus, event = "Active", "account_reactivated"
-	case "review":
-		newStatus, event = "Pending", "account_reviewed"
-	case "revoke":
-		event = "credentials_revoked"
-	case "override":
-		event = "quota_overridden"
-		if value := r.PostForm.Get("weekly_bytes_override"); value != "" {
+	event, security := spec.event, spec.security
+	if action == "override" {
+		if values, present := r.PostForm["weekly_bytes_override"]; present && len(values) == 1 && values[0] != "" {
 			var n int64
-			n, e = strconv.ParseInt(value, 10, 64)
+			n, e = strconv.ParseInt(values[0], 10, 64)
 			if e != nil || n < 0 {
 				fail(w, 400)
 				return
 			}
 			oldBytes, weeklyBytes = &n, n
-		} else {
+		} else if present {
 			oldBytes = nil
 		}
-		if value := r.PostForm.Get("sessions_override"); value != "" {
+		if values, present := r.PostForm["sessions_override"]; present && len(values) == 1 && values[0] != "" {
 			var n int64
-			n, e = strconv.ParseInt(value, 10, 32)
+			n, e = strconv.ParseInt(values[0], 10, 32)
 			if e != nil || n < 0 {
 				fail(w, 400)
 				return
 			}
 			v := int(n)
 			oldSessions, sessionLimit = &v, v
-		} else {
+		} else if present {
 			oldSessions = nil
 		}
 	}
@@ -552,12 +551,9 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 			e = tx.QueryRow(ctx, `SELECT COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, target).Scan(&weeklyBytes, &sessionLimit)
 		}
 	} else if security {
-		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,credential_generation=credential_generation+1,revision=revision+1 WHERE id=$1`, target, newStatus)
+		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,revision=revision+1 WHERE id=$1`, target, newStatus)
 		if e == nil {
-			_, e = tx.Exec(ctx, `UPDATE public.login_grants SET terminated_at=clock_timestamp() WHERE account_id=$1 AND terminated_at IS NULL`, target)
-		}
-		if e == nil {
-			_, e = tx.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id=$1`, target)
+			e = revokeAccountCredentials(ctx, tx, target)
 		}
 	} else {
 		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,revision=revision+1 WHERE id=$1`, target, newStatus)

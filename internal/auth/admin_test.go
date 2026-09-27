@@ -2,6 +2,10 @@ package auth_test
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +21,11 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/quota"
+	"clipp-relay/internal/relay"
+	"github.com/jackc/pgx/v5"
+	libp2p "github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 func loginAs(t *testing.T, s *auth.Server, d *providerDouble, subject, email, hd string) *http.Cookie {
@@ -133,6 +142,10 @@ func TestAccountSecurityActionsThroughPortal(t *testing.T) {
 	if out := portalRequest(s, "GET", "/", owner, nil, ""); out.Code != 200 || strings.Contains(out.Body.String(), "Your relay account") {
 		t.Fatalf("owner Portal Session survived revocation: %d", out.Code)
 	}
+	var auditReason, auditActor *string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT reason,actor_email FROM public.audit_events WHERE account_id=$1 AND event='owner_credentials_revoked'`, id).Scan(&auditReason, &auditActor); err != nil || auditReason != nil || auditActor != nil {
+		t.Fatalf("owner audit retained identity or reason: reason=%v actor=%v err=%v", auditReason, auditActor, err)
+	}
 	change("revoke", "7", 303)
 	var status string
 	var revision, generation int64
@@ -179,7 +192,24 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 		}
 	}
 	set("2", "1000", "5", false, false)
-	set("3", "999", "0", true, true)
+	selected := portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" value="1000"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) {
+		t.Fatalf("selected policy does not show current overrides: %d %s", selected.Code, selected.Body.String())
+	}
+	onlyBytes := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {"3"}, "weekly_bytes_override": {"999"}}
+	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, onlyBytes, c.PortalOrigin); out.Code != 303 {
+		t.Fatalf("one-field override: %d", out.Code)
+	}
+	if change := changes[len(changes)-1]; change.WeeklyBytes != 999 || change.SessionLimit != 5 || !change.CloseAll || !change.DiscardCredit {
+		t.Fatalf("one-field override reset other limit: %+v", change)
+	}
+	onlySessions := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {"4"}, "sessions_override": {"0"}}
+	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, onlySessions, c.PortalOrigin); out.Code != 303 {
+		t.Fatalf("session-only override: %d", out.Code)
+	}
+	if change := changes[len(changes)-1]; change.WeeklyBytes != 999 || change.SessionLimit != 0 {
+		t.Fatalf("session-only override reset byte cap: %+v", change)
+	}
 	profile := portalRequest(s, "GET", "/", owner, nil, "")
 	if profile.Code != 200 || !strings.Contains(profile.Body.String(), "Quota committed: 1000 bytes") || !strings.Contains(profile.Body.String(), "999 bytes") || !strings.Contains(profile.Body.String(), "Relay Sessions: 0") {
 		t.Fatalf("owner quota profile: %d %s", profile.Code, profile.Body.String())
@@ -188,6 +218,123 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 	if err := db.Pool.QueryRow(context.Background(), `SELECT a.credential_generation,u.committed_bytes FROM public.accounts a JOIN public.weekly_quota_usage u ON u.account_id=a.id WHERE a.id=$1`, id).Scan(&generation, &committed); err != nil || generation != 0 || committed != 1000 {
 		t.Fatalf("quota edit changed credentials or usage: generation=%d committed=%d err=%v", generation, committed, err)
 	}
+}
+
+func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.T) {
+	c, m, db := fixture(t)
+	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
+	if err := os.WriteFile(c.Secrets.AdminAllowlistFile, []byte(`{"revision":1,"emails":["wire-admin@gmail.com"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d := newProvider(t)
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	credit := quota.New(db.Pool)
+	defer credit.Close()
+	dataPlane, err := relay.New(s, credit, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataPlane.Close()
+	s.SetAccountChanged(func(change auth.AccountChange) func() {
+		if change.DiscardCredit {
+			credit.Invalidate(change.AccountID)
+		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
+			change.CloseAll = true
+		}
+		if change.CloseAll || dataPlane.AccountSessions(change.AccountID) > change.SessionLimit {
+			return dataPlane.DetachAccount(change.AccountID)
+		}
+		return nil
+	})
+	admin := loginAs(t, s, d, "wire-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "wire-admin@gmail.com", "")
+	csrf := csrfFrom(t, s, admin)
+	subject := "wire-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	owner := loginAs(t, s, d, subject, "wire-owner@example.test", "")
+	var id string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"csrf": {csrf}, "reason": {"security_response"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
+	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, form, c.PortalOrigin); out.Code != 303 {
+		t.Fatalf("approve: %d", out.Code)
+	}
+	access, _ := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, owner, "android", c.PublicClients.AndroidRedirect))
+	client, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: dataPlane.Host.ID(), Addrs: dataPlane.Host.Addrs()}
+	if err := client.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := client.NewStream(ctx, dataPlane.Host.ID(), relay.AuthProtocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(fmt.Sprintf(`{"accessToken":%q}`, access))
+	var header [10]byte
+	n := binary.PutUvarint(header[:], uint64(len(body)))
+	if _, err := stream.Write(append(header[:n], body...)); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	size, err := binary.ReadUvarint(testByteReader{stream})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, size)
+	if _, err := io.ReadFull(stream, response); err != nil {
+		t.Fatal(err)
+	}
+	_ = stream.Close()
+	if !strings.Contains(string(response), `"ok":true`) || dataPlane.AccountSessions(id) != 1 {
+		t.Fatalf("relay authentication=%s sessions=%d", response, dataPlane.AccountSessions(id))
+	}
+	form.Set("action", "revoke")
+	form.Set("revision", "2")
+	s.SetAccountCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("lost commit acknowledgment")
+	})
+	start := time.Now()
+	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, form, c.PortalOrigin); out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") {
+		t.Fatalf("uncertain revoke: %d %s", out.Code, out.Body.String())
+	}
+	if sessions := dataPlane.AccountSessions(id); sessions != 0 || time.Since(start) > 10*time.Second {
+		t.Fatalf("revocation left %d sessions after %s", sessions, time.Since(start))
+	}
+	for len(client.Network().ConnsToPeer(dataPlane.Host.ID())) != 0 && time.Since(start) < time.Second {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := len(client.Network().ConnsToPeer(dataPlane.Host.ID())); n != 0 {
+		t.Fatalf("physical relay connection survived: %d", n)
+	}
+	if _, err := s.AuthenticateRelay(ctx, access); err != auth.ErrInvalidAccess {
+		t.Fatalf("access token survived revocation: %v", err)
+	}
+	freshOwner := loginAs(t, s, d, subject, "wire-owner@example.test", "")
+	freshAccess, _ := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, freshOwner, "android", c.PublicClients.AndroidRedirect))
+	if _, err := s.AuthenticateRelay(ctx, freshAccess); err != nil {
+		t.Fatalf("post-revocation admission did not reconcile: %v", err)
+	}
+	if sessions := dataPlane.AccountSessions(id); sessions != 0 {
+		t.Fatalf("reconciliation revived %d closed sessions", sessions)
+	}
+}
+
+type testByteReader struct{ io.Reader }
+
+func (r testByteReader) ReadByte() (byte, error) {
+	var one [1]byte
+	_, err := io.ReadFull(r.Reader, one[:])
+	return one[0], err
 }
 
 func mustInt64(t *testing.T, s string) int64 {
@@ -358,6 +505,10 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if accountChanges[len(accountChanges)-1].AccountID != deniedID || !accountChanges[len(accountChanges)-1].CloseAll || !accountChanges[len(accountChanges)-1].DiscardCredit {
 		t.Fatal("denial did not invalidate account")
 	}
+	if out := portalRequest(s, "GET", "/", denied, nil, ""); strings.Contains(out.Body.String(), "Your relay account") {
+		t.Fatalf("denial retained old Portal Session: %s", out.Body.String())
+	}
+	denied = loginAs(t, s, d, "denied-test", "denied@example.test", "")
 	if out := portalRequest(s, "GET", "/", denied, nil, ""); !strings.Contains(out.Body.String(), "not approved") || strings.Contains(out.Body.String(), "policy_enforcement") || strings.Contains(out.Body.String(), "Admin@gmail.com") {
 		t.Fatalf("denied profile exposed policy detail: %s", out.Body.String())
 	}
