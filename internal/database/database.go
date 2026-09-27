@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 3
+const ExpectedRevision = 4
 
 type migration struct {
 	revision int
@@ -73,7 +73,42 @@ CREATE TABLE public.audit_events (
  account_id uuid NOT NULL
 );
 CREATE INDEX audit_events_expiry ON public.audit_events (occurred_at);
-REVOKE ALL ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events FROM PUBLIC`}, {3, `CREATE INDEX portal_sessions_absolute_expiry ON public.portal_sessions (absolute_expires_at)`}}
+REVOKE ALL ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events FROM PUBLIC`}, {3, `CREATE INDEX portal_sessions_absolute_expiry ON public.portal_sessions (absolute_expires_at)`}, {4, `CREATE TABLE public.quota_plans (
+ id uuid PRIMARY KEY,
+ name text NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+ weekly_bytes bigint NOT NULL CHECK (weekly_bytes >= 0),
+ sessions integer NOT NULL CHECK (sessions >= 0),
+ revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+ created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+ archived_at timestamptz,
+ first_assigned_at timestamptz
+);
+ALTER TABLE public.accounts ADD COLUMN plan_id uuid REFERENCES public.quota_plans(id);
+ALTER TABLE public.accounts ADD COLUMN revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0);
+ALTER TABLE public.accounts ADD CONSTRAINT active_has_plan CHECK (status <> 'Active' OR plan_id IS NOT NULL);
+CREATE INDEX accounts_admin_page ON public.accounts (created_at,id);
+CREATE INDEX quota_plans_admin_page ON public.quota_plans (created_at,id);
+CREATE INDEX accounts_plan_id ON public.accounts (plan_id);
+CREATE FUNCTION public.enforce_assigned_plan_allowance() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF OLD.first_assigned_at IS NOT NULL AND (NEW.weekly_bytes <> OLD.weekly_bytes OR NEW.sessions <> OLD.sessions) THEN
+  RAISE EXCEPTION 'assigned plan allowance is immutable';
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER assigned_plan_allowance BEFORE UPDATE ON public.quota_plans FOR EACH ROW EXECUTE FUNCTION public.enforce_assigned_plan_allowance();
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_event_check;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned'));
+ALTER TABLE public.audit_events ALTER COLUMN account_id DROP NOT NULL;
+ALTER TABLE public.audit_events ADD COLUMN plan_id uuid;
+ALTER TABLE public.audit_events ADD COLUMN outcome text NOT NULL DEFAULT 'succeeded' CHECK (outcome='succeeded');
+ALTER TABLE public.audit_events ADD COLUMN reason text CHECK (reason IN ('routine_administration','policy_enforcement','suspected_abuse','security_response','support_correction'));
+ALTER TABLE public.audit_events ADD COLUMN actor_email text CHECK (length(actor_email) BETWEEN 1 AND 320);
+ALTER TABLE public.audit_events ADD COLUMN client_type text CHECK (client_type IN ('electron','android','extension'));
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event='account_created' OR (reason IS NOT NULL AND actor_email IS NOT NULL));
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
+INSERT INTO public.quota_plans (id,name,weekly_bytes,sessions) VALUES ('6dd09395-51a0-451c-96b3-716e6038e870','Baseline',1073741824,5);
+REVOKE ALL ON public.quota_plans FROM PUBLIC`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

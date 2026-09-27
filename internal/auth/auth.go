@@ -44,6 +44,7 @@ func Google() Provider {
 type Server struct {
 	Pool                           *pgxpool.Pool
 	Origin, ClientID, ClientSecret string
+	AdminAllowlistFile             string
 	Peppers                        map[uint64][]byte
 	CurrentPepper                  uint64
 	provider                       Provider
@@ -94,7 +95,7 @@ func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provid
 		client = &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{MaxResponseHeaderBytes: 16 << 10}}
 	}
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	return &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), flows: map[string]flow{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}}
+	return &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), flows: map[string]flow{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}}
 }
 func opaque() (string, error) {
 	b := make([]byte, 32)
@@ -167,6 +168,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", s.login)
 	mux.HandleFunc("GET /auth/callback", s.callback)
 	mux.HandleFunc("POST /auth/logout", s.logout)
+	mux.HandleFunc("GET /admin", s.adminHome)
+	mux.HandleFunc("POST /admin/accounts/{id}", s.adminAccount)
+	mux.HandleFunc("POST /admin/plans", s.adminPlan)
+	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) })
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -543,14 +548,14 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 	return "", 0, "", "", "", errInvalidSession
 }
 
-var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p><form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
+var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><small>Zero means no allowance. Usage becomes available with relay sessions.</small></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
-	_, _, status, email, csrf, e := s.session(r)
+	id, _, status, email, csrf, e := s.session(r)
 	if errors.Is(e, errRateLimit) {
 		fail(w, 429)
 		return
@@ -560,11 +565,32 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	description := map[string]string{"Pending": "Your account is waiting for approval.", "Active": "Your account is active.", "Suspended": "Your account is temporarily unavailable.", "Denied": "Your account is not approved."}[status]
+	var weeklyBytes int64
+	var sessions int
+	if e == nil && status == "Active" {
+		if err := s.Pool.QueryRow(r.Context(), `SELECT p.weekly_bytes,p.sessions FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&weeklyBytes, &sessions); err != nil {
+			fail(w, 503)
+			return
+		}
+	}
+	admin := false
+	if e == nil {
+		var verified bool
+		var hd *string
+		if err := s.Pool.QueryRow(r.Context(), `SELECT email_verified,hosted_domain FROM public.accounts WHERE id=$1`, id).Scan(&verified, &hd); err == nil {
+			if policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile); err == nil {
+				admin = policy.Allows(email, verified, deref(hd))
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = page.Execute(w, struct {
 		SignedIn                         bool
 		Status, Description, Email, CSRF string
-	}{e == nil, status, description, email, csrf})
+		Active, Admin                    bool
+		WeeklyBytes                      int64
+		Sessions                         int
+	}{e == nil, status, description, email, csrf, status == "Active", admin, weeklyBytes, sessions})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {

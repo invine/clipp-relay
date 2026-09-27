@@ -57,6 +57,8 @@ type providerDouble struct {
 	invalid        string
 	calls          int
 	subject        string
+	email          string
+	hostedDomain   string
 	keyAge         string
 	keyID          string
 	issuers        map[string]string
@@ -74,7 +76,7 @@ func newProvider(t *testing.T) *providerDouble {
 	if e != nil {
 		t.Fatal(e)
 	}
-	d := &providerDouble{key: key, subject: "stable-subject", keyAge: "60", keyID: "test-key"}
+	d := &providerDouble{key: key, subject: "stable-subject", email: "latest@example.test", keyAge: "60", keyID: "test-key"}
 	d.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/keys":
@@ -93,6 +95,7 @@ func newProvider(t *testing.T) *providerDouble {
 			_ = r.ParseForm()
 			d.mu.Lock()
 			nonce, invalid, subject := r.Form.Get("code"), d.invalid, d.subject
+			email, hostedDomain := d.email, d.hostedDomain
 			d.tokenCalls++
 			issuer := d.issuers[nonce]
 			gate, started := d.tokenGate, d.tokenStarted
@@ -114,7 +117,10 @@ func newProvider(t *testing.T) *providerDouble {
 			if issuer == "" {
 				issuer = "accounts.google.com"
 			}
-			claims := map[string]any{"iss": issuer, "sub": subject, "aud": "test-client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": nonce, "email": "latest@example.test", "email_verified": true, "name": "SECRET_CANARY_NAME"}
+			claims := map[string]any{"iss": issuer, "sub": subject, "aud": "test-client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": nonce, "email": email, "email_verified": true, "name": "SECRET_CANARY_NAME"}
+			if hostedDomain != "" {
+				claims["hd"] = hostedDomain
+			}
 			switch invalid {
 			case "nonce":
 				claims["nonce"] = "wrong"
@@ -227,7 +233,7 @@ func TestGoogleRegistrationAndSessionPersistAcrossRestart(t *testing.T) {
 		t.Fatalf("provider secret retained: %v %v", canaryPresent, e)
 	}
 	var audits int
-	if e := db.Pool.QueryRow(context.Background(), "SELECT count(*) FROM public.audit_events WHERE event='account_created'").Scan(&audits); e != nil || audits != 1 {
+	if e := db.Pool.QueryRow(context.Background(), "SELECT count(*) FROM public.audit_events e JOIN public.accounts a ON a.id=e.account_id WHERE e.event='account_created' AND a.subject='stable-subject'").Scan(&audits); e != nil || audits != 1 {
 		t.Fatalf("audit: %d %v", audits, e)
 	}
 	restarted := auth.New(db.Pool, c, m, d.endpoints())
