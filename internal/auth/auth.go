@@ -52,7 +52,7 @@ type Server struct {
 	client                             *http.Client
 	providerSlots                      chan struct{}
 	mu                                 sync.Mutex
-	identityMu                         sync.Mutex
+	identityGuards                     [4096]sync.Mutex
 	fenceKey                           [32]byte
 	fences                             map[[32]byte]identityFence
 	flowSeq                            uint64
@@ -124,12 +124,17 @@ func (s *Server) identityKey(subject string) [32]byte {
 	copy(key[:], h.Sum(nil))
 	return key
 }
+func (s *Server) identityGuard(key [32]byte) *sync.Mutex {
+	return &s.identityGuards[int(key[0])<<4|int(key[1]>>4)]
+}
 
 // WithIdentityFence serializes a security mutation against Google callback completion.
 // It fences every older continuation even if work returns an uncertain error.
 func (s *Server) WithIdentityFence(subject string, work func() error) error {
-	s.identityMu.Lock()
-	defer s.identityMu.Unlock()
+	key := s.identityKey(subject)
+	guard := s.identityGuard(key)
+	guard.Lock()
+	defer guard.Unlock()
 	s.mu.Lock()
 	now := time.Now()
 	for key, fence := range s.fences {
@@ -137,7 +142,6 @@ func (s *Server) WithIdentityFence(subject string, work func() error) error {
 			delete(s.fences, key)
 		}
 	}
-	key := s.identityKey(subject)
 	if len(s.fences) >= 4096 && s.fences[key].until.IsZero() {
 		s.flowEpoch++
 		s.flows = map[string]flow{}
@@ -339,10 +343,12 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401)
 		return
 	}
-	s.identityMu.Lock()
-	defer s.identityMu.Unlock()
+	key := s.identityKey(claims.Subject)
+	guard := s.identityGuard(key)
+	guard.Lock()
+	defer guard.Unlock()
 	s.mu.Lock()
-	fence := s.fences[s.identityKey(claims.Subject)]
+	fence := s.fences[key]
 	blocked := f.epoch != s.flowEpoch || (fence.seq >= f.seq && !fence.until.IsZero())
 	s.mu.Unlock()
 	if blocked {

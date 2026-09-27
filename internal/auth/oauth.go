@@ -214,8 +214,14 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
-	s.identityMu.Lock()
-	defer s.identityMu.Unlock()
+	var subject string
+	if e = s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); e != nil {
+		s.oauthError(w, 401)
+		return
+	}
+	guard := s.identityGuard(s.identityKey(subject))
+	guard.Lock()
+	defer guard.Unlock()
 	id := r.PostForm.Get("flow")
 	s.mu.Lock()
 	consent, ok := s.consents[id]
@@ -286,6 +292,26 @@ type tokenResponse struct {
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
 	RefreshToken string `json:"refresh_token"`
+}
+
+func (s *Server) lockCredentialAccount(ctx context.Context, tx pgx.Tx, account string) (string, int64, error) {
+	var status, subject string
+	var generation int64
+	if e := tx.QueryRow(ctx, `SELECT status,credential_generation,subject FROM public.accounts WHERE id=$1 FOR UPDATE`, account).Scan(&status, &generation, &subject); e != nil {
+		return "", 0, e
+	}
+	if !s.allowAccount(subject) {
+		return "", 0, errRateLimit
+	}
+	return status, generation, nil
+}
+func (s *Server) insertCredentialTokens(ctx context.Context, tx pgx.Tx, grant, refresh, access string, refreshGeneration int64) error {
+	_, e := tx.Exec(ctx, `INSERT INTO public.refresh_generations(credential_digest,pepper_version,grant_id,generation,issued_at) VALUES($1,$2,$3,$4,clock_timestamp())`, s.digest(s.CurrentPepper, "refresh-token", refresh), s.CurrentPepper, grant, refreshGeneration)
+	if e != nil {
+		return e
+	}
+	_, e = tx.Exec(ctx, `INSERT INTO public.relay_access_tokens(credential_digest,pepper_version,grant_id,issued_at,expires_at) VALUES($1,$2,$3,clock_timestamp(),clock_timestamp()+interval '15 minutes')`, s.digest(s.CurrentPepper, "relay-access", access), s.CurrentPepper, grant)
+	return e
 }
 
 func writeTokens(w http.ResponseWriter, access, refresh string) {
@@ -373,14 +399,13 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client str
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var status, subject string
-	var generation int64
-	if e = tx.QueryRow(r.Context(), `SELECT status,credential_generation,subject FROM public.accounts WHERE id=$1 FOR UPDATE`, account).Scan(&status, &generation, &subject); e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if !s.allowAccount(subject) {
-		s.oauthError(w, 429)
+	status, generation, e := s.lockCredentialAccount(r.Context(), tx, account)
+	if e != nil {
+		if errors.Is(e, errRateLimit) {
+			s.oauthError(w, 429)
+		} else {
+			s.oauthError(w, 503)
+		}
 		return
 	}
 	var codeGeneration int64
@@ -432,10 +457,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client str
 		_, e = tx.Exec(r.Context(), `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES($1,$2,$3,$4,clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days')`, grant, account, generation, client)
 	}
 	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO public.refresh_generations(credential_digest,pepper_version,grant_id,generation,issued_at) VALUES($1,$2,$3,1,clock_timestamp())`, s.digest(s.CurrentPepper, "refresh-token", refresh), s.CurrentPepper, grant)
-	}
-	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO public.relay_access_tokens(credential_digest,pepper_version,grant_id,issued_at,expires_at) VALUES($1,$2,$3,clock_timestamp(),clock_timestamp()+interval '15 minutes')`, s.digest(s.CurrentPepper, "relay-access", access), s.CurrentPepper, grant)
+		e = s.insertCredentialTokens(r.Context(), tx, grant, refresh, access, 1)
 	}
 	if e != nil || tx.Commit(r.Context()) != nil {
 		s.oauthError(w, 503)
@@ -475,14 +497,13 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var status, subject string
-	var generation int64
-	if e = tx.QueryRow(r.Context(), `SELECT status,credential_generation,subject FROM public.accounts WHERE id=$1 FOR UPDATE`, account).Scan(&status, &generation, &subject); e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if !s.allowAccount(subject) {
-		s.oauthError(w, 429)
+	status, generation, e := s.lockCredentialAccount(r.Context(), tx, account)
+	if e != nil {
+		if errors.Is(e, errRateLimit) {
+			s.oauthError(w, 429)
+		} else {
+			s.oauthError(w, 503)
+		}
 		return
 	}
 	var grant, storedClient string
@@ -532,10 +553,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 		_, e = tx.Exec(r.Context(), `UPDATE public.login_grants SET last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 days'),current_refresh_generation=current_refresh_generation+1 WHERE id=$1`, grant)
 	}
 	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO public.refresh_generations(credential_digest,pepper_version,grant_id,generation,issued_at) VALUES($1,$2,$3,$4,clock_timestamp())`, s.digest(s.CurrentPepper, "refresh-token", next), s.CurrentPepper, grant, currentRefreshGeneration+1)
-	}
-	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO public.relay_access_tokens(credential_digest,pepper_version,grant_id,issued_at,expires_at) VALUES($1,$2,$3,clock_timestamp(),clock_timestamp()+interval '15 minutes')`, s.digest(s.CurrentPepper, "relay-access", access), s.CurrentPepper, grant)
+		e = s.insertCredentialTokens(r.Context(), tx, grant, next, access, currentRefreshGeneration+1)
 	}
 	if e != nil || tx.Commit(r.Context()) != nil {
 		s.oauthError(w, 503)

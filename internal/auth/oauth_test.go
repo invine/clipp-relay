@@ -273,6 +273,25 @@ func TestCodeBindingExpiryAndGeneration(t *testing.T) {
 	if w := tokenPost(s, form); w.Code == 200 {
 		t.Fatal("code replay succeeded")
 	}
+	parallelCode := authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect)
+	form.Set("code", parallelCode)
+	var group sync.WaitGroup
+	results := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		group.Add(1)
+		go func() { defer group.Done(); results <- tokenPost(s, form).Code }()
+	}
+	group.Wait()
+	close(results)
+	successes := 0
+	for status := range results {
+		if status == 200 {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("parallel code redemption succeeded %d times", successes)
+	}
 	expired := authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect)
 	_, e = db.Pool.Exec(context.Background(), `UPDATE public.authorization_codes SET expires_at=clock_timestamp()-interval '1 second' WHERE account_id=(SELECT id FROM public.accounts WHERE subject='binding-account') AND consumed_at IS NULL`)
 	if e != nil {
@@ -435,6 +454,7 @@ func TestGrantCapAndDeadlines(t *testing.T) {
 func TestHTTPSPublicClientStateContract(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
 	d := newProvider(t)
 	s := auth.New(db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "https-client-subject", "https@example.test", "")
@@ -449,8 +469,8 @@ func TestHTTPSPublicClientStateContract(t *testing.T) {
 	verifier := strings.Repeat("a", 43)
 	hash := sha256.Sum256([]byte(verifier))
 	expectedState := "initiator-owned-state"
-	authorize := func(state string) (string, string) {
-		q := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {state}}
+	authorize := func(clientType, redirect, state string) (string, string) {
+		q := url.Values{"response_type": {"code"}, "client_id": {clientType}, "redirect_uri": {redirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {state}}
 		req, _ := http.NewRequest("GET", server.URL+"/oauth/authorize?"+q.Encode(), nil)
 		req.AddCookie(cookie)
 		response, err := client.Do(req)
@@ -489,31 +509,42 @@ func TestHTTPSPublicClientStateContract(t *testing.T) {
 		}
 		return callback.Query().Get("state"), callback.Query().Get("code")
 	}
-	actual, wrongCode := authorize("attacker-replaced-state")
+	actual, wrongCode := authorize("android", c.PublicClients.AndroidRedirect, "attacker-replaced-state")
 	if actual == expectedState || wrongCode == "" {
 		t.Fatal("bad test callback")
 	}
 	// A public client accepts only the exact state it generated; it never redeems this code.
-	actual, code := authorize(expectedState)
+	actual, code := authorize("android", c.PublicClients.AndroidRedirect, expectedState)
 	if actual != expectedState || code == "" {
 		t.Fatal("legitimate callback failed state check")
 	}
-	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}}
-	req, _ := http.NewRequest("POST", server.URL+"/oauth/token", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	redeemTLS := func(clientType, redirect, code string) {
+		form := url.Values{"grant_type": {"authorization_code"}, "client_id": {clientType}, "redirect_uri": {redirect}, "code": {code}, "code_verifier": {verifier}}
+		req, _ := http.NewRequest("POST", server.URL+"/oauth/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 200 || response.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s HTTPS token status %d", clientType, response.StatusCode)
+		}
+		var tokens struct {
+			Access  string `json:"access_token"`
+			Refresh string `json:"refresh_token"`
+		}
+		if e := json.NewDecoder(response.Body).Decode(&tokens); e != nil || tokens.Access == "" || tokens.Refresh == "" {
+			t.Fatal("body credentials missing")
+		}
 	}
-	defer response.Body.Close()
-	if response.StatusCode != 200 || response.Header.Get("Cache-Control") != "no-store" {
-		t.Fatalf("HTTPS token status %d", response.StatusCode)
+	redeemTLS("android", c.PublicClients.AndroidRedirect, code)
+	for _, entry := range []struct{ clientType, redirect string }{{"electron", "http://127.0.0.1:34567/oauth/callback"}, {"extension", c.PublicClients.ExtensionRedirect}} {
+		actual, code := authorize(entry.clientType, entry.redirect, expectedState)
+		if actual != expectedState || code == "" {
+			t.Fatalf("%s client state/callback invalid", entry.clientType)
+		}
+		redeemTLS(entry.clientType, entry.redirect, code)
 	}
-	var tokens struct {
-		Access  string `json:"access_token"`
-		Refresh string `json:"refresh_token"`
-	}
-	if e := json.NewDecoder(response.Body).Decode(&tokens); e != nil || tokens.Access == "" || tokens.Refresh == "" {
-		t.Fatal("body credentials missing")
-	}
+
 }
