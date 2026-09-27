@@ -21,6 +21,13 @@ snapshot are available; otherwise it is `503 unavailable`. `/livez` is
 drain or when the address snapshot expires.
 Relay Authentication sends one length-delimited JSON request and half-closes
 its write side; the relay checks end of request before returning its response.
+Rendezvous accepts one request per stream on both the legacy unframed v1 and
+length-delimited v2 protocols, then sends one response and closes the stream.
+Both versions answer a complete request even while the client's write side is
+open, preserving v1 clients that wait for a response before closing. The server
+resets a stream when extra bytes are already queued after the request. Bytes
+sent only after the response cannot retroactively invalidate that response;
+clients can half-close after their request to make the end explicit.
 
 ## Run
 

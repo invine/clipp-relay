@@ -188,10 +188,10 @@ func readRV(st network.Stream, version protocol.ID, limit int) ([]byte, error) {
 		if _, err = io.ReadFull(st, data); err != nil {
 			return nil, errBadFrame
 		}
-		// V2 clients half-close after the single framed request. Waiting for
-		// EOF within the operation deadline rejects even delayed extra frames.
-		var tail [1]byte
-		if n, err := st.Read(tail[:]); n != 0 || err != io.EOF {
+		// A complete frame is a complete request, including when a client
+		// keeps its write side open while awaiting the response. Reject bytes
+		// already queued after the frame before producing the one response.
+		if !rvV2TailClean(st) {
 			return nil, errBadFrame
 		}
 		return data, nil
@@ -221,7 +221,8 @@ func readRV(st network.Stream, version protocol.ID, limit int) ([]byte, error) {
 }
 
 // A short bounded probe rejects an already queued second request while allowing
-// clients to keep the write side open until they receive the response.
+// clients to keep the write side open until they receive the response. Data
+// arriving after that response cannot invalidate work already completed.
 func rvTailClean(st network.Stream, remaining int64) bool {
 	_ = st.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 	var buf [4096]byte
@@ -239,6 +240,20 @@ func rvTailClean(st network.Stream, remaining int64) bool {
 			return errors.As(err, &netErr) && netErr.Timeout()
 		}
 	}
+}
+
+func rvV2TailClean(st network.Stream) bool {
+	_ = st.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	var b [1]byte
+	n, err := st.Read(b[:])
+	if n != 0 {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func rvWhitespace(data []byte) bool {
