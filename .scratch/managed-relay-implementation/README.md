@@ -30,6 +30,7 @@ rather than silently changing policy or reviving an obsolete design.
 - [Delete and re-register safely](issues/16-delete-and-re-register-safely.md) has reviewed local implementation integrated and verified; it remains claimed pending an approved OCI journal for provider/IAM qualification.
 - [Rediscover and drain an ephemeral relay](issues/11-rediscover-and-drain-an-ephemeral-relay.md) is resolved after reviewed integration, real-client restart, race and disposable PostgreSQL verification.
 - [Manage independent relays in Clipp](issues/12-manage-independent-relays-in-clipp.md) is resolved after reviewed integration, 502 tests, all three builds and localhost pairing verification.
+- [Use managed relays from Electron](issues/13-use-managed-relays-from-electron.md) and [Android](issues/14-use-managed-relays-from-android.md) are claimed for fresh-context implementation from the integrated Clipp controller baseline.
 - [Install with external PostgreSQL](issues/18-install-with-external-postgresql.md) has reviewed local Helm/preflight work integrated and verified; it remains claimed because isolated cluster installation and live F5/OCI/network qualification are not run under the no-deploy constraint.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
