@@ -120,6 +120,12 @@ SELECT
       )
   )
   OR EXISTS (
+    SELECT 1 FROM pg_database db
+    WHERE db.datname = current_database()
+      AND (db.datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        OR pg_has_role(db.datdba, 'MEMBER'))
+  )
+  OR EXISTS (
     SELECT 1 FROM pg_namespace ns
     WHERE left(ns.nspname, 3) <> 'pg_' AND ns.nspname <> 'information_schema'
       AND (ns.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)

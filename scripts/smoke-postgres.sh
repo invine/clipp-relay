@@ -149,6 +149,16 @@ docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postg
 expect_ddl_role_rejected member-owner
 echo 'Inherited table ownership rejection passed'
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'ALTER TABLE public.schema_migrations OWNER TO clipp_migration; REVOKE clipp_table_owner FROM clipp_serving; DROP ROLE clipp_table_owner' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c 'ALTER DATABASE clipp_ticket02_smoke OWNER TO clipp_serving; REVOKE CREATE, TEMPORARY ON DATABASE clipp_ticket02_smoke FROM clipp_serving' >/dev/null
+test "$(docker exec -e PGPASSWORD="$serving_pass" "$name" psql -At -h localhost -U clipp_serving -d clipp_ticket02_smoke -c "SELECT has_database_privilege(current_database(),'CREATE'),has_database_privilege(current_database(),'TEMP')")" = 'f|f'
+expect_ddl_role_rejected direct-database-owner
+echo 'Direct database ownership rejection passed'
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c 'ALTER DATABASE clipp_ticket02_smoke OWNER TO postgres; CREATE ROLE clipp_database_owner NOLOGIN; ALTER DATABASE clipp_ticket02_smoke OWNER TO clipp_database_owner; REVOKE CREATE, TEMPORARY ON DATABASE clipp_ticket02_smoke FROM clipp_database_owner; GRANT clipp_database_owner TO clipp_serving' >/dev/null
+test "$(docker exec -e PGPASSWORD="$serving_pass" "$name" psql -At -h localhost -U clipp_serving -d clipp_ticket02_smoke -c "SELECT has_database_privilege(current_database(),'CREATE'),has_database_privilege(current_database(),'TEMP')")" = 'f|f'
+expect_ddl_role_rejected member-database-owner
+echo 'Inherited database ownership rejection passed'
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c 'ALTER DATABASE clipp_ticket02_smoke OWNER TO postgres; REVOKE clipp_database_owner FROM clipp_serving; DROP ROLE clipp_database_owner' >/dev/null
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
 echo 'PostgreSQL 18 integration tests passed'
 
@@ -187,4 +197,4 @@ if "$work/clipp-relay" -command migrate -config "$work/wrong-major.json" > "$wor
   echo 'wrong PostgreSQL major unexpectedly accepted' >&2; exit 1
 fi
 grep -q 'unsupported PostgreSQL major' "$work/wrong-major.log"
-echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection'
+echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, table/database ownership rejection, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection'
