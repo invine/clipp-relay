@@ -150,7 +150,7 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 	d := newProvider(t)
 	s := auth.New(db.Pool, c, m, d.endpoints())
 	var changes []auth.AccountChange
-	s.SetAccountChanged(func(change auth.AccountChange) { changes = append(changes, change) })
+	s.SetAccountChanged(func(change auth.AccountChange) func() { changes = append(changes, change); return nil })
 	admin := loginAs(t, s, d, "quota-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "quota-admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	subject := "quota-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -221,7 +221,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	d := newProvider(t)
 	s := auth.New(db.Pool, c, m, d.endpoints())
 	var accountChanges []auth.AccountChange
-	s.SetAccountChanged(func(change auth.AccountChange) { accountChanges = append(accountChanges, change) })
+	s.SetAccountChanged(func(change auth.AccountChange) func() { accountChanges = append(accountChanges, change); return nil })
 	admin := loginAs(t, s, d, "admin-test", "Admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	workspace := portalRequest(s, "GET", "/admin", admin, nil, "")

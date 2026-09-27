@@ -100,7 +100,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, target)
 	})
 	var changed AccountChange
-	s.SetAccountChanged(func(change AccountChange) { changed = change })
+	s.SetAccountChanged(func(change AccountChange) func() { changed = change; return nil })
 	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err

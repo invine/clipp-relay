@@ -104,15 +104,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer dataPlane.Close()
-	portal.SetAccountChanged(func(change auth.AccountChange) {
+	portal.SetAccountChanged(func(change auth.AccountChange) func() {
 		if change.DiscardCredit {
 			credit.Invalidate(change.AccountID)
 		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
 			change.CloseAll = true
 		}
 		if change.CloseAll || dataPlane.AccountSessions(change.AccountID) > change.SessionLimit {
-			dataPlane.CloseAccount(change.AccountID)
+			return dataPlane.DetachAccount(change.AccountID)
 		}
+		return nil
 	})
 	portal.SetCapacitySampler(func(ctx context.Context, account string) (auth.CapacitySample, error) {
 		sample, err := portal.SampleActiveGrants(ctx, account)

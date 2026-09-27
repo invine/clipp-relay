@@ -374,26 +374,45 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
+	var applied *AccountChange
+	var uncertain bool
+	var securitySubject string
+	var closeConnections func()
+	update := func() {
+		s.adminAccountUpdate(w, r, actor, target, expected, action, plan, securitySubject, &applied, &uncertain)
+		if applied != nil && s.accountChanged != nil {
+			closeConnections = s.accountChanged(*applied)
+		}
+	}
 	if action == "deny" || action == "suspend" || action == "revoke" {
 		var subject string
 		if e := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, target).Scan(&subject); e != nil {
 			fail(w, 503)
 			return
 		}
+		securitySubject = subject
 		_ = s.withIdentityGuard(subject, func() error {
-			if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, func() { s.adminAccountUpdate(w, r, actor, target, expected, action, plan, subject) }) {
+			if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, update) {
 				fail(w, 503)
 			}
 			return nil
 		})
-		return
-	}
-	if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, func() { s.adminAccountUpdate(w, r, actor, target, expected, action, plan, "") }) {
+	} else if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, update) {
 		fail(w, 503)
+	}
+	if applied != nil {
+		if closeConnections != nil {
+			closeConnections()
+		}
+		if uncertain {
+			uncertainResponse(w)
+		} else {
+			http.Redirect(w, r, "/admin?selected="+url.QueryEscape(target), http.StatusSeeOther)
+		}
 	}
 }
 
-func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action, plan, subject string) {
+func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action, plan, subject string, applied **AccountChange, uncertain *bool) {
 	ctx := r.Context()
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
@@ -581,17 +600,11 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 	if commitErr != nil {
 		s.uncertainAccounts.Store(target, struct{}{})
 	}
-	// A failed Commit may be ambiguous. The callback conservatively closes and
-	// invalidates then; successful plan edits apply only their cap deltas.
-	if s.accountChanged != nil {
-		closeAll := security || committed > weeklyBytes || commitErr != nil
-		s.accountChanged(AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, DiscardCredit: security || committed > weeklyBytes || commitErr != nil})
-	}
-	if commitErr != nil {
-		uncertainResponse(w)
-		return
-	}
-	http.Redirect(w, r, "/admin?selected="+url.QueryEscape(target), http.StatusSeeOther)
+	// The caller performs local invalidation and connection I/O after releasing
+	// the identity and account guards, before sending success or uncertainty.
+	closeAll := security || committed > weeklyBytes || commitErr != nil
+	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, DiscardCredit: security || committed > weeklyBytes || commitErr != nil}
+	*uncertain = commitErr != nil
 }
 
 func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {

@@ -65,6 +65,38 @@ func TestPlanCapChangePreservesCreditAtEqualityAndIncrease(t *testing.T) {
 	}
 }
 
+func TestLiveOverrideAtAndBelowCommittedKeepsDebitWithoutFundingMore(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx := context.Background()
+	first, err := q.Ensure(ctx, id, 0)
+	if err != nil || first.Committed != BlockBytes || first.Usable != BlockBytes {
+		t.Fatalf("first allocation=%+v err=%v", first, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=$2 WHERE id=$1`, id, BlockBytes); err != nil {
+		t.Fatal(err)
+	}
+	if q.InvalidateAbove(id, BlockBytes) {
+		t.Fatal("equal cap discarded funded credit")
+	}
+	atEquality, err := q.Take(ctx, id, 0, 100)
+	if err != nil || atEquality.Usable != BlockBytes-100 || atEquality.Committed != BlockBytes {
+		t.Fatalf("equal cap usable credit=%+v err=%v", atEquality, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=$2 WHERE id=$1`, id, BlockBytes-1); err != nil {
+		t.Fatal(err)
+	}
+	if !q.InvalidateAbove(id, BlockBytes-1) {
+		t.Fatal("below-committed cap did not discard credit")
+	}
+	if _, err := q.Ensure(ctx, id, 0); !errors.Is(err, ErrExhausted) {
+		t.Fatalf("below cap funded more: %v", err)
+	}
+	var committed int64
+	if err := pool.QueryRow(ctx, `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1`, id).Scan(&committed); err != nil || committed != BlockBytes {
+		t.Fatalf("existing debit changed: %d %v", committed, err)
+	}
+}
+
 func TestRestartDoesNotRestoreOrRefundFundedCredit(t *testing.T) {
 	q, id, pool := fixture(t)
 	first, err := q.Take(context.Background(), id, 0, 1024)

@@ -73,7 +73,7 @@ type Server struct {
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
-	accountChanged                     func(AccountChange)
+	accountChanged                     func(AccountChange) func()
 }
 
 // WithAccountGuards orders all local account operations before their SQL row
@@ -117,7 +117,9 @@ func (s *Server) SetCapacitySampler(sample func(context.Context, string) (Capaci
 }
 
 // SetAccountChanged installs the in-process invalidation path for committed
-// account policy changes. It must be set before serving HTTP requests.
+// account policy changes. The callback fences credit and detaches registry
+// entries under the account guard, then returns connection-close I/O to run
+// outside all logical guards. It must be set before serving HTTP requests.
 type AccountChange struct {
 	AccountID     string
 	WeeklyBytes   int64
@@ -126,7 +128,7 @@ type AccountChange struct {
 	DiscardCredit bool
 }
 
-func (s *Server) SetAccountChanged(changed func(AccountChange)) { s.accountChanged = changed }
+func (s *Server) SetAccountChanged(changed func(AccountChange) func()) { s.accountChanged = changed }
 
 // SampleActiveGrants reads only an aggregate live count, separately from the
 // profile's policy and quota snapshot. The portal treats a failed sample as
@@ -896,6 +898,8 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
+	var applied, uncertain bool
+	var closeConnections func()
 	_ = s.withIdentityGuard(subject, func() error {
 		if !s.WithAccountGuards(r.Context(), []string{id}, func() {
 			ctx := r.Context()
@@ -945,17 +949,23 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				s.uncertainAccounts.Store(id, struct{}{})
 			}
 			if s.accountChanged != nil {
-				s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
+				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
 			}
-			cookie(w, sessionCookie, "", -1)
-			if e != nil {
-				uncertainResponse(w)
-				return
-			}
-			http.Redirect(w, r, "/", http.StatusSeeOther)
+			applied, uncertain = true, e != nil
 		}) {
 			fail(w, 503)
 		}
 		return nil
 	})
+	if applied {
+		if closeConnections != nil {
+			closeConnections()
+		}
+		cookie(w, sessionCookie, "", -1)
+		if uncertain {
+			uncertainResponse(w)
+		} else {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+		}
+	}
 }
