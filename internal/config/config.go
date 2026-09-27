@@ -48,6 +48,67 @@ type Material struct {
 	Peppers                map[uint64][]byte
 }
 
+// AdminAllowlist is read from the mounted Secret on each administrative request.
+// A failed read must never leave an earlier grant in effect.
+type AdminAllowlist struct {
+	Revision uint64   `json:"revision"`
+	Emails   []string `json:"emails"`
+}
+
+func foldEmail(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) < 3 || len(s) > 320 || strings.Count(s, "@") != 1 {
+		return "", false
+	}
+	for _, c := range s {
+		if c < 33 || c > 126 {
+			return "", false
+		}
+	}
+	return strings.ToLower(s), true
+}
+
+func LoadAdminAllowlist(path string) (AdminAllowlist, error) {
+	var a AdminAllowlist
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) > 1<<20 {
+		return a, errors.New("administrator allowlist unavailable")
+	}
+	if strictJSON(b, &a) != nil || a.Revision == 0 || a.Emails == nil || len(a.Emails) > 1024 {
+		return AdminAllowlist{}, errors.New("invalid administrator allowlist")
+	}
+	seen := map[string]bool{}
+	for i, email := range a.Emails {
+		folded, ok := foldEmail(email)
+		if !ok || seen[folded] {
+			return AdminAllowlist{}, errors.New("invalid administrator allowlist")
+		}
+		seen[folded] = true
+		a.Emails[i] = folded
+	}
+	return a, nil
+}
+
+func (a AdminAllowlist) Allows(email string, verified bool, hostedDomain string) bool {
+	if !verified {
+		return false
+	}
+	folded, ok := foldEmail(email)
+	if !ok {
+		return false
+	}
+	domain := strings.SplitN(folded, "@", 2)[1]
+	if domain != "gmail.com" && domain != "googlemail.com" && hostedDomain == "" {
+		return false
+	}
+	for _, allowed := range a.Emails {
+		if folded == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 func strictJSON(data []byte, target any) error {
 	if err := uniqueFields(json.NewDecoder(bytes.NewReader(data))); err != nil {
 		return errors.New("invalid or duplicate configuration field")
@@ -250,21 +311,8 @@ func (c Config) ReadMaterial() (Material, error) {
 	if m.GoogleClientID == "" || m.GoogleClientSecret == "" {
 		return m, errors.New("Google client material empty")
 	}
-	allow, err := readSecret(c.Secrets.AdminAllowlistFile)
-	if err != nil {
+	if _, err := LoadAdminAllowlist(c.Secrets.AdminAllowlistFile); err != nil {
 		return m, err
-	}
-	var policy struct {
-		Revision uint64   `json:"revision"`
-		Emails   []string `json:"emails"`
-	}
-	if strictJSON(allow, &policy) != nil || policy.Revision == 0 || policy.Emails == nil {
-		return m, errors.New("invalid administrator allowlist")
-	}
-	for _, email := range policy.Emails {
-		if email == "" || email != strings.TrimSpace(email) || !strings.Contains(email, "@") {
-			return m, errors.New("invalid administrator allowlist")
-		}
 	}
 	keyring, err := readSecret(c.Secrets.PepperKeyringFile)
 	if err != nil {
