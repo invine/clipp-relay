@@ -19,7 +19,7 @@ rather than silently changing policy or reviving an obsolete design.
 
 - [Isolate Clipp relay lifecycle](issues/01-isolate-clipp-relay-lifecycle.md) is claimed and under integration review.
 - [Start a validated Go service](issues/02-start-a-validated-go-service.md) is resolved after local integration and verification.
-- [Register and sign in](issues/03-register-and-sign-in.md) is now unblocked.
+- [Register and sign in](issues/03-register-and-sign-in.md) is claimed in an isolated Go worktree.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
 
