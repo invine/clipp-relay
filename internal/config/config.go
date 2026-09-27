@@ -31,6 +31,14 @@ type Config struct {
 		Listen          string   `json:"listen"`
 		PublicAddresses []string `json:"public_addresses"`
 	} `json:"relay_tcp"`
+	RelayWebSocket struct {
+		Listen          string   `json:"listen"`
+		PublicAddresses []string `json:"public_addresses"`
+	} `json:"relay_websocket"`
+	RelayWebRTC struct {
+		Listen          string   `json:"listen"`
+		PublicAddresses []string `json:"public_addresses"`
+	} `json:"relay_webrtc_direct"`
 	Database struct {
 		Mode         string `json:"mode"`
 		Host         string `json:"host"`
@@ -251,6 +259,50 @@ func (c Config) Validate() error {
 			return errors.New("invalid public relay TCP address")
 		}
 	}
+	if c.RelayWebSocket.Listen != "" {
+		if !relayWebSocketListen(c.RelayWebSocket.Listen) {
+			return errors.New("invalid internal WebSocket listener")
+		}
+	} else if len(c.RelayWebSocket.PublicAddresses) != 0 {
+		return errors.New("WebSocket publication requires listener")
+	}
+	if c.RelayWebRTC.Listen != "" {
+		if !relayWebRTCAddress(c.RelayWebRTC.Listen, true) {
+			return errors.New("invalid WebRTC Direct listener")
+		}
+	} else if len(c.RelayWebRTC.PublicAddresses) != 0 {
+		return errors.New("WebRTC Direct publication requires listener")
+	}
+	if (c.RelayWebSocket.Listen != "" && len(c.RelayWebSocket.PublicAddresses) == 0) || len(c.RelayWebSocket.PublicAddresses) > 16 ||
+		(c.RelayWebRTC.Listen != "" && len(c.RelayWebRTC.PublicAddresses) == 0) || len(c.RelayWebRTC.PublicAddresses) > 16 {
+		return errors.New("incomplete or excessive relay transport addresses")
+	}
+	for _, address := range c.RelayWebSocket.PublicAddresses {
+		if !relayWSSAddress(address, c.WSSHostname) {
+			return errors.New("invalid public WSS address")
+		}
+	}
+	for _, address := range c.RelayWebRTC.PublicAddresses {
+		if !relayWebRTCAddress(address, false) {
+			return errors.New("invalid public WebRTC Direct address")
+		}
+	}
+	ports := map[int]bool{pub: true, priv: true}
+	for _, entry := range []struct {
+		address  string
+		protocol int
+	}{{c.RelayTCP.Listen, ma.P_TCP}, {c.RelayWebSocket.Listen, ma.P_TCP}, {c.RelayWebRTC.Listen, ma.P_UDP}} {
+		if entry.address == "" {
+			continue
+		}
+		a, _ := ma.NewMultiaddr(entry.address)
+		value, _ := a.ValueForProtocol(entry.protocol)
+		port, _ := strconv.Atoi(value)
+		if ports[port] {
+			return errors.New("conflicting relay listener")
+		}
+		ports[port] = true
+	}
 	if (c.Database.Mode != "external" && c.Database.Mode != "bundled") || !hostname(c.Database.Host) || c.Database.Port == 0 || c.Database.Name == "" || strings.ContainsAny(c.Database.Name, " /\t\n") {
 		return errors.New("invalid database target")
 	}
@@ -260,6 +312,60 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func relayWebSocketListen(value string) bool {
+	a, err := ma.NewMultiaddr(value)
+	if err != nil || a.String() != value {
+		return false
+	}
+	parts := a.Protocols()
+	if len(parts) != 3 || (parts[0].Code != ma.P_IP4 && parts[0].Code != ma.P_IP6) || parts[1].Code != ma.P_TCP || parts[2].Code != ma.P_WS {
+		return false
+	}
+	portText, err := a.ValueForProtocol(ma.P_TCP)
+	port, parseErr := strconv.Atoi(portText)
+	return err == nil && parseErr == nil && port >= 1024 && port <= 65535
+}
+
+func relayWSSAddress(value, host string) bool {
+	a, err := ma.NewMultiaddr(value)
+	if err != nil || a.String() != value {
+		return false
+	}
+	parts := a.Protocols()
+	if len(parts) != 4 || (parts[0].Code != ma.P_DNS4 && parts[0].Code != ma.P_DNS6) || parts[1].Code != ma.P_TCP || parts[2].Code != ma.P_TLS || parts[3].Code != ma.P_WS {
+		return false
+	}
+	name, err := a.ValueForProtocol(parts[0].Code)
+	portText, portErr := a.ValueForProtocol(ma.P_TCP)
+	port, parseErr := strconv.Atoi(portText)
+	return err == nil && portErr == nil && parseErr == nil && name == host && port >= 1 && port <= 65535
+}
+
+func relayWebRTCAddress(value string, listen bool) bool {
+	a, err := ma.NewMultiaddr(value)
+	if err != nil || a.String() != value {
+		return false
+	}
+	parts := a.Protocols()
+	if len(parts) != 3 || parts[1].Code != ma.P_UDP || parts[2].Code != ma.P_WEBRTC_DIRECT {
+		return false
+	}
+	if listen {
+		if parts[0].Code != ma.P_IP4 && parts[0].Code != ma.P_IP6 {
+			return false
+		}
+	} else if parts[0].Code != ma.P_IP4 && parts[0].Code != ma.P_IP6 && parts[0].Code != ma.P_DNS4 && parts[0].Code != ma.P_DNS6 {
+		return false
+	}
+	portText, err := a.ValueForProtocol(ma.P_UDP)
+	port, parseErr := strconv.Atoi(portText)
+	minimum := 1
+	if listen {
+		minimum = 1024
+	}
+	return err == nil && parseErr == nil && port >= minimum && port <= 65535
 }
 
 func relayTCPAddress(value string, listen bool) bool {

@@ -89,8 +89,8 @@ func main() {
 		logger.Error("file descriptor soft limit below 16384")
 		os.Exit(1)
 	}
-	if c.RelayTCP.Listen == "" {
-		logger.Error("relay TCP listener missing")
+	if c.RelayTCP.Listen == "" && c.RelayWebSocket.Listen == "" && c.RelayWebRTC.Listen == "" {
+		logger.Error("relay listener missing")
 		os.Exit(1)
 	}
 	logger.Info("service starting", "schema_revision", database.ExpectedRevision)
@@ -98,7 +98,7 @@ func main() {
 	portal := auth.New(pool, c, material, auth.Google())
 	credit := quota.New(pool)
 	defer credit.Close()
-	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen})
+	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname})
 	if err != nil {
 		logger.Error("relay listener failed", "reason", err.Error())
 		os.Exit(1)
@@ -125,8 +125,9 @@ func main() {
 		sample.LiveSessions = &count
 		return sample, nil
 	})
-	addresses := make([]ma.Multiaddr, 0, len(c.RelayTCP.PublicAddresses))
-	for _, value := range c.RelayTCP.PublicAddresses {
+	publicAddresses := append(append(append([]string{}, c.RelayTCP.PublicAddresses...), c.RelayWebSocket.PublicAddresses...), c.RelayWebRTC.PublicAddresses...)
+	addresses := make([]ma.Multiaddr, 0, len(publicAddresses))
+	for _, value := range publicAddresses {
 		address, parseErr := ma.NewMultiaddr(value)
 		if parseErr != nil {
 			logger.Error("invalid public relay address")

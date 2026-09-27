@@ -237,10 +237,10 @@ func (sameAccountAuthority) AuthenticateRelay(_ context.Context, token string) (
 	return auth.RelayCredential{AccountID: "a", SessionLimit: 5, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
 }
 
-func runOpaqueCircuit(t *testing.T, authority Authority) *recordingCredit {
+func runOpaqueCircuit(t *testing.T, authority Authority, opts Options, transport string) *recordingCredit {
 	t.Helper()
 	credit := &recordingCredit{counts: map[string]int64{}}
-	s, err := New(authority, credit, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(authority, credit, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,10 +257,19 @@ func runOpaqueCircuit(t *testing.T, authority Authority) *recordingCredit {
 	defer b.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	addr, err := s.ListenAddressFor(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: []ma.Multiaddr{addr}}
 	for _, h := range []host.Host{a, b} {
 		if err = h.Connect(ctx, ai); err != nil {
 			t.Fatal(err)
+		}
+		for _, c := range h.Network().ConnsToPeer(s.Host.ID()) {
+			if !strings.Contains(c.RemoteMultiaddr().String(), map[string]string{"tcp": "/tcp/", "websocket": "/ws", "webrtc-direct": "/webrtc-direct"}[transport]) {
+				t.Fatalf("unexpected relay transport: %s", c.RemoteMultiaddr())
+			}
 		}
 	}
 	sendWireToken(t, ctx, a, s.Host.ID(), "a")
@@ -275,6 +284,7 @@ func runOpaqueCircuit(t *testing.T, authority Authority) *recordingCredit {
 		n, e := st.Read(data)
 		if e == nil {
 			received <- data[:n]
+			_, _ = st.Write([]byte("return bytes"))
 		}
 	})
 	raddr, err := ma.NewMultiaddr(fmt.Sprintf("/p2p/%s/p2p-circuit/p2p/%s", s.Host.ID(), a.ID()))
@@ -301,19 +311,28 @@ func runOpaqueCircuit(t *testing.T, authority Authority) *recordingCredit {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	reply := make([]byte, len("return bytes"))
+	if _, err = io.ReadFull(st, reply); err != nil || string(reply) != "return bytes" {
+		t.Fatalf("reverse payload %q: %v", reply, err)
+	}
+	for _, conn := range s.Host.Network().Conns() {
+		if conn.Stat().Direction != network.DirInbound {
+			t.Fatalf("relay initiated outbound peer connection: %s", conn.RemoteMultiaddr())
+		}
+	}
 	_ = st.Close()
 	return credit
 }
 
 func TestCrossAccountCircuitForwardsOpaqueBytesAndChargesBothEndpoints(t *testing.T) {
-	credit := runOpaqueCircuit(t, twoAuthority{})
+	credit := runOpaqueCircuit(t, twoAuthority{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
 	if credit.count("a") == 0 || credit.count("b") == 0 {
 		t.Fatalf("endpoint charges a=%d b=%d", credit.count("a"), credit.count("b"))
 	}
 }
 
 func TestSameAccountCircuitChargesBothEndpoints(t *testing.T) {
-	credit := runOpaqueCircuit(t, sameAccountAuthority{})
+	credit := runOpaqueCircuit(t, sameAccountAuthority{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
 	if got := credit.count("a"); got < int64(2*len("opaque relayed bytes")) {
 		t.Fatalf("same-account endpoint charge = %d", got)
 	}

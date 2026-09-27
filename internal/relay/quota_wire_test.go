@@ -51,8 +51,13 @@ func (c *finiteCredit) Take(_ context.Context, id string, _ int64, n int64) (quo
 }
 
 func TestConfirmedPartialCreditClosesAllAccountSessionsOnExhaustion(t *testing.T) {
+	runAccountCutoff(t, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
+}
+
+func runAccountCutoff(t *testing.T, opts Options, transport string) {
+	t.Helper()
 	credit := &finiteCredit{}
-	s, err := New(twoAuthority{}, credit, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(twoAuthority{}, credit, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +72,11 @@ func TestConfirmedPartialCreditClosesAllAccountSessionsOnExhaustion(t *testing.T
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	addr, err := s.ListenAddressFor(transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: []ma.Multiaddr{addr}}
 	for i, h := range clients {
 		if err = h.Connect(ctx, ai); err != nil {
 			t.Fatal(err)
@@ -117,5 +126,19 @@ func TestConfirmedPartialCreditClosesAllAccountSessionsOnExhaustion(t *testing.T
 	}
 	if got := s.AccountSessions("a"); got != 0 {
 		t.Fatalf("exhausted account retained %d sessions", got)
+	}
+}
+
+func TestWSSAndWebRTCAccountWideCutoff(t *testing.T) {
+	// The stock transport may deliver an already-buffered tail after cutoff.
+	// This probe asserts account-wide closure, not an unproven exact byte cap.
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"websocket", Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws"}},
+		{"webrtc-direct", Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runAccountCutoff(t, tc.opts, tc.name) })
 	}
 }

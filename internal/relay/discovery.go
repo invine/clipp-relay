@@ -13,7 +13,7 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-// Discovery publishes an atomic, complete TCP snapshot for this process ID.
+// Discovery publishes an atomic, complete transport snapshot for this process ID.
 // A missing or stale snapshot withdraws the entire document.
 type Discovery struct {
 	server    *Server
@@ -44,31 +44,92 @@ func (d *Discovery) Publish(addresses []ma.Multiaddr) error {
 	}
 	if !d.server.Serving() || len(d.server.Host.Network().ListenAddresses()) == 0 {
 		d.withdraw()
-		return errors.New("relay TCP listener unavailable")
+		return errors.New("relay listener unavailable")
+	}
+	for _, transport := range []struct {
+		name    string
+		enabled bool
+	}{{"tcp", d.server.tcpEnabled}, {"websocket", d.server.wsEnabled}, {"webrtc-direct", d.server.webrtcEnabled}} {
+		if !transport.enabled {
+			continue
+		}
+		if _, err := d.server.ListenAddressFor(transport.name); err != nil {
+			d.withdraw()
+			return errors.New("enabled relay listener unavailable")
+		}
 	}
 	set := map[string]bool{}
+	seen := map[string]bool{}
+	currentWebRTCHash := ""
+	if d.server.webrtcEnabled {
+		bound, err := d.server.ListenAddressFor("webrtc-direct")
+		if err != nil {
+			d.withdraw()
+			return errors.New("WebRTC Direct listener unavailable")
+		}
+		currentWebRTCHash, err = bound.ValueForProtocol(ma.P_CERTHASH)
+		if err != nil {
+			d.withdraw()
+			return errors.New("WebRTC Direct certificate unavailable")
+		}
+	}
 	for _, a := range addresses {
 		if a == nil {
 			d.withdraw()
 			return errors.New("nil relay address")
 		}
-		if _, err := a.ValueForProtocol(ma.P_TCP); err != nil {
-			d.withdraw()
-			return errors.New("non-TCP address in TCP snapshot")
-		}
 		if pid, err := a.ValueForProtocol(ma.P_P2P); err == nil && pid != d.server.Host.ID().String() {
 			d.withdraw()
 			return errors.New("address names another relay")
 		}
-		if _, err := a.ValueForProtocol(ma.P_P2P); err != nil {
-			var join error
-			a, join = ma.NewMultiaddr(a.String() + "/p2p/" + d.server.Host.ID().String())
-			if join != nil {
-				d.withdraw()
-				return join
+		var kind string
+		parts := a.Protocols()
+		if len(parts) > 0 && parts[len(parts)-1].Code == ma.P_P2P {
+			a, _ = ma.SplitLast(a)
+			parts = parts[:len(parts)-1]
+		}
+		switch {
+		case len(parts) == 2 && parts[1].Code == ma.P_TCP && d.server.tcpEnabled:
+			kind = "tcp"
+		case len(parts) == 4 && parts[1].Code == ma.P_TCP && parts[2].Code == ma.P_TLS && parts[3].Code == ma.P_WS && d.server.wsEnabled:
+			name, err := a.ValueForProtocol(parts[0].Code)
+			if err == nil && (parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6) && name == d.server.webSocketHostname {
+				kind = "websocket"
+			}
+		case (len(parts) == 3 || len(parts) == 4) && parts[1].Code == ma.P_UDP && parts[2].Code == ma.P_WEBRTC_DIRECT && d.server.webrtcEnabled:
+			if parts[0].Code == ma.P_IP4 || parts[0].Code == ma.P_IP6 || parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6 {
+				kind = "webrtc-direct"
+				if len(parts) == 4 {
+					if parts[3].Code != ma.P_CERTHASH {
+						kind = ""
+					} else if hash, err := a.ValueForProtocol(ma.P_CERTHASH); err != nil || hash != currentWebRTCHash {
+						kind = ""
+					}
+				} else {
+					var join error
+					a, join = ma.NewMultiaddr(a.String() + "/certhash/" + currentWebRTCHash)
+					if join != nil {
+						kind = ""
+					}
+				}
 			}
 		}
+		if kind == "" {
+			d.withdraw()
+			return errors.New("invalid or disabled relay transport address")
+		}
+		seen[kind] = true
+		var join error
+		a, join = ma.NewMultiaddr(a.String() + "/p2p/" + d.server.Host.ID().String())
+		if join != nil {
+			d.withdraw()
+			return join
+		}
 		set[a.String()] = true
+	}
+	if seen["tcp"] != d.server.tcpEnabled || seen["websocket"] != d.server.wsEnabled || seen["webrtc-direct"] != d.server.webrtcEnabled {
+		d.withdraw()
+		return errors.New("incomplete enabled relay transport set")
 	}
 	complete := make([]string, 0, len(set))
 	for a := range set {
