@@ -53,6 +53,10 @@ for override in \
 done
 
 helm template isolated "$chart" -n clipp-isolated -f "$example" \
+  --set public.ingressClass=f5.nginx > "$work/dotted-class.yaml"
+grep -q 'ingressClassName: "f5.nginx"' "$work/dotted-class.yaml"
+
+helm template isolated "$chart" -n clipp-isolated -f "$example" \
   --set 'transports.tcp.addresses[0]=/dns4/tcp.example.test/tcp/4001' \
   --set 'transports.udp.addresses[0]=/dns4/udp.example.test/udp/4003' \
   --set-json 'networkPolicy.apiCidrs=[]' > "$work/overrides.yaml"
