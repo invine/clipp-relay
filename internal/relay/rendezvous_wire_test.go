@@ -3,12 +3,14 @@ package relay
 import (
 	"bytes"
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/quota"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -520,4 +522,144 @@ func TestRendezvousLeaseAndReservationSurviveSameConnectionRenewal(t *testing.T)
 	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), req); !bytes.Equal(got["ok"], []byte("true")) {
 		t.Fatalf("renewal lost reservation: %v", got)
 	}
+}
+
+func rvNegotiatedError(t *testing.T, ctx context.Context, h host.Host, relayID peer.ID, expected string) {
+	t.Helper()
+	st, err := h.NewStream(ctx, relayID, RendezvousV2Protocol, RendezvousV1Protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if st.Protocol() != RendezvousV2Protocol {
+		t.Fatalf("error path negotiated %s; want v2", st.Protocol())
+	}
+	_ = st.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err = st.Write(frame(`{"action":"unregister","topic":"clipp"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	n, err := binary.ReadUvarint(byteReader{st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]byte, n)
+	if _, err = io.ReadFull(st, raw); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Ok   bool   `json:"ok"`
+		Code string `json:"code"`
+	}
+	if err = json.Unmarshal(raw, &response); err != nil || response.Ok || response.Code != expected {
+		t.Fatalf("error response %q: %v", raw, err)
+	}
+}
+
+func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
+	request := func() []byte { return frame(`{"action":"unregister","topic":"clipp"}`) }
+	t.Run("authentication", func(t *testing.T) {
+		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer h.Close()
+		if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+		rvNegotiatedError(t, ctx, h, s.Host.ID(), "authentication_failed")
+		if s.RendezvousCountV1() != 0 || s.RendezvousCountV2() != 1 {
+			t.Fatalf("auth counters: v1=%d v2=%d", s.RendezvousCountV1(), s.RendezvousCountV2())
+		}
+	})
+	t.Run("quota", func(t *testing.T) {
+		s, err := New(wireAuthority{}, failingCredit{quota.ErrExhausted}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer h.Close()
+		if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+		if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"quota_exhausted"`) {
+			t.Fatalf("quota response: %s", response)
+		}
+		// The quota refusal is an application response, not an unsupported v2 protocol.
+		if s.RendezvousCountV1() != 0 {
+			t.Fatalf("quota response caused v1 request")
+		}
+		other, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer other.Close()
+		if err = other.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+		rvNegotiatedError(t, ctx, other, s.Host.ID(), "authentication_failed")
+		if s.RendezvousCountV1() != 0 {
+			t.Fatalf("quota path negotiated v1")
+		}
+	})
+	t.Run("timeout", func(t *testing.T) {
+		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h := rvClient(t, ctx, s, "authorized")
+		st, err := h.NewStream(ctx, s.Host.ID(), RendezvousV2Protocol, RendezvousV1Protocol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Reset()
+		if st.Protocol() != RendezvousV2Protocol {
+			t.Fatalf("timeout path negotiated %s", st.Protocol())
+		}
+		_ = st.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		if _, err = st.Write(request()); err != nil {
+			t.Fatal(err)
+		}
+		// No half-close: the server waits for the rest of this v2 operation; a client
+		// timeout must not be interpreted as unsupported multistream.
+		if _, err = binary.ReadUvarint(byteReader{st}); err == nil {
+			t.Fatal("incomplete request received a response")
+		}
+		if s.RendezvousCountV1() != 0 {
+			t.Fatalf("timeout path negotiated v1")
+		}
+	})
+	t.Run("server", func(t *testing.T) {
+		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h := rvClient(t, ctx, s, "authorized")
+		s.StartDrain()
+		rvNegotiatedError(t, ctx, h, s.Host.ID(), "temporarily_unavailable")
+		if s.RendezvousCountV1() != 0 || s.RendezvousCountV2() != 1 {
+			t.Fatalf("server counters: v1=%d v2=%d", s.RendezvousCountV1(), s.RendezvousCountV2())
+		}
+	})
 }
