@@ -58,7 +58,15 @@ The single non-secret JSON configuration is versioned. No environment or flag
 overrides affect policy. Unknown and duplicate fields are rejected. Serving
 requires at least one of `relay_tcp.listen`, `relay_websocket.listen`, or
 `relay_webrtc_direct.listen`; migration does not start a relay listener.
-Every enabled transport needs public addresses for discovery and readiness.
+Every enabled transport needs a complete public address source for discovery
+and readiness. WSS addresses are configured. TCP and WebRTC Direct use either
+explicit `public_addresses` overrides or a named Kubernetes Service in
+`relay_services`; an override removes only that transport's Service dependency.
+The serving ServiceAccount needs read-only `get`, `list`, and `watch` access
+limited to those named Services in its namespace. The process reads its
+projected token on every API request, watches changes, and resyncs at least
+once per minute. An API outage can retain a complete last-verified snapshot
+for at most five minutes; missing addresses withdraw the whole document.
 The WebSocket listener is internal plaintext behind public TLS termination on
 the distinct exact `wss_hostname`; it does not serve portal or private routes.
 The service adds the current Peer ID to all published addresses and the current
@@ -86,6 +94,13 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
     "listen": "/ip4/0.0.0.0/udp/4003/webrtc-direct",
     "public_addresses": ["/dns4/relay.example.com/udp/443/webrtc-direct"]
   },
+  "relay_services": {
+    "namespace": "clipp",
+    "tcp_name": "clipp-relay-tcp",
+    "udp_name": "clipp-relay-udp",
+    "token_file": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    "ca_file": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  },
   "database": {
     "mode": "external",
     "host": "db.internal.example.com",
@@ -103,6 +118,12 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
   }
 }
 ```
+
+This example uses explicit TCP and UDP overrides, so the `relay_services`
+entries are inactive. Remove a transport's `public_addresses` to source that
+transport from its named Service. Kubernetes injects
+`KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT_HTTPS`; the API client
+verifies the mounted CA and never publishes a partial enabled-transport set.
 
 The allowlist file contains `{"revision":1,"emails":[]}`. The keyring file
 contains `{"current":1,"keys":[{"version":1,"material":"<base64 of at least 32 bytes>"}]}`.

@@ -153,6 +153,39 @@ func TestRendezvousV2RegisterV1CrossAccountLookupAndUnregister(t *testing.T) {
 	}
 }
 
+func TestDrainRetainsLookupAndUnregisterButRejectsRegister(t *testing.T) {
+	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	owner := rvClient(t, ctx, s, "a")
+	finder := rvClient(t, ctx, s, "b")
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if _, err := client.Reserve(ctx, owner, ai); err != nil {
+		t.Fatal(err)
+	}
+	raw := rvEnvelope(t, owner, s.Host.ID())
+	register, _ := json.Marshal(map[string]any{"action": "register", "topic": "clipp", "signedPeerRecord": base64.RawURLEncoding.EncodeToString(raw)})
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), register); !bytes.Equal(got["ok"], []byte("true")) {
+		t.Fatalf("register: %v", got)
+	}
+	s.StartDrain()
+	lookup, _ := json.Marshal(map[string]any{"action": "lookup", "topic": "clipp", "peerId": owner.ID().String()})
+	if got := rvExchange(t, ctx, finder, s.Host.ID(), string(RendezvousV2Protocol), lookup); got["record"] == nil {
+		t.Fatalf("lookup during drain: %v", got)
+	}
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), register); !bytes.Equal(got["code"], []byte(`"temporarily_unavailable"`)) {
+		t.Fatalf("register during drain: %v", got)
+	}
+	unregister, _ := json.Marshal(map[string]any{"action": "unregister", "topic": "clipp"})
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), unregister); !bytes.Equal(got["ok"], []byte("true")) {
+		t.Fatalf("unregister during drain: %v", got)
+	}
+}
+
 func TestRendezvousRegistrationRequiresReservationAndValidReachability(t *testing.T) {
 	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
@@ -540,6 +573,10 @@ func TestRendezvousLeaseAndReservationSurviveSameConnectionRenewal(t *testing.T)
 }
 
 func rvNegotiatedError(t *testing.T, ctx context.Context, h host.Host, relayID peer.ID, expected string) {
+	rvNegotiatedErrorRequest(t, ctx, h, relayID, expected, `{"action":"unregister","topic":"clipp"}`)
+}
+
+func rvNegotiatedErrorRequest(t *testing.T, ctx context.Context, h host.Host, relayID peer.ID, expected, request string) {
 	t.Helper()
 	st, err := rvDialPreferred(ctx, h, relayID)
 	if err != nil {
@@ -550,7 +587,7 @@ func rvNegotiatedError(t *testing.T, ctx context.Context, h host.Host, relayID p
 		t.Fatalf("error path negotiated %s; want v2", st.Protocol())
 	}
 	_ = st.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err = st.Write(frame(`{"action":"unregister","topic":"clipp"}`)); err != nil {
+	if _, err = st.Write(frame(request)); err != nil {
 		t.Fatal(err)
 	}
 	if err = st.CloseWrite(); err != nil {
@@ -671,7 +708,7 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 		defer cancel()
 		h := rvClient(t, ctx, s, "authorized")
 		s.StartDrain()
-		rvNegotiatedError(t, ctx, h, s.Host.ID(), "temporarily_unavailable")
+		rvNegotiatedErrorRequest(t, ctx, h, s.Host.ID(), "temporarily_unavailable", `{"action":"register","topic":"clipp","signedPeerRecord":"AA"}`)
 		if s.RendezvousCountV1() != 0 || s.RendezvousCountV2() != 1 {
 			t.Fatalf("server counters: v1=%d v2=%d", s.RendezvousCountV1(), s.RendezvousCountV2())
 		}

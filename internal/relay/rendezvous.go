@@ -123,7 +123,7 @@ func (s *Server) handleRendezvous(st network.Stream) {
 	now := time.Now()
 	s.mu.Lock()
 	owner := s.byConn[st.Conn()]
-	authenticated := !s.closing && owner != nil && s.byPeer[st.Conn().RemotePeer()] == owner && now.Before(owner.deadline)
+	authenticated := owner != nil && s.byPeer[st.Conn().RemotePeer()] == owner && now.Before(owner.deadline)
 	allowed := s.rvGlobalRate.allow(now, 500, 1000)
 	if authenticated {
 		b := s.rvConnRate[st.Conn()]
@@ -399,7 +399,7 @@ func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
 	id := st.Conn().RemotePeer()
 	s.mu.Lock()
 	now := time.Now()
-	if s.closing {
+	if s.closing && req.action == "register" {
 		s.mu.Unlock()
 		return map[string]any{"ok": false, "code": "temporarily_unavailable", "retryAfterMillis": 5000}
 	}

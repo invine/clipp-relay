@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,13 @@ import (
 )
 
 type failingAuthority struct{ err error }
+
+type countingAuthority struct{ calls atomic.Int64 }
+
+func (a *countingAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCredential, error) {
+	a.calls.Add(1)
+	return auth.RelayCredential{AccountID: "a", SessionLimit: 2, ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
 
 func (a failingAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCredential, error) {
 	return auth.RelayCredential{}, a.err
@@ -57,6 +65,36 @@ func authResponse(t *testing.T, ctx context.Context, h host.Host, id peer.ID, to
 	return string(data)
 }
 func readSize(r io.Reader) (uint64, error) { return binary.ReadUvarint(byteReader{r}) }
+
+func TestDrainRejectsAuthBeforeAuthorityCall(t *testing.T) {
+	a := &countingAuthority{}
+	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"ok":true`) {
+		t.Fatal(response)
+	}
+	before := a.calls.Load()
+	s.StartDrain()
+	if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+		t.Fatal(response)
+	}
+	if a.calls.Load() != before {
+		t.Fatalf("authority called during drain: %d -> %d", before, a.calls.Load())
+	}
+}
 
 func TestDelayedExtraAuthFrameIsRejected(t *testing.T) {
 	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})

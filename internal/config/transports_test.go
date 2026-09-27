@@ -74,3 +74,31 @@ func TestEnabledTransportRequiresCompleteExactPublicAddress(t *testing.T) {
 		})
 	}
 }
+
+func TestWatchedTransportNeedsNamedServiceUnlessOverridden(t *testing.T) {
+	c := validTransportConfig()
+	c.RelayTCP.Listen = "/ip4/127.0.0.1/tcp/18082"
+	if c.Validate() == nil {
+		t.Fatal("unpublished TCP listener accepted")
+	}
+	c.RelayServices.Namespace = "clipp"
+	c.RelayServices.TCPName = "relay-tcp"
+	c.RelayServices.TokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	c.RelayServices.CAFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("named Service: %v", err)
+	}
+	c.RelayTCP.PublicAddresses = []string{"/ip4/127.0.0.1/tcp/4001"}
+	c.RelayServices.TCPName = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("override without Service: %v", err)
+	}
+	c.RelayWebRTC.Listen = "/ip4/127.0.0.1/udp/18083/webrtc-direct"
+	if c.Validate() == nil {
+		t.Fatal("unpublished UDP listener accepted")
+	}
+	c.RelayServices.UDPName = "relay-udp"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("UDP Service: %v", err)
+	}
+}

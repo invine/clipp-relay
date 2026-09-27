@@ -14,6 +14,7 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/publication"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
 	"clipp-relay/internal/service"
@@ -53,12 +54,7 @@ func main() {
 	defer stop()
 	forceCtx, force := context.WithCancel(context.Background())
 	defer force()
-	go func() {
-		<-signals
-		stop()
-		<-signals
-		force()
-	}()
+	go handleSignals(signals, stop, force)
 	pool, err := database.NewPool(ctx, c, material, maintenance)
 	if err != nil {
 		logger.Error("database configuration rejected")
@@ -125,45 +121,44 @@ func main() {
 		sample.LiveSessions = &count
 		return sample, nil
 	})
-	publicAddresses := append(append(append([]string{}, c.RelayTCP.PublicAddresses...), c.RelayWebSocket.PublicAddresses...), c.RelayWebRTC.PublicAddresses...)
-	addresses := make([]ma.Multiaddr, 0, len(publicAddresses))
-	for _, value := range publicAddresses {
-		address, parseErr := ma.NewMultiaddr(value)
-		if parseErr != nil {
-			logger.Error("invalid public relay address")
-			os.Exit(1)
+	decode := func(values []string) []ma.Multiaddr {
+		addresses := make([]ma.Multiaddr, 0, len(values))
+		for _, value := range values {
+			addresses = append(addresses, ma.StringCast(value))
 		}
-		addresses = append(addresses, address)
+		return addresses
 	}
-	discovery, err := relay.NewDiscovery(dataPlane, portal, c.PortalOrigin[len("https://"):], addresses)
+	publicationConfig := publication.Config{
+		TCP:    publication.Transport{Enabled: c.RelayTCP.Listen != "", Overrides: decode(c.RelayTCP.PublicAddresses), Service: publication.ServiceRef{Namespace: c.RelayServices.Namespace, Name: c.RelayServices.TCPName}},
+		WSS:    publication.Transport{Enabled: c.RelayWebSocket.Listen != "", Overrides: decode(c.RelayWebSocket.PublicAddresses)},
+		WebRTC: publication.Transport{Enabled: c.RelayWebRTC.Listen != "", Overrides: decode(c.RelayWebRTC.PublicAddresses), Service: publication.ServiceRef{Namespace: c.RelayServices.Namespace, Name: c.RelayServices.UDPName}},
+	}
+	discovery, err := relay.NewDiscovery(dataPlane, portal, c.PortalOrigin[len("https://"):], nil)
 	if err != nil {
 		logger.Error("relay publication failed", "reason", err.Error())
+		os.Exit(1)
+	}
+	srv.SetReadinessCheck(discovery.Published)
+	var apiClient *http.Client
+	var apiURL, apiToken string
+	if publicationConfig.TCP.Enabled && len(publicationConfig.TCP.Overrides) == 0 || publicationConfig.WebRTC.Enabled && len(publicationConfig.WebRTC.Overrides) == 0 {
+		apiClient, apiURL, apiToken, err = publication.KubernetesAPI(c.RelayServices.TokenFile, c.RelayServices.CAFile)
+		if err != nil {
+			logger.Error("relay Service API configuration failed", "reason", err.Error())
+			os.Exit(1)
+		}
+	}
+	controller, err := publication.New(discovery, apiClient, apiURL, apiToken, publicationConfig, srv.SetReady)
+	if err != nil {
+		logger.Error("relay publication configuration failed", "reason", err.Error())
 		os.Exit(1)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/relay", discovery)
 	mux.Handle("/", portal.Handler())
 	srv.SetPublicHandler(mux)
-	srv.SetReady(len(addresses) > 0)
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if ctx.Err() != nil {
-					return
-				}
-				if err := discovery.Publish(addresses); err != nil {
-					srv.SetReady(false)
-				} else {
-					srv.SetReady(len(addresses) > 0)
-				}
-			}
-		}
-	}()
+	srv.SetRouting(false)
+	go controller.Run(ctx)
 	serveCtx, stopServing := context.WithCancel(context.Background())
 	defer stopServing()
 	go func() {
@@ -171,9 +166,7 @@ func main() {
 		srv.SetReady(false)
 		dataPlane.StartDrain()
 		_ = discovery.Publish(nil)
-		drainCtx, cancel := context.WithTimeout(forceCtx, 30*time.Second)
-		defer cancel()
-		_ = dataPlane.Drain(drainCtx)
+		_ = drainWithDeadline(forceCtx, 30*time.Second, dataPlane.Drain)
 		stopServing()
 	}()
 	go portal.Maintain(ctx)
@@ -181,4 +174,17 @@ func main() {
 		logger.Error("service stopped", "reason", "listener failure")
 		os.Exit(1)
 	}
+}
+
+func handleSignals(signals <-chan os.Signal, stop, force func()) {
+	<-signals
+	stop()
+	<-signals
+	force()
+}
+
+func drainWithDeadline(forceCtx context.Context, grace time.Duration, drain func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(forceCtx, grace)
+	defer cancel()
+	return drain(ctx)
 }
