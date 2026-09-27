@@ -4,7 +4,7 @@
 
 **Blocked by:** [04: Approve accounts and assign plans](04-approve-accounts-and-assign-plans.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I2, I5, I11.
@@ -36,12 +36,12 @@ parameterized real PostgreSQL, one receipt per account/week, bounded DB work.
 
 ## Acceptance criteria
 
-- [ ] Allocating 64KiB and observing 10KiB shows 64KiB committed/54KiB usable, not a durable 10KiB traffic claim; concurrent sessions share one balance.
-- [ ] Lost reply, known rollback, duplicate/reordered operation and late receipt tests prove no duplicate debit/install and no unconfirmed spend.
-- [ ] Disconnect/restart/graceful exit do not refund; old receipts never restore old process credit.
-- [ ] Lock wait crossing Monday, clock regression/skew and DB outage preserve conservative deadlines and never spend old-week credit.
-- [ ] Current doughnut and history render accurate committed totals/zero/exceeded states from a consistent snapshot, without device/session detail.
-- [ ] Schema constraints permit committed usage above a later reduced allowance, contain only one bounded latest receipt and use indexed account-week queries.
+- [x] Allocating 64KiB and observing 10KiB shows 64KiB committed/54KiB usable, not a durable 10KiB traffic claim; concurrent sessions share one balance.
+- [x] Lost reply, known rollback, duplicate/reordered operation and late receipt tests prove no duplicate debit/install and no unconfirmed spend.
+- [x] Disconnect/restart/graceful exit do not refund; old receipts never restore old process credit.
+- [x] Lock wait crossing Monday, clock regression/skew and DB outage preserve conservative deadlines and never spend old-week credit.
+- [x] Current doughnut and history render accurate committed totals/zero/exceeded states from a consistent snapshot, without device/session detail.
+- [x] Schema constraints permit committed usage above a later reduced allowance, contain only one bounded latest receipt and use indexed account-week queries.
 
 ## Demonstration
 
@@ -69,3 +69,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 04 resolution (`21ab747`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved on 2026-09-27 after implementation commits `41376e7`, `8955a9b`, `ab6483e` and integration merge `c84e01c`. Independent spec and standards reviews rechecked the deadline, cancellation, bounded admission and profile changes with no remaining actionable findings. The merge preserved credential schema revision 5 and placed quota in revision 6, wired an aggregate PostgreSQL Login Grant count, and kept live Relay Sessions unavailable until ticket 07. On the merged branch, `go test -count=1 ./...`, `go vet ./...`, `go build ./...`, and `git diff --cached --check` passed with Go 1.27.1 darwin/arm64. `bash scripts/smoke-postgres.sh` passed against disposable verified-TLS, SCRAM PostgreSQL 18.6 and 17.11, including real quota and portal tests, and rejected PostgreSQL 16.15. No remote action was taken.

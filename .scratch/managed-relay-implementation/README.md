@@ -22,7 +22,7 @@ rather than silently changing policy or reviving an obsolete design.
 - [Register and sign in](issues/03-register-and-sign-in.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 - [Approve accounts and assign plans](issues/04-approve-accounts-and-assign-plans.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 - [Authorize and renew Clipp credentials](issues/05-authorize-and-renew-clipp-credentials.md) is resolved after reviewed integration and disposable PostgreSQL verification.
-- [Commit weekly quota and show usage](issues/06-commit-weekly-quota-and-show-usage.md) is claimed in an isolated Go worktree.
+- [Commit weekly quota and show usage](issues/06-commit-weekly-quota-and-show-usage.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
 
