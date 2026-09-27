@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I1, I5, I9, I11.
@@ -32,12 +32,12 @@ idle 30s. Application logs stdout, structured/redacted, no stable identity label
 
 ## Acceptance criteria
 
-- [ ] Fresh real PostgreSQL migrates explicitly and matching application starts; wrong major/schema, checksum changes, concurrent runners and failed transaction are tested.
-- [ ] Serving DB role cannot DDL; TLS wrong hostname, untrusted CA and plaintext fallback fail closed.
-- [ ] Unknown/missing/conflicting configuration and unreadable required secret material fail without secret disclosure.
-- [ ] DB work above admission/pool budgets is bounded and temporary; deadlines cover waits and cancellation does not imply rollback.
-- [ ] Public listener exposes no private operations/debug routes; health remains honest during startup and dependency loss.
-- [ ] Go formatting/static checks, tests and reproducible local real-PostgreSQL smoke command pass.
+- [x] Fresh real PostgreSQL migrates explicitly and matching application starts; wrong major/schema, checksum changes, concurrent runners and failed transaction are tested.
+- [x] Serving DB role cannot DDL; TLS wrong hostname, untrusted CA and plaintext fallback fail closed.
+- [x] Unknown/missing/conflicting configuration and unreadable required secret material fail without secret disclosure.
+- [x] DB work above admission/pool budgets is bounded and temporary; deadlines cover waits and cancellation does not imply rollback.
+- [x] Public listener exposes no private operations/debug routes; health remains honest during startup and dependency loss.
+- [x] Go formatting/static checks, tests and reproducible local real-PostgreSQL smoke command pass.
 
 ## Demonstration
 
@@ -65,3 +65,6 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 for Go implementation agent; isolated starting commit `2136aa9`. Resolution awaits integration review and acceptance evidence.
+- Resolved on 2026-09-27 after integration merge `a6da9e7` on `codex/managed-relay-integration`. Independent standards/spec reviews found no material blocker after fixes.
+- Integrated checks passed: Go 1.27.1 darwin/arm64; `GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...`, `GOCACHE=/private/tmp/clipp-go-cache go vet ./...`, `GOCACHE=/private/tmp/clipp-go-cache go build -o /private/tmp/clipp-relay-integration-check ./cmd/clipp-relay`, `gofmt -l cmd internal` (empty), `bash -n scripts/smoke-postgres.sh`, and `git diff --check`.
+- Disposable localhost Docker 29.8.0 smoke passed: verified-TLS PostgreSQL 18.6 and 17.11 migrate/serve, PostgreSQL 16.15 rejection, revision/checksum/concurrent-runner/rollback tests, serving-role DDL and ownership rejection, TLS fail-closed checks, private/public health, and DB outage. No test containers remained afterward. No production target, push, publish, or deploy was used.

@@ -1,7 +1,7 @@
 # Managed relay implementation backlog
 
 Published: 2026-09-27
-State: approved breakdown; implementation not started.
+State: implementation in progress; ticket statuses below are authoritative.
 
 This is the separate build backlog for the
 [accepted single-process v1 specification](../managed-relay-service/spec.md).
@@ -17,14 +17,11 @@ rather than silently changing policy or reviving an obsolete design.
 
 ## Current frontier
 
-Two tickets have no blockers and can start independently:
+- [Isolate Clipp relay lifecycle](issues/01-isolate-clipp-relay-lifecycle.md) is claimed and under integration review.
+- [Start a validated Go service](issues/02-start-a-validated-go-service.md) is resolved after local integration and verification.
+- [Register and sign in](issues/03-register-and-sign-in.md) is now unblocked.
 
-- [Isolate Clipp relay lifecycle](issues/01-isolate-clipp-relay-lifecycle.md) — behavior-preserving prefactor in Clipp.
-- [Start a validated Go service](issues/02-start-a-validated-go-service.md) — first runnable service slice in clipp-relay.
-
-Publication does not claim either ticket or start implementation. Choose and
-claim one before work. “ready-for-agent” is a triage/readiness label, not evidence
-that dependencies or production acceptance have passed.
+Ticket status and each **Blocked by** line remain the source of truth for assignment.
 
 ## Working the backlog
 
