@@ -4,7 +4,7 @@
 
 **Blocked by:** [04: Approve accounts and assign plans](04-approve-accounts-and-assign-plans.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I3, I5, I6, I11.
@@ -37,12 +37,12 @@ live sessions by grant identity because sessions retain account only.
 
 ## Acceptance criteria
 
-- [ ] Public-client contract harness completes each registered callback/PKCE flow against real DB and gets only local relay credentials; Pending/Suspended/Denied receive no code.
-- [ ] Wrong verifier/client/redirect/state, code replay/expiry and generation change fail without issuing credentials; parallel code redemption succeeds once.
-- [ ] Concurrent refresh and consumed-generation replay enforce single-use and grant-local invalidation; lost response never causes silent replay grace.
-- [ ] Grant cap and idle/absolute/access deadlines use authoritative after-lock time; refresh does not revoke older valid Access Tokens.
-- [ ] Old account-bound and initially unknown login flows cannot survive revocation fences; overflow/restart cancels unfinished flows without touching unrelated established credentials.
-- [ ] Raw credentials/Google tokens/PKCE/state are absent from persistence/logs; attributable blocked/grant-cap/replay audit follows privacy policy.
+- [x] Public-client contract harness completes each registered callback/PKCE flow against real DB and gets only local relay credentials; Pending/Suspended/Denied receive no code.
+- [x] Wrong verifier/client/redirect/state, code replay/expiry and generation change fail without issuing credentials; parallel code redemption succeeds once.
+- [x] Concurrent refresh and consumed-generation replay enforce single-use and grant-local invalidation; lost response never causes silent replay grace.
+- [x] Grant cap and idle/absolute/access deadlines use authoritative after-lock time; refresh does not revoke older valid Access Tokens.
+- [x] Old account-bound and initially unknown login flows cannot survive revocation fences; overflow/restart cancels unfinished flows without touching unrelated established credentials.
+- [x] Raw credentials/Google tokens/PKCE/state are absent from persistence/logs; attributable blocked/grant-cap/replay audit follows privacy policy.
 
 ## Demonstration
 
@@ -70,3 +70,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 04 resolution (`21ab747`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved on 2026-09-27 after implementation commits `9c20933`, `6d19c6f`, `6e598ad` and integration merge `d603c1e`. Independent spec and standards reviews were rechecked after fixes with no remaining concrete findings. On the merged integration branch, `go test -count=1 ./...`, `go vet ./...`, `go build ./...`, and `git diff --check HEAD^..HEAD` passed with Go 1.27.1 darwin/arm64. `bash scripts/smoke-postgres.sh` passed against disposable verified-TLS PostgreSQL 18.6 and 17.11; the script ran real auth/database HTTP integration, migration and serving checks, and rejected PostgreSQL 16.15. Its serving role used SCRAM and verified TLS. The local test provider supplied Google flows; a live Google account/provider qualification remains in ticket 27. No remote action was taken.
