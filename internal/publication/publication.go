@@ -22,15 +22,17 @@ import (
 
 type ServiceRef struct{ Namespace, Name string }
 type Transport struct {
-	Enabled   bool
-	Overrides []ma.Multiaddr
-	Service   ServiceRef
+	Enabled    bool
+	PublicPort int
+	Overrides  []ma.Multiaddr
+	Service    ServiceRef
 }
 type Config struct{ TCP, WSS, WebRTC Transport }
 
 type source struct {
 	ref             ServiceRef
 	protocol        string
+	port            int
 	addresses       []ma.Multiaddr
 	verified        time.Time
 	resourceVersion string
@@ -62,7 +64,10 @@ func New(d *relay.Discovery, client *http.Client, apiURL, token string, cfg Conf
 		if t.config.Service.Name == "" || t.config.Service.Namespace == "" || client == nil || apiURL == "" || token == "" {
 			return nil, errors.New("watched transport requires Kubernetes Service and API credentials")
 		}
-		c.sources[t.name] = &source{ref: t.config.Service, protocol: t.protocol}
+		if t.config.PublicPort < 1 || t.config.PublicPort > 65535 {
+			return nil, errors.New("watched transport requires configured public port")
+		}
+		c.sources[t.name] = &source{ref: t.config.Service, protocol: t.protocol, port: t.config.PublicPort}
 	}
 	if cfg.WSS.Enabled && len(cfg.WSS.Overrides) == 0 {
 		return nil, errors.New("WSS requires configured address")
@@ -117,13 +122,13 @@ func (c *Controller) get(ctx context.Context, s *source) ([]ma.Multiaddr, string
 	if err = dec.Decode(&service); err != nil {
 		return nil, "", err
 	}
-	ports := make([]int, 0, 2)
+	portPresent := false
 	for _, p := range service.Spec.Ports {
-		if p.Protocol == s.protocol && p.Port >= 1 && p.Port <= 65535 {
-			ports = append(ports, p.Port)
+		if p.Protocol == s.protocol && p.Port == s.port {
+			portPresent = true
 		}
 	}
-	if len(ports) == 0 {
+	if !portPresent {
 		return nil, service.Metadata.ResourceVersion, nil
 	}
 	set := map[string]ma.Multiaddr{}
@@ -146,11 +151,9 @@ func (c *Controller) get(ctx context.Context, s *source) ([]ma.Multiaddr, string
 			suffix = "/webrtc-direct"
 		}
 		for _, candidate := range candidates {
-			for _, port := range ports {
-				a, err := ma.NewMultiaddr(fmt.Sprintf("/%s/%s/%s/%d%s", candidate.kind, candidate.name, proto, port, suffix))
-				if err == nil {
-					set[a.String()] = a
-				}
+			a, err := ma.NewMultiaddr(fmt.Sprintf("/%s/%s/%s/%d%s", candidate.kind, candidate.name, proto, s.port, suffix))
+			if err == nil {
+				set[a.String()] = a
 			}
 		}
 	}

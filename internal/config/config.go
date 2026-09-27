@@ -29,6 +29,7 @@ type Config struct {
 	} `json:"listeners"`
 	RelayTCP struct {
 		Listen          string   `json:"listen"`
+		PublicPort      uint16   `json:"public_port"`
 		PublicAddresses []string `json:"public_addresses"`
 	} `json:"relay_tcp"`
 	RelayWebSocket struct {
@@ -37,6 +38,7 @@ type Config struct {
 	} `json:"relay_websocket"`
 	RelayWebRTC struct {
 		Listen          string   `json:"listen"`
+		PublicPort      uint16   `json:"public_port"`
 		PublicAddresses []string `json:"public_addresses"`
 	} `json:"relay_webrtc_direct"`
 	RelayServices struct {
@@ -286,6 +288,9 @@ func (c Config) Validate() error {
 	}
 	watchTCP := c.RelayTCP.Listen != "" && len(c.RelayTCP.PublicAddresses) == 0
 	watchUDP := c.RelayWebRTC.Listen != "" && len(c.RelayWebRTC.PublicAddresses) == 0
+	if watchTCP && c.RelayTCP.PublicPort == 0 || watchUDP && c.RelayWebRTC.PublicPort == 0 || !watchTCP && c.RelayTCP.PublicPort != 0 || !watchUDP && c.RelayWebRTC.PublicPort != 0 {
+		return errors.New("public_port required only for watched transport")
+	}
 	if watchTCP || watchUDP {
 		if !dnsLabel(c.RelayServices.Namespace) || !strings.HasPrefix(c.RelayServices.TokenFile, "/") || !strings.HasPrefix(c.RelayServices.CAFile, "/") || watchTCP && !dnsLabel(c.RelayServices.TCPName) || watchUDP && !dnsLabel(c.RelayServices.UDPName) {
 			return errors.New("watched relay transport requires named Service and API Secret files")

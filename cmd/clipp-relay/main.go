@@ -129,9 +129,9 @@ func main() {
 		return addresses
 	}
 	publicationConfig := publication.Config{
-		TCP:    publication.Transport{Enabled: c.RelayTCP.Listen != "", Overrides: decode(c.RelayTCP.PublicAddresses), Service: publication.ServiceRef{Namespace: c.RelayServices.Namespace, Name: c.RelayServices.TCPName}},
+		TCP:    publication.Transport{Enabled: c.RelayTCP.Listen != "", PublicPort: int(c.RelayTCP.PublicPort), Overrides: decode(c.RelayTCP.PublicAddresses), Service: publication.ServiceRef{Namespace: c.RelayServices.Namespace, Name: c.RelayServices.TCPName}},
 		WSS:    publication.Transport{Enabled: c.RelayWebSocket.Listen != "", Overrides: decode(c.RelayWebSocket.PublicAddresses)},
-		WebRTC: publication.Transport{Enabled: c.RelayWebRTC.Listen != "", Overrides: decode(c.RelayWebRTC.PublicAddresses), Service: publication.ServiceRef{Namespace: c.RelayServices.Namespace, Name: c.RelayServices.UDPName}},
+		WebRTC: publication.Transport{Enabled: c.RelayWebRTC.Listen != "", PublicPort: int(c.RelayWebRTC.PublicPort), Overrides: decode(c.RelayWebRTC.PublicAddresses), Service: publication.ServiceRef{Namespace: c.RelayServices.Namespace, Name: c.RelayServices.UDPName}},
 	}
 	discovery, err := relay.NewDiscovery(dataPlane, portal, c.PortalOrigin[len("https://"):], nil)
 	if err != nil {

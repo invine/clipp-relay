@@ -61,7 +61,8 @@ requires at least one of `relay_tcp.listen`, `relay_websocket.listen`, or
 Every enabled transport needs a complete public address source for discovery
 and readiness. WSS addresses are configured. TCP and WebRTC Direct use either
 explicit `public_addresses` overrides or a named Kubernetes Service in
-`relay_services`; an override removes only that transport's Service dependency.
+`relay_services`; configured `public_port` supplies each watched transport's
+published port. An override removes only that transport's Service dependency.
 The serving ServiceAccount needs read-only `get`, `list`, and `watch` access
 limited to those named Services in its namespace. The process reads its
 projected token on every API request, watches changes, and resyncs at least
@@ -121,7 +122,8 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
 
 This example uses explicit TCP and UDP overrides, so the `relay_services`
 entries are inactive. Remove a transport's `public_addresses` to source that
-transport from its named Service. Kubernetes injects
+transport from its named Service and set its `public_port` to the expected
+Service port. Kubernetes injects
 `KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT_HTTPS`; the API client
 verifies the mounted CA and never publishes a partial enabled-transport set.
 

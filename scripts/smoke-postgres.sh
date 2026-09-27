@@ -112,7 +112,7 @@ printf 'test-secret\n' > "$work/google-secret"
 printf '{"revision":1,"emails":[]}\n' > "$work/allowlist.json"
 printf '{"current":1,"keys":[{"version":1,"material":"%s"}]}\n' "$(openssl rand -base64 32 | tr -d '\n')" > "$work/keyring.json"
 cat > "$work/migration.json" <<EOF
-{"version":1,"portal_origin":"https://portal.example.test","wss_hostname":"wss.example.test","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082"},"database":{"mode":"external","host":"localhost","port":$port,"name":"clipp_ticket02_smoke","username_file":"$work/migration-user","password_file":"$work/migration-pass","ca_file":"$work/ca.crt"},"secrets":{"google_client_id_file":"$work/google-id","google_client_secret_file":"$work/google-secret","admin_allowlist_file":"$work/allowlist.json","pepper_keyring_file":"$work/keyring.json"}}
+{"version":1,"portal_origin":"https://portal.example.test","wss_hostname":"wss.example.test","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082","public_addresses":["/ip4/127.0.0.1/tcp/18082"]},"database":{"mode":"external","host":"localhost","port":$port,"name":"clipp_ticket02_smoke","username_file":"$work/migration-user","password_file":"$work/migration-pass","ca_file":"$work/ca.crt"},"secrets":{"google_client_id_file":"$work/google-id","google_client_secret_file":"$work/google-secret","admin_allowlist_file":"$work/allowlist.json","pepper_keyring_file":"$work/keyring.json"}}
 EOF
 sed "s|migration-user|serving-user|;s|migration-pass|serving-pass|" "$work/migration.json" > "$work/serving.json"
 
@@ -129,13 +129,16 @@ for i in $(seq 1 30); do
 done
 test "$(cat "$work/livez")" = ok
 echo 'PostgreSQL 18 livez passed'
-test "$(curl -s -o "$work/readyz" -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 503
-test "$(cat "$work/readyz")" = unavailable
+for i in $(seq 1 30); do
+  if [[ "$(curl -s -o "$work/readyz" -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 200 ]]; then break; fi
+  sleep 1
+done
+test "$(cat "$work/readyz")" = ok
 test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/livez)" = 404
 echo 'PostgreSQL 18 health and public isolation passed'
 docker pause "$name" >/dev/null
 test "$(curl -s -o "$work/livez" -w '%{http_code}' http://127.0.0.1:18081/livez)" = 200
-test "$(curl -s -o "$work/readyz" -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 503
+test "$(curl -s -o "$work/readyz" -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 200
 echo 'PostgreSQL 18 outage health passed'
 kill "$pid"; wait "$pid" || true
 pid=
@@ -211,7 +214,11 @@ for i in $(seq 1 30); do
   sleep 1
 done
 test "$(cat "$work/livez17")" = ok
-test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 503
+for i in $(seq 1 30); do
+  if [[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 200 ]]; then break; fi
+  sleep 1
+done
+test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 200
 kill "$pid"; wait "$pid" || true
 pid=
 

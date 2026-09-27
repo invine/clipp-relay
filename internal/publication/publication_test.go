@@ -59,7 +59,7 @@ func TestServiceChangesAndOutagePublishCompleteSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	ready := false
-	c, err := New(d, api.Client(), api.URL, "token", Config{TCP: Transport{Enabled: true, Service: ServiceRef{Namespace: "clipp", Name: "relay-tcp"}}}, func(v bool) { ready = v })
+	c, err := New(d, api.Client(), api.URL, "token", Config{TCP: Transport{Enabled: true, PublicPort: 4001, Service: ServiceRef{Namespace: "clipp", Name: "relay-tcp"}}}, func(v bool) { ready = v })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestNamedServiceWatchRepublishesOnEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := New(d, api.Client(), api.URL, "token", Config{TCP: Transport{Enabled: true, Service: ServiceRef{Namespace: "clipp", Name: "relay-tcp"}}}, func(bool) {})
+	c, err := New(d, api.Client(), api.URL, "token", Config{TCP: Transport{Enabled: true, PublicPort: 4001, Service: ServiceRef{Namespace: "clipp", Name: "relay-tcp"}}}, func(bool) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestOverrideRemovesOnlyItsTransportDependencyAndMissingUDPWithdrawsAll(t *t
 		t.Fatal(err)
 	}
 	ready := false
-	c, err := New(d, api.Client(), api.URL, "token", Config{TCP: Transport{Enabled: true, Overrides: []ma.Multiaddr{ma.StringCast("/ip4/127.0.0.1/tcp/4001")}}, WebRTC: Transport{Enabled: true, Service: ServiceRef{Namespace: "clipp", Name: "relay-udp"}}}, func(v bool) { ready = v })
+	c, err := New(d, api.Client(), api.URL, "token", Config{TCP: Transport{Enabled: true, Overrides: []ma.Multiaddr{ma.StringCast("/ip4/127.0.0.1/tcp/4001")}}, WebRTC: Transport{Enabled: true, PublicPort: 4003, Service: ServiceRef{Namespace: "clipp", Name: "relay-udp"}}}, func(v bool) { ready = v })
 	if err != nil {
 		t.Fatal(err)
 	}
