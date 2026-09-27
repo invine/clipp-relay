@@ -1,6 +1,8 @@
 package service_test
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +19,32 @@ func TestPublicNeverExposesOperations(t *testing.T) {
 		if r.Code != http.StatusNotFound {
 			t.Fatalf("public %s: %d", path, r.Code)
 		}
+	}
+}
+
+func TestDeletionMetricsExposeOnlyBoundedAggregateSignals(t *testing.T) {
+	s := service.New()
+	s.SetDeletionMetrics(func(context.Context) (service.DeletionSample, error) {
+		return service.DeletionSample{Pending: 820, OldestSeconds: 3600, Warning: true, Critical: true, Completed: 4, Retried: 3}, nil
+	})
+	out := httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := out.Body.String()
+	for _, want := range []string{"clipp_relay_deletion_pending 820", "clipp_relay_deletion_oldest_seconds 3600.000", "clipp_relay_deletion_critical 1", `clipp_relay_deletion_outcomes_total{result="retry"} 3`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "account=") || strings.Contains(body, "journal=") {
+		t.Fatal("identifying metric label")
+	}
+	s.SetDeletionMetrics(func(context.Context) (service.DeletionSample, error) {
+		return service.DeletionSample{}, errors.New("private outage")
+	})
+	out = httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(out.Body.String(), "clipp_relay_deletion_observation_available 0") || strings.Contains(out.Body.String(), "clipp_relay_deletion_pending 0") {
+		t.Fatal("missing observation reported healthy zero")
 	}
 }
 

@@ -26,6 +26,19 @@ type Service struct {
 	publicRequests    chan struct{}
 	rendezvousCountV1 func() uint64
 	rendezvousCountV2 func() uint64
+	deletionMetrics   func(context.Context) (DeletionSample, error)
+}
+
+// DeletionSample contains only bounded aggregate state and outcome counters.
+type DeletionSample struct {
+	Pending            int
+	OldestSeconds      float64
+	Warning, Critical  bool
+	Completed, Retried uint64
+}
+
+func (s *Service) SetDeletionMetrics(sample func(context.Context) (DeletionSample, error)) {
+	s.deletionMetrics = sample
 }
 
 func New() *Service {
@@ -104,6 +117,21 @@ func (s *Service) PrivateHandler() http.Handler {
 		_, _ = w.Write([]byte("# HELP clipp_relay_ready Relay readiness.\n# TYPE clipp_relay_ready gauge\nclipp_relay_ready " + ready + "\n"))
 		if s.rendezvousCountV1 != nil && s.rendezvousCountV2 != nil {
 			_, _ = fmt.Fprintf(w, "# TYPE clipp_relay_rendezvous_requests_total counter\nclipp_relay_rendezvous_requests_total{version=\"1\"} %d\nclipp_relay_rendezvous_requests_total{version=\"2\"} %d\n", s.rendezvousCountV1(), s.rendezvousCountV2())
+		}
+		if s.deletionMetrics != nil {
+			sample, err := s.deletionMetrics(r.Context())
+			if err != nil {
+				_, _ = w.Write([]byte("clipp_relay_deletion_observation_available 0\n"))
+			} else {
+				warning, critical := 0, 0
+				if sample.Warning {
+					warning = 1
+				}
+				if sample.Critical {
+					critical = 1
+				}
+				_, _ = fmt.Fprintf(w, "clipp_relay_deletion_observation_available 1\nclipp_relay_deletion_pending %d\nclipp_relay_deletion_oldest_seconds %.3f\nclipp_relay_deletion_warning %d\nclipp_relay_deletion_critical %d\nclipp_relay_deletion_outcomes_total{result=\"completed\"} %d\nclipp_relay_deletion_outcomes_total{result=\"retry\"} %d\n", sample.Pending, sample.OldestSeconds, warning, critical, sample.Completed, sample.Retried)
+			}
 		}
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

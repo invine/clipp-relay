@@ -96,6 +96,31 @@ func main() {
 	logger.Info("service starting", "schema_revision", database.ExpectedRevision)
 	srv := service.New()
 	portal := auth.New(pool, c, material, auth.Google())
+	srv.SetDeletionMetrics(func(ctx context.Context) (service.DeletionSample, error) {
+		observed, err := portal.SampleDeletionSignals(ctx)
+		return service.DeletionSample{Pending: observed.Pending, OldestSeconds: observed.OldestAge.Seconds(), Warning: observed.Warning, Critical: observed.Critical, Completed: observed.Completed, Retried: observed.Retried}, err
+	})
+	if c.Journal.Region == "" {
+		logger.Error("journal configuration required before serving")
+		os.Exit(1)
+	}
+	{
+		journal, journalErr := auth.NewOCIJournal(auth.OCIJournalOptions{
+			Endpoint:  "https://objectstorage." + c.Journal.Region + ".oraclecloud.com",
+			Namespace: c.Journal.Namespace, Bucket: c.Journal.Bucket,
+			TenancyOCID: c.Journal.TenancyOCID, UserOCID: c.Journal.UserOCID, Fingerprint: c.Journal.Fingerprint,
+			PrivateKeyPEM: material.JournalSigningKey,
+		})
+		if journalErr != nil {
+			logger.Error("journal configuration rejected")
+			os.Exit(1)
+		}
+		portal.SetDeletionJournal(journal, c.Journal.RepositoryID, c.Journal.CoverageFloor, c.Journal.CoverageHash)
+		if journalErr = portal.ValidateDeletionJournal(startup); journalErr != nil {
+			logger.Error("journal qualification failed")
+			os.Exit(1)
+		}
+	}
 	credit := quota.New(pool)
 	defer credit.Close()
 	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname})

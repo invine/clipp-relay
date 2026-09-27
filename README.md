@@ -7,6 +7,10 @@ explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
 Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
+Owner deletion uses a separate OCI deletion journal: a committed conditional
+head and exact immutable event content must be proven before identity detaches.
+Current-week Quota Committed follows a fresh Pending registration by keyed
+digest; old account state, plan, credentials, and presentation do not.
 The Quota operation commits at most 64 KiB of account-week credit per block
 before making it locally usable. Callers must split larger reporter counts and
 consume any smaller remaining local balance before requesting another block.
@@ -95,6 +99,18 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
     "password_file": "/run/secrets/db/password",
     "ca_file": "/run/secrets/db/ca.crt"
   },
+  "journal": {
+    "region": "us-ashburn-1",
+    "namespace": "operator-namespace",
+    "bucket": "independent-deletion-journal",
+    "repository_id": "operator-attested-repository-id",
+    "coverage_floor": 0,
+    "coverage_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tenancy_ocid": "ocid1.tenancy.oc1..example",
+    "user_ocid": "ocid1.user.oc1..example",
+    "fingerprint": "aa:bb:cc:dd:example",
+    "private_key_file": "/run/secrets/journal/api-signing-key.pem"
+  },
   "secrets": {
     "google_client_id_file": "/run/secrets/google/client-id",
     "google_client_secret_file": "/run/secrets/google/client-secret",
@@ -103,6 +119,16 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
   }
 }
 ```
+
+Serving requires this journal configuration and an already existing head whose
+repository identity, coverage floor and coverage hash match the operator's
+attested values. It never initializes an empty repository. The signing key is
+read from the mounted Secret; requests use OCI native RSA-SHA256 signatures
+over verified HTTPS to the regional Object Storage endpoint. The serving
+identity needs immutable event create/read and conditional head replacement,
+with no event overwrite/delete or backup authority. The local smoke harness
+uses a process scoped TLS CONNECT fixture for startup checks; that is local
+protocol evidence, not OCI service or IAM qualification.
 
 The allowlist file contains `{"revision":1,"emails":[]}`. The keyring file
 contains `{"current":1,"keys":[{"version":1,"material":"<base64 of at least 32 bytes>"}]}`.

@@ -15,6 +15,7 @@ cleanup() {
     cat "$work/service.log" >&2
   fi
   if [[ -n "${pid:-}" ]]; then kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; fi
+  if [[ -n "${journal_proxy_pid:-}" ]]; then kill "$journal_proxy_pid" >/dev/null 2>&1 || true; wait "$journal_proxy_pid" >/dev/null 2>&1 || true; fi
   if ((${#created_ids[@]})); then docker rm -f "${created_ids[@]}" >/dev/null 2>&1 || true; fi
   rm -rf "$work"
 }
@@ -87,6 +88,19 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=Clipp test CA' -key
 openssl req -newkey rsa:2048 -nodes -subj '/CN=localhost' -keyout "$work/server.key" -out "$work/server.csr" >/dev/null 2>&1
 printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' > "$work/server.ext"
 openssl x509 -req -in "$work/server.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key" -CAcreateserial -days 1 -extfile "$work/server.ext" -out "$work/server.crt" >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes -subj '/CN=objectstorage.us-ashburn-1.oraclecloud.com' -keyout "$work/journal-tls.key" -out "$work/journal-tls.csr" >/dev/null 2>&1
+printf 'subjectAltName=DNS:objectstorage.us-ashburn-1.oraclecloud.com\nextendedKeyUsage=serverAuth\n' > "$work/journal-tls.ext"
+openssl x509 -req -in "$work/journal-tls.csr" -CA "$work/ca.crt" -CAkey "$work/ca.key" -CAcreateserial -days 1 -extfile "$work/journal-tls.ext" -out "$work/journal-tls.crt" >/dev/null 2>&1
+openssl genrsa -out "$work/journal-signing.key" 2048 >/dev/null 2>&1
+python3 scripts/journal-fixture-proxy.py "$work/journal-tls.crt" "$work/journal-tls.key" "$work/journal-proxy-port" > "$work/journal-proxy.log" 2>&1 &
+journal_proxy_pid=$!
+for i in $(seq 1 30); do
+  if [[ -s "$work/journal-proxy-port" ]]; then break; fi
+  sleep 1
+done
+test -s "$work/journal-proxy-port"
+journal_proxy_port=$(cat "$work/journal-proxy-port")
+zero_hash=$(printf '%064d' 0)
 
 admin_pass=$(openssl rand -hex 24)
 migration_pass=$(openssl rand -hex 24)
@@ -112,7 +126,7 @@ printf 'test-secret\n' > "$work/google-secret"
 printf '{"revision":1,"emails":[]}\n' > "$work/allowlist.json"
 printf '{"current":1,"keys":[{"version":1,"material":"%s"}]}\n' "$(openssl rand -base64 32 | tr -d '\n')" > "$work/keyring.json"
 cat > "$work/migration.json" <<EOF
-{"version":1,"portal_origin":"https://portal.example.test","wss_hostname":"wss.example.test","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082"},"database":{"mode":"external","host":"localhost","port":$port,"name":"clipp_ticket02_smoke","username_file":"$work/migration-user","password_file":"$work/migration-pass","ca_file":"$work/ca.crt"},"secrets":{"google_client_id_file":"$work/google-id","google_client_secret_file":"$work/google-secret","admin_allowlist_file":"$work/allowlist.json","pepper_keyring_file":"$work/keyring.json"}}
+{"version":1,"portal_origin":"https://portal.example.test","wss_hostname":"wss.example.test","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082"},"database":{"mode":"external","host":"localhost","port":$port,"name":"clipp_ticket02_smoke","username_file":"$work/migration-user","password_file":"$work/migration-pass","ca_file":"$work/ca.crt"},"journal":{"region":"us-ashburn-1","namespace":"fixture","bucket":"events","repository_id":"local-smoke-repository","coverage_floor":0,"coverage_hash":"$zero_hash","tenancy_ocid":"ocid1.tenancy.oc1..test","user_ocid":"ocid1.user.oc1..test","fingerprint":"aa:bb","private_key_file":"$work/journal-signing.key"},"secrets":{"google_client_id_file":"$work/google-id","google_client_secret_file":"$work/google-secret","admin_allowlist_file":"$work/allowlist.json","pepper_keyring_file":"$work/keyring.json"}}
 EOF
 sed "s|migration-user|serving-user|;s|migration-pass|serving-pass|" "$work/migration.json" > "$work/serving.json"
 
@@ -120,8 +134,24 @@ export GOCACHE="${GOCACHE:-/private/tmp/clipp-go-cache}"
 go build -o "$work/clipp-relay" ./cmd/clipp-relay
 migrate_when_ready "$work/migration.json"
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage TO clipp_serving' >/dev/null
-"$work/clipp-relay" -command serve -config "$work/serving.json" > "$work/service.log" 2>&1 &
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage TO clipp_serving' >/dev/null
+python3 - "$work/serving.json" "$work/missing-journal.json" "$work/wrong-journal.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as source: config=json.load(source)
+missing=dict(config); missing.pop('journal')
+wrong=dict(config); wrong['journal']=dict(config['journal']); wrong['journal']['repository_id']='wrong-repository'
+for path, value in ((sys.argv[2],missing),(sys.argv[3],wrong)):
+    with open(path,'w',encoding='utf-8') as output: json.dump(value,output)
+PY
+if env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/missing-journal.json" > "$work/missing-journal.log" 2>&1; then
+  echo 'serving accepted missing journal' >&2; exit 1
+fi
+grep -q 'journal configuration required' "$work/missing-journal.log"
+if env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/wrong-journal.json" > "$work/wrong-journal.log" 2>&1; then
+  echo 'serving accepted wrong journal' >&2; exit 1
+fi
+grep -q 'journal qualification failed' "$work/wrong-journal.log"
+env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/serving.json" > "$work/service.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:18081/livez > "$work/livez" 2>/dev/null; then break; fi
@@ -184,7 +214,7 @@ echo 'Inherited extension ownership rejection passed'
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'DROP EXTENSION clipp_ownership_probe; REVOKE clipp_extension_owner FROM clipp_serving; DROP ROLE clipp_extension_owner' >/dev/null
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
 echo 'PostgreSQL 18 integration tests passed'
-docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage TO clipp_serving' >/dev/null
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/auth
 echo 'PostgreSQL 18 OIDC browser integration tests passed'
 CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/quota
@@ -203,8 +233,8 @@ sed "s/\"port\":$port/\"port\":$supported_port/" "$work/migration.json" > "$work
 sed "s/\"port\":$port/\"port\":$supported_port/" "$work/serving.json" > "$work/serving17.json"
 migrate_when_ready "$work/migration17.json"
 docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage TO clipp_serving' >/dev/null
-"$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/service17.log" 2>&1 &
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage TO clipp_serving' >/dev/null
+env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/service17.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:18081/livez > "$work/livez17" 2>/dev/null; then break; fi

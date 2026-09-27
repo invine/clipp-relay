@@ -442,7 +442,7 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 			return funding{}, errExpiredReceipt
 		}
 		var oldOp string
-		err = tx.QueryRow(ctx, `SELECT latest_operation_id FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, pendingWeek).Scan(&oldOp)
+		err = tx.QueryRow(ctx, `SELECT COALESCE(latest_operation_id::text,'') FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, pendingWeek).Scan(&oldOp)
 		if err != nil && err != pgx.ErrNoRows {
 			return funding{week: pendingWeek}, ErrTemporary
 		}
@@ -478,7 +478,7 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 		// The previous operation settles under the account lock before a new
 		// week can allocate. Its receipt is never installed in the new week.
 		var oldOp string
-		err = tx.QueryRow(ctx, `SELECT latest_operation_id FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, pendingWeek).Scan(&oldOp)
+		err = tx.QueryRow(ctx, `SELECT COALESCE(latest_operation_id::text,'') FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, pendingWeek).Scan(&oldOp)
 		if err != nil && err != pgx.ErrNoRows {
 			return funding{week: pendingWeek}, ErrTemporary
 		}
@@ -486,7 +486,8 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 	}
 	var committed, seq, granted int64
 	var latest string
-	err = tx.QueryRow(ctx, `SELECT committed_bytes,sequence,latest_operation_id,latest_granted_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, week).Scan(&committed, &seq, &latest, &granted)
+	err = tx.QueryRow(ctx, `SELECT committed_bytes,sequence,COALESCE(latest_operation_id::text,''),latest_granted_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, week).Scan(&committed, &seq, &latest, &granted)
+	rowAbsent := err == pgx.ErrNoRows
 	if err != nil && err != pgx.ErrNoRows {
 		return funding{week: week}, ErrTemporary
 	}
@@ -516,7 +517,7 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 		if remaining < granted {
 			granted = remaining
 		}
-		if seq == 0 {
+		if rowAbsent {
 			_, err = tx.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,$2,$3,1,$4,$3)`, id, week, granted, op)
 		} else {
 			_, err = tx.Exec(ctx, `UPDATE public.weekly_quota_usage SET committed_bytes=committed_bytes+$3,sequence=sequence+1,latest_operation_id=$4,latest_granted_bytes=$3 WHERE account_id=$1 AND week_start=$2`, id, week, granted, op)

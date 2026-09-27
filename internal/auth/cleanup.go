@@ -44,6 +44,9 @@ func (s *Server) cleanupPass(ctx context.Context) (bool, error) {
 // Maintain removes expired authentication state in bounded, cancellable passes.
 // Every read enforces expiry even if physical cleanup is delayed by an outage.
 func (s *Server) Maintain(ctx context.Context) {
+	if s.deletionJournal != nil {
+		go s.MaintainDeletions(ctx)
+	}
 	for {
 		if ctx.Err() != nil {
 			return

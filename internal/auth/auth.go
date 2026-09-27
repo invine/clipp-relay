@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"clipp-relay/internal/config"
@@ -79,8 +80,16 @@ type Server struct {
 	beforeProfileRead                  func()
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
+	commitDeletion                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
+	deletionJournal                    DeletionJournal
+	deletionRepository                 string
+	deletionFloor                      int64
+	deletionFloorHash                  string
+	deletionWorker                     sync.Mutex
+	deletionCompleted                  atomic.Uint64
+	deletionRetried                    atomic.Uint64
 }
 
 // WithAccountGuards orders all local account operations before their SQL row
@@ -186,6 +195,13 @@ type flow struct {
 type identityFence struct {
 	seq   uint64
 	until time.Time
+}
+
+// An ambiguous security commit may be released for a new Google login only
+// when the expected committed revision and generation are seen in PostgreSQL.
+type uncertainMutation struct {
+	revision, generation int64
+	status               string
 }
 
 func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provider) *Server {
@@ -323,6 +339,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /oauth/token", s.token)
 	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.HandleFunc("POST /auth/revoke", s.revokeOwner)
+	mux.HandleFunc("POST /auth/delete", s.deleteOwner)
+	mux.HandleFunc("GET /auth/deletion/{id}", s.deletionStatus)
 	mux.HandleFunc("GET /admin", s.adminHome)
 	mux.HandleFunc("POST /admin/accounts/{id}", s.adminAccount)
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
@@ -479,12 +497,39 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx)
 	var accountID string
 	var generation int64
-	e = tx.QueryRow(ctx, `INSERT INTO public.accounts (id,issuer,subject,email,email_verified,hosted_domain,validated_at,created_at,last_portal_login_at) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),clock_timestamp()) ON CONFLICT (issuer,subject) DO UPDATE SET email=EXCLUDED.email,email_verified=EXCLUDED.email_verified,hosted_domain=EXCLUDED.hosted_domain,validated_at=clock_timestamp(),last_portal_login_at=clock_timestamp() RETURNING id,credential_generation`, account, googleIssuer, claims.Subject, claims.Email, claims.EmailVerified, claims.HostedDomain).Scan(&accountID, &generation)
+	e = tx.QueryRow(ctx, `INSERT INTO public.accounts (id,issuer,subject,email,email_verified,hosted_domain,validated_at,created_at,last_portal_login_at) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),clock_timestamp()) ON CONFLICT (issuer,subject) DO UPDATE SET email=EXCLUDED.email,email_verified=EXCLUDED.email_verified,hosted_domain=EXCLUDED.hosted_domain,validated_at=clock_timestamp(),last_portal_login_at=clock_timestamp() WHERE accounts.deletion_started_at IS NULL RETURNING id,credential_generation`, account, googleIssuer, claims.Subject, claims.Email, claims.EmailVerified, claims.HostedDomain).Scan(&accountID, &generation)
 	if e != nil {
 		fail(w, 503)
 		return
 	}
+	if pending, uncertain := s.uncertainAccounts.Load(accountID); uncertain {
+		switch expected := pending.(type) {
+		case uncertainMutation:
+			var actualRevision, actualGeneration int64
+			var actualStatus string
+			if tx.QueryRow(ctx, `SELECT revision,credential_generation,status FROM public.accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&actualRevision, &actualGeneration, &actualStatus) != nil || actualRevision != expected.revision || actualGeneration != expected.generation || actualStatus != expected.status {
+				fail(w, 503)
+				return
+			}
+		case uncertainDeletion:
+			var started *time.Time
+			var operationCount int
+			if tx.QueryRow(ctx, `SELECT deletion_started_at FROM public.accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&started) != nil || started != nil || tx.QueryRow(ctx, `SELECT count(*) FROM public.deletion_operations WHERE id=$1 AND account_id=$2`, expected.operationID, accountID).Scan(&operationCount) != nil || operationCount != 0 {
+				fail(w, 503)
+				return
+			}
+		default:
+			fail(w, 503)
+			return
+		}
+		// The account row lock resolves any in-flight admission or mutation.
+		s.uncertainAccounts.Delete(accountID)
+	}
 	if accountID == account {
+		if e = s.importRetainedUsage(ctx, tx, accountID, claims.Subject); e != nil {
+			fail(w, 503)
+			return
+		}
 		_, e = tx.Exec(ctx, `INSERT INTO public.audit_events (id,occurred_at,event,account_id) VALUES ($1,clock_timestamp(),'account_created',$2)`, auditID, accountID)
 		if e != nil {
 			fail(w, 503)
@@ -703,6 +748,9 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 		var storedCSRF []byte
 		e = s.Pool.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation`, digest, version).Scan(&id, &status, &email, &subject, &generation, &storedVersion, &storedCSRF)
 		if e == nil {
+			if _, uncertain := s.uncertainAccounts.Load(id); uncertain {
+				return "", 0, "", "", "", errInvalidSession
+			}
 			if !s.allowAccount(subject) {
 				return "", 0, "", "", "", errRateLimit
 			}
@@ -732,7 +780,7 @@ type quotaHistory struct {
 	Committed int64  `json:"committed"`
 }
 
-var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}.doughnut{width:130px;height:130px;border-radius:50%;background:conic-gradient(#183f75 var(--used),#dbeafe 0);display:grid;place-items:center}.doughnut::before{content:'';width:82px;height:82px;background:white;grid-area:1/1}.doughnut span{z-index:1;grid-area:1/1;font-weight:700}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px;border-bottom:1px solid #e2e8f0}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><h3>Account capacity</h3><table><tr><th>Resource</th><th>Live count and limit</th></tr><tr><td>Relay Sessions</td><td>{{if .LiveSessionsKnown}}{{.LiveSessions}} of {{.Sessions}}{{else}}Unavailable · limit {{.Sessions}}{{end}}</td></tr><tr><td>Login Grants</td><td>{{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}</td></tr></table><small>Live counts are sampled separately from quota history.</small><div class="doughnut" style="--used:{{.Percent}}%" role="img" aria-label="Quota committed {{.Committed}} of {{.WeeklyBytes}} bytes"><span>{{.Percent}}%</span></div><p>Quota committed: {{.Committed}} bytes</p><p>{{.UsageState}}</p><small>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</small><h3>Weekly history</h3><table><tr><th>Week starting UTC</th><th>Quota committed</th></tr>{{range .History}}<tr><td>{{.Week}}</td><td>{{.Committed}} bytes</td></tr>{{end}}</table></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form><form method="post" action="/auth/revoke"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out everywhere</button></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
+var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}.doughnut{width:130px;height:130px;border-radius:50%;background:conic-gradient(#183f75 var(--used),#dbeafe 0);display:grid;place-items:center}.doughnut::before{content:'';width:82px;height:82px;background:white;grid-area:1/1}.doughnut span{z-index:1;grid-area:1/1;font-weight:700}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px;border-bottom:1px solid #e2e8f0}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><h3>Account capacity</h3><table><tr><th>Resource</th><th>Live count and limit</th></tr><tr><td>Relay Sessions</td><td>{{if .LiveSessionsKnown}}{{.LiveSessions}} of {{.Sessions}}{{else}}Unavailable · limit {{.Sessions}}{{end}}</td></tr><tr><td>Login Grants</td><td>{{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}</td></tr></table><small>Live counts are sampled separately from quota history.</small><div class="doughnut" style="--used:{{.Percent}}%" role="img" aria-label="Quota committed {{.Committed}} of {{.WeeklyBytes}} bytes"><span>{{.Percent}}%</span></div><p>Quota committed: {{.Committed}} bytes</p><p>{{.UsageState}}</p><small>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</small><h3>Weekly history</h3><table><tr><th>Week starting UTC</th><th>Quota committed</th></tr>{{range .History}}<tr><td>{{.Week}}</td><td>{{.Committed}} bytes</td></tr>{{end}}</table></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form><form method="post" action="/auth/revoke"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out everywhere</button></form><form method="post" action="/auth/delete"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Delete relay account</button><small>Deletion is permanent. Sign in with Google again if your last authentication was more than ten minutes ago.</small></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -916,8 +964,9 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer tx.Rollback(ctx)
-			var locked string
-			e = tx.QueryRow(ctx, `SELECT id FROM public.accounts WHERE id=$1 FOR UPDATE`, id).Scan(&locked)
+			var locked, status string
+			var accountRevision, oldGeneration int64
+			e = tx.QueryRow(ctx, `SELECT id,status,revision,credential_generation FROM public.accounts WHERE id=$1 FOR UPDATE`, id).Scan(&locked, &status, &accountRevision, &oldGeneration)
 			if e != nil {
 				fail(w, 503)
 				return
@@ -947,7 +996,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			}
 			s.installIdentityFence(subject)
 			if e != nil {
-				s.uncertainAccounts.Store(id, struct{}{})
+				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
 			}
 			if s.accountChanged != nil {
 				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
