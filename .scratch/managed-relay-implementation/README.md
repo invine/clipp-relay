@@ -28,7 +28,7 @@ rather than silently changing policy or reviving an obsolete design.
 - [Revoke access and change live quotas](issues/09-revoke-access-and-change-live-quotas.md) is resolved after reviewed integration, race and disposable PostgreSQL verification.
 - [Relay over WSS and WebRTC Direct](issues/10-relay-over-wss-and-webrtc-direct.md) is resolved after reviewed integration and forced-transport/race verification.
 - [Delete and re-register safely](issues/16-delete-and-re-register-safely.md) has reviewed local implementation integrated and verified; it remains claimed pending an approved OCI journal for provider/IAM qualification.
-- [Rediscover and drain an ephemeral relay](issues/11-rediscover-and-drain-an-ephemeral-relay.md) is claimed in an isolated Go worktree.
+- [Rediscover and drain an ephemeral relay](issues/11-rediscover-and-drain-an-ephemeral-relay.md) is resolved after reviewed integration, real-client restart, race and disposable PostgreSQL verification.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
 

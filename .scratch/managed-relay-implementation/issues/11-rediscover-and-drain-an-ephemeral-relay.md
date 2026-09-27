@@ -4,7 +4,7 @@
 
 **Blocked by:** [08: Register and find peers](08-register-and-find-peers.md); [10: Relay over WSS and WebRTC Direct](10-relay-over-wss-and-webrtc-direct.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I8, I11.
@@ -34,12 +34,12 @@ Startup readyz5s/2s/120fails; ready5s/2s/1fail+1success; live10s/2s/3fails.
 
 ## Acceptance criteria
 
-- [ ] Service-status changes republish complete deterministic snapshots; missing enabled address never produces a partial successful response.
-- [ ] API outage uses bounded last-good state then withdraws ready/discovery at5m; unchanged successful resync refreshes validity, overrides remove only their transport watch dependency.
-- [ ] DB failure/session saturation changes admission, not readiness/liveness; startup publication failure and subsequent recoverable loss have different probe consequences.
-- [ ] Signal tests prove immediate rejection of each new protected operation, retained permitted drain work, zero-count completion, deadline and second-signal force.
-- [ ] Restart creates different Peer ID/certhash and empty live state; stale document/client mismatch triggers fresh discovery without credential/device reset.
-- [ ] No per-circuit ownership registry, DB tombstone/epoch or public drain/debug API is introduced; probe/private-metric budgets stay bounded.
+- [x] Service-status changes republish complete deterministic snapshots; missing enabled address never produces a partial successful response.
+- [x] API outage uses bounded last-good state then withdraws ready/discovery at5m; unchanged successful resync refreshes validity, overrides remove only their transport watch dependency.
+- [x] DB failure/session saturation changes admission, not readiness/liveness; startup publication failure and subsequent recoverable loss have different probe consequences.
+- [x] Signal tests prove immediate rejection of each new protected operation, retained permitted drain work, zero-count completion, deadline and second-signal force.
+- [x] Restart creates different Peer ID/certhash and empty live state; stale document/client mismatch triggers fresh discovery without credential/device reset.
+- [x] No per-circuit ownership registry, DB tombstone/epoch or public drain/debug API is introduced; probe/private-metric budgets stay bounded.
 
 ## Demonstration
 
@@ -67,3 +67,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 08 resolution (`d6e8916`) and ticket 10 resolution (`074b842`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved centrally on 2026-09-27 after TDD implementation (`4f870c2`, `afc9710`, `5d74a7f`), independent specification and standards reviews with clean final recheck, and combined integration merge (`1764e8d`). Go 1.27.1 on darwin/arm64: merged `go test -count=1 ./...`, `go test -race -count=1 ./internal/publication ./internal/relay ./internal/service ./cmd/clipp-relay`, `go vet ./...`, `go build ./...`, `bash -n scripts/smoke-postgres.sh`, formatting and diff checks passed. Fake named-Service tests cover change/outage/staleness and complete snapshots; an integrated real libp2p client test covers auth/reservation, drain, same-port restart, stale Peer ID rejection, new Peer ID/certhash, and rediscovery with the same client identity and credential. Disposable Docker 29.8.0 smoke passed verified-TLS PostgreSQL 18.6 and 17.11 with mandatory local TLS journal fixture, readiness through DB outage, and required PostgreSQL 16.15 rejection. Real OCI Kubernetes Service policy and deployment probes remain qualification work in later tickets; no external target, push, publication, deployment, or load was used.
