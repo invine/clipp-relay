@@ -4,7 +4,7 @@
 
 **Blocked by:** [03: Register and sign in](03-register-and-sign-in.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I2, I6, I11.
@@ -35,12 +35,12 @@ selected editor in common light shell, not final visual polish. Stable paginatio
 
 ## Acceptance criteria
 
-- [ ] Authoritative allowlisted admin can approve itself and another Pending account with a plan; ordinary/third-party non-authoritative email is denied.
-- [ ] Removing/malforming allowlist affects the next request after observation without restarting relay; revision is observable and no old permission retained.
-- [ ] Approval without plan, stale revision, stale Google auth, invalid Origin/CSRF and invalid allowance are refused without mutation.
-- [ ] Create/assign/archive and replacement-plan behavior are demonstrated through portal with real DB and immutable assigned values.
-- [ ] Mutation and audit rollback together on injected audit failure; audit fields contain only permitted actor/target/reason data.
-- [ ] Account/plan lists obey stable bounded pagination, owners see no admin identities/reasons, and default allowance is exactly 1,073,741,824 bytes/5 sessions.
+- [x] Authoritative allowlisted admin can approve itself and another Pending account with a plan; ordinary/third-party non-authoritative email is denied.
+- [x] Removing/malforming allowlist affects the next request after observation without restarting relay; revision is observable and no old permission retained.
+- [x] Approval without plan, stale revision, stale Google auth, invalid Origin/CSRF and invalid allowance are refused without mutation.
+- [x] Create/assign/archive and replacement-plan behavior are demonstrated through portal with real DB and immutable assigned values.
+- [x] Mutation and audit rollback together on injected audit failure; audit fields contain only permitted actor/target/reason data.
+- [x] Account/plan lists obey stable bounded pagination, owners see no admin identities/reasons, and default allowance is exactly 1,073,741,824 bytes/5 sessions.
 
 ## Demonstration
 
@@ -68,3 +68,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 03 resolution (`b0a3bb6`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved on 2026-09-27 after local implementation commits `3aa24b3`, `528d0d8`, and `1015114`, independent Spec and Standards review passes, merge `19e1c99`, and service README correction `c138bc6`. On the merged result, Go 1.27.1 darwin/arm64: `go test -count=1 ./...`, `go vet ./...`, `go build ./cmd/clipp-relay`, and `git diff --check` passed. Disposable `bash scripts/smoke-postgres.sh` passed with verified-TLS/SCRAM PostgreSQL 18.6 and 17.11, rejected 16.15, ran real PostgreSQL browser/admin tests on 18, and checked migration revision 4, ownership guards, health, and outage behavior. Tests cover live allowlist policy, self/other approval, exact baseline plan, immutable/replacement/archived plans, bounded lists, stale revisions and Google auth after lock wait, CSRF/Origin, atomic audit rollback, one-statement owner policy read, and one-plan/one-audit recovery from ambiguous or canceled commit acknowledgment. No production target was used.
