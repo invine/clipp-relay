@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 4
+const ExpectedRevision = 5
 
 type migration struct {
 	revision int
@@ -109,7 +109,18 @@ ALTER TABLE public.audit_events ADD COLUMN client_type text CHECK (client_type I
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event='account_created' OR (reason IS NOT NULL AND actor_email IS NOT NULL));
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
 INSERT INTO public.quota_plans (id,name,weekly_bytes,sessions) VALUES ('6dd09395-51a0-451c-96b3-716e6038e870','Baseline',1073741824,5);
-REVOKE ALL ON public.quota_plans FROM PUBLIC`}}
+REVOKE ALL ON public.quota_plans FROM PUBLIC`}, {5, `CREATE TABLE public.weekly_quota_usage (
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ week_start date NOT NULL CHECK (EXTRACT(ISODOW FROM week_start)=1),
+ committed_bytes bigint NOT NULL CHECK (committed_bytes >= 0),
+ sequence bigint NOT NULL CHECK (sequence >= 1),
+ latest_operation_id uuid NOT NULL,
+ latest_granted_bytes bigint NOT NULL CHECK (latest_granted_bytes BETWEEN 1 AND 65536),
+ PRIMARY KEY (account_id,week_start),
+ CHECK (committed_bytes >= latest_granted_bytes)
+);
+CREATE INDEX weekly_quota_history ON public.weekly_quota_usage (account_id,week_start DESC);
+REVOKE ALL ON public.weekly_quota_usage FROM PUBLIC`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
