@@ -102,25 +102,25 @@ spec:
             items: [{key: config.json, path: config.json}]
         - name: db
           secret:
-            secretName: {{ $v.database.servingSecret }}
+            secretName: {{ $v.database.servingSecret | quote }}
             items: [{key: username, path: username}, {key: password, path: password}]
         - name: db-ca
           secret:
-            secretName: {{ $v.database.caSecret }}
-            items: [{key: {{ $v.database.caKey }}, path: ca.crt}]
+            secretName: {{ $v.database.caSecret | quote }}
+            items: [{key: {{ $v.database.caKey | quote }}, path: ca.crt}]
         - name: google
           secret:
-            secretName: {{ $v.credentials.googleSecret }}
+            secretName: {{ $v.credentials.googleSecret | quote }}
             items: [{key: client-id, path: client-id}, {key: client-secret, path: client-secret}]
         - name: admin
           secret:
-            secretName: {{ $v.credentials.adminSecret }}
+            secretName: {{ $v.credentials.adminSecret | quote }}
             items: [{key: allowlist.json, path: allowlist.json}]
         - name: peppers
           secret:
-            secretName: {{ $v.credentials.pepperSecret }}
+            secretName: {{ $v.credentials.pepperSecret | quote }}
             items: [{key: keyring.json, path: keyring.json}]
         - name: journal
           secret:
-            secretName: {{ $v.credentials.journalSecret }}
+            secretName: {{ $v.credentials.journalSecret | quote }}
             items: [{key: api-signing-key.pem, path: api-signing-key.pem}]

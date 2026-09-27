@@ -21,6 +21,7 @@ portal = find.call(serving, 'Ingress', '-portal') or abort 'portal Ingress missi
 wss = find.call(serving, 'Ingress', '-wss') or abort 'WSS Ingress missing'
 abort 'host separation' unless portal.dig('spec', 'rules', 0, 'host') == 'portal.example.test' && wss.dig('spec', 'rules', 0, 'host') == 'wss.example.test'
 abort 'WSS backend mismatch' unless wss.dig('spec', 'rules', 0, 'http', 'paths', 0, 'backend', 'service', 'name').end_with?('-wss')
+abort 'WSS proxy idle budget below reservation lifetime' unless wss.dig('metadata', 'annotations', 'nginx.org/proxy-read-timeout') == '3600s' && wss.dig('metadata', 'annotations', 'nginx.org/proxy-send-timeout') == '3600s'
 %w[tcp udp].each do |kind|
   service = find.call(serving, 'Service', "-#{kind}") or abort "#{kind} NLB missing"
   abort 'NodePorts or instant failover' unless service.dig('spec', 'allocateLoadBalancerNodePorts') == false && service.dig('metadata', 'annotations', 'oci-network-load-balancer.oraclecloud.com/is-instant-failover-enabled') == 'false'

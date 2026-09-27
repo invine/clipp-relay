@@ -5,10 +5,10 @@ kind: Ingress
 metadata:
   name: {{ $name }}-portal
 spec:
-  ingressClassName: {{ $v.public.ingressClass }}
+  ingressClassName: {{ $v.public.ingressClass | quote }}
   tls:
     - hosts: [{{ trimPrefix "https://" $v.public.portalOrigin | quote }}]
-      secretName: {{ $v.public.portalTLSSecret }}
+      secretName: {{ $v.public.portalTLSSecret | quote }}
   rules:
     - host: {{ trimPrefix "https://" $v.public.portalOrigin | quote }}
       http:
@@ -27,13 +27,13 @@ metadata:
   name: {{ $name }}-wss
   annotations:
     nginx.org/websocket-services: {{ $name }}-wss
-    nginx.org/proxy-read-timeout: "180s"
-    nginx.org/proxy-send-timeout: "180s"
+    nginx.org/proxy-read-timeout: "3600s"
+    nginx.org/proxy-send-timeout: "3600s"
 spec:
-  ingressClassName: {{ $v.public.ingressClass }}
+  ingressClassName: {{ $v.public.ingressClass | quote }}
   tls:
     - hosts: [{{ $v.public.wssHostname | quote }}]
-      secretName: {{ $v.public.wssTLSSecret }}
+      secretName: {{ $v.public.wssTLSSecret | quote }}
   rules:
     - host: {{ $v.public.wssHostname | quote }}
       http:

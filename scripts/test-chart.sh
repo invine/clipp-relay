@@ -33,7 +33,14 @@ for override in \
   'database.external.host=' \
   'deployment.phase=migrating' \
   'image.digest=latest' \
-  'unrecognized.key=value'; do
+  'unrecognized.key=value' \
+  'public.portalOrigin=https://portal.example.test?bad' \
+  'public.wssHostname=wss..example.test' \
+  'public.ingressClass=bad/name' \
+  'database.servingSecret=bad/name' \
+  'database.migrationSecret=bad/name' \
+  'database.caSecret=bad/name' \
+  'database.caKey=bad/key'; do
   if helm template isolated "$chart" -n clipp-isolated -f "$example" --set "$override" > "$work/invalid.yaml" 2>&1; then
     echo "invalid chart setting accepted: $override" >&2
     exit 1
@@ -42,8 +49,24 @@ done
 
 helm template isolated "$chart" -n clipp-isolated -f "$example" \
   --set 'transports.tcp.addresses[0]=/dns4/tcp.example.test/tcp/4001' \
-  --set 'transports.udp.addresses[0]=/dns4/udp.example.test/udp/4003' > "$work/overrides.yaml"
+  --set 'transports.udp.addresses[0]=/dns4/udp.example.test/udp/4003' \
+  --set-json 'networkPolicy.apiCidrs=[]' > "$work/overrides.yaml"
+helm template isolated "$chart" -n clipp-isolated -f "$example" \
+  --set transports.tcp.enabled=false --set transports.udp.enabled=false \
+  --set oci.subnetOcid= --set oci.frontendNsgOcid= --set oci.backendNsgOcid= \
+  --set-json 'networkPolicy.apiCidrs=[]' > "$work/wss-only.yaml"
+! grep -q 'type: LoadBalancer' "$work/wss-only.yaml"
+! grep -q 'kind: Role$' "$work/wss-only.yaml"
 ! grep -q 'kind: Role$' "$work/overrides.yaml"
 grep -q 'automountServiceAccountToken: false' "$work/overrides.yaml"
 
+injected=$'nginx\n  defaultBackend:\n    service:\n      name: attacker'
+if helm template isolated "$chart" -n clipp-isolated -f "$example" --set-string "public.ingressClass=$injected" > "$work/injected.yaml" 2>&1; then
+  echo 'newline Ingress injection accepted' >&2
+  exit 1
+fi
+
+bash scripts/preflight-external.sh "$example" isolated-other clipp-other > "$work/preflight.log"
+grep -q 'isolated-other' "$work/preflight.log"
+grep -q 'clipp-other' "$work/preflight.log"
 echo 'chart render and rejection checks passed'

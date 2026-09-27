@@ -22,5 +22,16 @@
 {{- range $v.transports.wss.addresses }}{{ if not (hasPrefix (printf "/dns4/%s/" $v.public.wssHostname) .) }}{{ fail "WSS public address must use exact configured host" }}{{ end }}{{ end -}}
 {{- if or (eq $v.credentials.googleSecret "") (eq $v.credentials.adminSecret "") (eq $v.credentials.pepperSecret "") (eq $v.credentials.journalSecret "") }}{{ fail "versioned serving Secret references required" }}{{ end -}}
 {{- if or (eq $v.journal.region "") (eq $v.journal.namespace "") (eq $v.journal.bucket "") (eq $v.journal.repositoryId "") (eq $v.journal.coverageHash "") (eq $v.journal.tenancyOcid "") (eq $v.journal.userOcid "") (eq $v.journal.fingerprint "") }}{{ fail "attested journal configuration required" }}{{ end -}}
-{{- if or (eq $v.oci.subnetOcid "") (eq $v.oci.frontendNsgOcid "") (eq $v.oci.backendNsgOcid "") }}{{ fail "existing OCI subnet and frontend/backend NSG inputs required" }}{{ end -}}
-{{- if or (eq (len $v.networkPolicy.publicCidrs) 0) (eq (len $v.networkPolicy.operationsCidrs) 0) (eq (len $v.networkPolicy.databaseCidrs) 0) (eq (len $v.networkPolicy.apiCidrs) 0) (eq (len $v.networkPolicy.httpsCidrs) 0) (eq (len $v.networkPolicy.ingressNamespaceSelector) 0) (eq (len $v.networkPolicy.ingressPodSelector) 0) (eq (len $v.networkPolicy.dnsNamespaceSelector) 0) (eq (len $v.networkPolicy.dnsPodSelector) 0) }}{{ fail "enforcing NetworkPolicy source and destination inputs required" }}{{ end -}}
+{{- if and (or $v.transports.tcp.enabled $v.transports.udp.enabled) (or (eq $v.oci.subnetOcid "") (eq $v.oci.frontendNsgOcid "") (eq $v.oci.backendNsgOcid "")) }}{{ fail "existing OCI subnet and frontend/backend NSG inputs required" }}{{ end -}}
+{{- $watch := or (eq (include "clipp.watchTCP" .) "true") (eq (include "clipp.watchUDP" .) "true") -}}
+{{- if or
+  (and (or $v.transports.tcp.enabled $v.transports.udp.enabled) (eq (len $v.networkPolicy.publicCidrs) 0))
+  (eq (len $v.networkPolicy.operationsCidrs) 0)
+  (eq (len $v.networkPolicy.databaseCidrs) 0)
+  (and $watch (eq (len $v.networkPolicy.apiCidrs) 0))
+  (eq (len $v.networkPolicy.httpsCidrs) 0)
+  (eq (len $v.networkPolicy.ingressNamespaceSelector) 0)
+  (eq (len $v.networkPolicy.ingressPodSelector) 0)
+  (eq (len $v.networkPolicy.dnsNamespaceSelector) 0)
+  (eq (len $v.networkPolicy.dnsPodSelector) 0)
+}}{{ fail "enforcing NetworkPolicy source and destination inputs required" }}{{ end -}}
