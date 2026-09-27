@@ -4,7 +4,7 @@
 
 **Blocked by:** [01: Isolate Clipp relay lifecycle](01-isolate-clipp-relay-lifecycle.md); [08: Register and find peers](08-register-and-find-peers.md).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: Clipp.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I4, I7, I11.
@@ -53,3 +53,5 @@ provisioning, publication or load generation against an unapproved target.
 ## Comments
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
+
+- Claimed centrally on 2026-09-27 after ticket 01 resolved (`6cf8c3b`) and ticket 08 remained resolved. The approved Clipp integration baseline is `64c87b6`; implementation will use a fresh agent and isolated worktree. Review, integration checks and acceptance evidence are required before resolution.
