@@ -81,7 +81,8 @@ REVOKE ALL ON public.accounts, public.authorization_transactions, public.portal_
  revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  archived_at timestamptz,
- first_assigned_at timestamptz
+ first_assigned_at timestamptz,
+ create_request_digest bytea CHECK (create_request_digest IS NULL OR octet_length(create_request_digest)=32)
 );
 ALTER TABLE public.accounts ADD COLUMN plan_id uuid REFERENCES public.quota_plans(id);
 ALTER TABLE public.accounts ADD COLUMN revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0);

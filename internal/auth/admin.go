@@ -1,7 +1,11 @@
 package auth
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"html/template"
 	"net/http"
@@ -171,9 +175,10 @@ type adminPageData struct {
 	Limit                              int
 	Selected                           string
 	SelectedAccount                    *adminAccountRow
+	OperationID, OperationProof        string
 }
 
-var adminPage = template.Must(template.New("admin").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay administration</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:1200px;margin:3vh auto;padding:28px;background:white;border:1px solid #e2e8f0;border-radius:18px}section{margin:20px 0;padding:18px;border:1px solid #e2e8f0;border-radius:12px}table{border-collapse:collapse;width:100%}th,td{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}input,select,button{font:inherit;padding:6px;margin:3px}button{background:#183f75;color:white;border:0;border-radius:8px}.muted{color:#64748b}</style><main class="shell"><a href="/">Your account</a><h1>Relay administration</h1><p class="muted">Applied allowlist revision {{.PolicyRevision}}</p><section><h2>Service totals</h2><p>Pending {{.Pending}} · Active {{.Active}} · Suspended {{.Suspended}} · Denied {{.Denied}}</p></section><section><h2>Accounts</h2><table><tr><th>Email</th><th>Status</th><th>Revision</th><th>Plan</th><th></th></tr>{{range .Accounts}}<tr><td>{{.Email}}</td><td>{{.Status}}</td><td>{{.Revision}}</td><td>{{.PlanID}}</td><td><a href="/admin?selected={{.ID}}&accounts_after={{$.AccountCursor}}&plans_after={{$.PlanCursor}}&limit={{$.Limit}}">Select</a></td></tr>{{end}}</table>{{if .NextAccount}}<a href="/admin?accounts_after={{.NextAccount}}&plans_after={{.PlanCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next accounts</a>{{end}}</section><section><h2>Selected account</h2>{{with .SelectedAccount}}<p>{{.Email}} · {{.Status}} · revision {{.Revision}}</p><form method="post" action="/admin/accounts/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><label>Action <select name="action"><option value="approve">Approve</option><option value="deny">Deny</option><option value="assign">Assign replacement plan</option></select></label><label>Plan <select name="plan_id">{{range $.Plans}}{{if not .Archived}}<option value="{{.ID}}">{{.Name}} ({{.Bytes}} bytes/week, {{.Sessions}} sessions)</option>{{end}}{{end}}</select></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><button>Apply</button></form>{{end}}</section><section><h2>Quota Plans</h2><table><tr><th>Name</th><th>Weekly bytes</th><th>Sessions</th><th>Revision</th><th>State</th><th></th></tr>{{range .Plans}}<tr><td>{{.Name}}</td><td>{{.Bytes}}</td><td>{{.Sessions}}</td><td>{{.Revision}}</td><td>{{if .Archived}}Archived{{else}}Available{{end}}</td><td>{{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><button>Archive</button></form>{{end}}</td></tr>{{end}}</table>{{if .NextPlan}}<a href="/admin?plans_after={{.NextPlan}}&accounts_after={{.AccountCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next plans</a>{{end}}<h3>Create plan</h3><form method="post" action="/admin/plans"><label>Name <input name="name" maxlength="120" required></label><label>Weekly bytes <input name="weekly_bytes" type="number" min="0" required></label><label>Sessions <input name="sessions" type="number" min="0" required></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Create</button></form></section></main></html>`))
+var adminPage = template.Must(template.New("admin").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay administration</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:1200px;margin:3vh auto;padding:28px;background:white;border:1px solid #e2e8f0;border-radius:18px}section{margin:20px 0;padding:18px;border:1px solid #e2e8f0;border-radius:12px}table{border-collapse:collapse;width:100%}th,td{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}input,select,button{font:inherit;padding:6px;margin:3px}button{background:#183f75;color:white;border:0;border-radius:8px}.muted{color:#64748b}</style><main class="shell"><a href="/">Your account</a><h1>Relay administration</h1><p class="muted">Applied allowlist revision {{.PolicyRevision}}</p><section><h2>Service totals</h2><p>Pending {{.Pending}} · Active {{.Active}} · Suspended {{.Suspended}} · Denied {{.Denied}}</p></section><section><h2>Accounts</h2><table><tr><th>Email</th><th>Status</th><th>Revision</th><th>Plan</th><th></th></tr>{{range .Accounts}}<tr><td>{{.Email}}</td><td>{{.Status}}</td><td>{{.Revision}}</td><td>{{.PlanID}}</td><td><a href="/admin?selected={{.ID}}&accounts_after={{$.AccountCursor}}&plans_after={{$.PlanCursor}}&limit={{$.Limit}}">Select</a></td></tr>{{end}}</table>{{if .NextAccount}}<a href="/admin?accounts_after={{.NextAccount}}&plans_after={{.PlanCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next accounts</a>{{end}}</section><section><h2>Selected account</h2>{{with .SelectedAccount}}<p>{{.Email}} · {{.Status}} · revision {{.Revision}}</p><form method="post" action="/admin/accounts/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><label>Action <select name="action"><option value="approve">Approve</option><option value="deny">Deny</option><option value="assign">Assign replacement plan</option></select></label><label>Plan <select name="plan_id">{{range $.Plans}}{{if not .Archived}}<option value="{{.ID}}">{{.Name}} ({{.Bytes}} bytes/week, {{.Sessions}} sessions)</option>{{end}}{{end}}</select></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><button>Apply</button></form>{{end}}</section><section><h2>Quota Plans</h2><table><tr><th>Name</th><th>Weekly bytes</th><th>Sessions</th><th>Revision</th><th>State</th><th></th></tr>{{range .Plans}}<tr><td>{{.Name}}</td><td>{{.Bytes}}</td><td>{{.Sessions}}</td><td>{{.Revision}}</td><td>{{if .Archived}}Archived{{else}}Available{{end}}</td><td>{{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><button>Archive</button></form>{{end}}</td></tr>{{end}}</table>{{if .NextPlan}}<a href="/admin?plans_after={{.NextPlan}}&accounts_after={{.AccountCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next plans</a>{{end}}<h3>Create plan</h3><form method="post" action="/admin/plans"><label>Name <input name="name" maxlength="120" required></label><label>Weekly bytes <input name="weekly_bytes" type="number" min="0" required></label><label>Sessions <input name="sessions" type="number" min="0" required></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="operation_id" value="{{.OperationID}}"><input type="hidden" name="operation_proof" value="{{.OperationProof}}"><button>Create</button></form></section></main></html>`))
 
 func pageLimit(raw string) (int, bool) {
 	if raw == "" {
@@ -181,6 +186,26 @@ func pageLimit(raw string) (int, bool) {
 	}
 	n, err := strconv.Atoi(raw)
 	return n, err == nil && n >= 1 && n <= 100
+}
+
+func (s *Server) planOperationProof(r *http.Request, actor adminIdentity, id string) string {
+	c, _ := r.Cookie(sessionCookie)
+	return base64.RawURLEncoding.EncodeToString(s.digest(actor.version, "plan-create-operation", id+"\x00"+c.Value))
+}
+
+func planRequestDigest(actorID, name, reason string, bytes, sessions int64) [32]byte {
+	b, _ := json.Marshal(struct {
+		ActorID, Name, Reason string
+		Bytes, Sessions       int64
+	}{actorID, name, reason, bytes, sessions})
+	return sha256.Sum256(b)
+}
+
+func (s *Server) planCreateCommitted(ctx context.Context, id string, digest [32]byte) bool {
+	var stored []byte
+	var audited bool
+	err := s.Pool.QueryRow(ctx, `SELECT p.create_request_digest, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.plan_id=p.id AND e.event='plan_created') FROM public.quota_plans p WHERE p.id=$1`, id).Scan(&stored, &audited)
+	return err == nil && audited && subtle.ConstantTimeCompare(stored, digest[:]) == 1
 }
 
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +224,13 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := adminPageData{CSRF: actor.csrf, PolicyRevision: actor.revision, Selected: r.URL.Query().Get("selected"), AccountCursor: accountAfter, PlanCursor: planAfter, Limit: limit}
+	operationID, err := uuid()
+	if err != nil {
+		fail(w, 503)
+		return
+	}
+	data.OperationID = operationID
+	data.OperationProof = s.planOperationProof(r, actor, data.OperationID)
 	if data.Selected != "" && !idPattern.MatchString(data.Selected) {
 		fail(w, 400)
 		return
@@ -430,14 +462,10 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	id, e := uuid()
-	if e != nil {
-		fail(w, 503)
-		return
-	}
-	auditID, e := uuid()
-	if e != nil {
-		fail(w, 503)
+	id := r.PostForm.Get("operation_id")
+	proof := r.PostForm.Get("operation_proof")
+	if !idPattern.MatchString(id) || subtle.ConstantTimeCompare([]byte(proof), []byte(s.planOperationProof(r, actor, id))) != 1 {
+		fail(w, 403)
 		return
 	}
 	ctx := r.Context()
@@ -451,13 +479,46 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, status)
 		return
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO public.quota_plans(id,name,weekly_bytes,sessions) VALUES($1,$2,$3,$4)`, id, name, bytes, sessions)
+	digest := planRequestDigest(actor.id, name, r.PostForm.Get("reason"), bytes, sessions)
+	tag, e := tx.Exec(ctx, `INSERT INTO public.quota_plans(id,name,weekly_bytes,sessions,create_request_digest) VALUES($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`, id, name, bytes, sessions, digest[:])
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		var stored []byte
+		var audited bool
+		if e = tx.QueryRow(ctx, `SELECT p.create_request_digest, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.plan_id=p.id AND e.event='plan_created') FROM public.quota_plans p WHERE p.id=$1`, id).Scan(&stored, &audited); e != nil {
+			fail(w, 503)
+			return
+		}
+		if subtle.ConstantTimeCompare(stored, digest[:]) != 1 {
+			fail(w, 409)
+			return
+		}
+		if !audited {
+			fail(w, 503)
+			return
+		}
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		return
+	}
+	auditID, e := uuid()
 	if e != nil {
 		fail(w, 503)
 		return
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,plan_id,reason,actor_email) VALUES($1,clock_timestamp(),'plan_created',$2,$3,$4)`, auditID, id, r.PostForm.Get("reason"), actor.email)
-	if e != nil || tx.Commit(ctx) != nil {
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	if s.commitPlan != nil {
+		e = s.commitPlan(ctx, tx)
+	} else {
+		e = tx.Commit(ctx)
+	}
+	if e != nil && !s.planCreateCommitted(ctx, id, digest) {
 		fail(w, 503)
 		return
 	}

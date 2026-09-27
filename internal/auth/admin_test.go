@@ -69,6 +69,17 @@ func csrfFrom(t *testing.T, s *auth.Server, cookie *http.Cookie) string {
 	return matches[1]
 }
 
+func addPlanOperation(t *testing.T, form url.Values, body string) {
+	t.Helper()
+	for _, name := range []string{"operation_id", "operation_proof"} {
+		matches := regexp.MustCompile(`name="` + name + `" value="([^"]+)"`).FindStringSubmatch(body)
+		if len(matches) != 2 {
+			t.Fatalf("missing %s", name)
+		}
+		form.Set(name, matches[1])
+	}
+}
+
 func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	c, m, db := fixture(t)
 	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
@@ -116,6 +127,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 		t.Fatalf("owner allowance: %s", profile.Body.String())
 	}
 	create := url.Values{"csrf": {csrf}, "reason": {"routine_administration"}, "name": {"Replacement"}, "weekly_bytes": {"0"}, "sessions": {"0"}}
+	addPlanOperation(t, create, workspace.Body.String())
 	badCreate := url.Values{"csrf": {csrf}, "reason": {"routine_administration"}, "name": {"Invalid"}, "weekly_bytes": {"-1"}, "sessions": {"5"}}
 	if out := portalRequest(s, "POST", "/admin/plans", admin, badCreate, c.PortalOrigin); out.Code != 400 {
 		t.Fatalf("negative allowance = %d", out.Code)
@@ -232,6 +244,11 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	}()
 	create.Set("name", "Must Roll Back")
 	time.Sleep(2 * time.Second) // The browser sequence stays below the account request rate.
+	createPage := portalRequest(s, "GET", "/admin", admin, nil, "")
+	if createPage.Code != 200 {
+		t.Fatalf("new plan form = %d", createPage.Code)
+	}
+	addPlanOperation(t, create, createPage.Body.String())
 	if out := portalRequest(s, "POST", "/admin/plans", admin, create, c.PortalOrigin); out.Code != 503 {
 		t.Fatalf("audit failure = %d", out.Code)
 	}
@@ -321,6 +338,11 @@ func TestPlanMutationRechecksGoogleAgeAfterActorLockWait(t *testing.T) {
 		t.Fatal(e)
 	}
 	form := url.Values{"csrf": {csrf}, "reason": {"routine_administration"}, "name": {"After Lock Must Fail"}, "weekly_bytes": {"1"}, "sessions": {"1"}}
+	planPage := portalRequest(s, "GET", "/admin", admin, nil, "")
+	if planPage.Code != 200 {
+		t.Fatalf("plan form = %d", planPage.Code)
+	}
+	addPlanOperation(t, form, planPage.Body.String())
 	result := make(chan int, 1)
 	go func() { result <- portalRequest(s, "POST", "/admin/plans", admin, form, c.PortalOrigin).Code }()
 	waiting := false

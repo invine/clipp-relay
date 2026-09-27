@@ -58,6 +58,8 @@ type Server struct {
 	lastKeyFetch                   time.Time
 	globalRate                     rate
 	accountRates                   map[string]rate
+	beforeProfileRead              func()
+	commitPlan                     func(context.Context, pgx.Tx) error
 }
 type rate struct {
 	tokens float64
@@ -555,7 +557,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	id, _, status, email, csrf, e := s.session(r)
+	id, version, _, _, csrf, e := s.session(r)
 	if errors.Is(e, errRateLimit) {
 		fail(w, 429)
 		return
@@ -564,24 +566,46 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	description := map[string]string{"Pending": "Your account is waiting for approval.", "Active": "Your account is active.", "Suspended": "Your account is temporarily unavailable.", "Denied": "Your account is not approved."}[status]
-	var weeklyBytes int64
-	var sessions int
-	if e == nil && status == "Active" {
-		if err := s.Pool.QueryRow(r.Context(), `SELECT p.weekly_bytes,p.sessions FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&weeklyBytes, &sessions); err != nil {
+	var status, email string
+	var weeklyBytes *int64
+	var sessions *int
+	var verified bool
+	var hd *string
+	if e == nil {
+		if s.beforeProfileRead != nil {
+			s.beforeProfileRead()
+		}
+		err := s.Pool.QueryRow(r.Context(), `SELECT a.status,a.email,a.email_verified,a.hosted_domain,p.weekly_bytes,p.sessions
+FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id
+LEFT JOIN public.quota_plans p ON p.id=a.plan_id
+WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
+AND ps.credential_generation=a.credential_generation
+AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, id, s.sessionDigest(r, version), version).Scan(&status, &email, &verified, &hd, &weeklyBytes, &sessions)
+		if err == pgx.ErrNoRows {
+			e = errInvalidSession
+		} else if err != nil {
+			fail(w, 503)
+			return
+		}
+		if e == nil && status == "Active" && (weeklyBytes == nil || sessions == nil) {
 			fail(w, 503)
 			return
 		}
 	}
 	admin := false
 	if e == nil {
-		var verified bool
-		var hd *string
-		if err := s.Pool.QueryRow(r.Context(), `SELECT email_verified,hosted_domain FROM public.accounts WHERE id=$1`, id).Scan(&verified, &hd); err == nil {
-			if policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile); err == nil {
-				admin = policy.Allows(email, verified, deref(hd))
-			}
+		if policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile); err == nil {
+			admin = policy.Allows(email, verified, deref(hd))
 		}
+	}
+	description := map[string]string{"Pending": "Your account is waiting for approval.", "Active": "Your account is active.", "Suspended": "Your account is temporarily unavailable.", "Denied": "Your account is not approved."}[status]
+	var bytesValue int64
+	var sessionsValue int
+	if weeklyBytes != nil {
+		bytesValue = *weeklyBytes
+	}
+	if sessions != nil {
+		sessionsValue = *sessions
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = page.Execute(w, struct {
@@ -590,7 +614,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		Active, Admin                    bool
 		WeeklyBytes                      int64
 		Sessions                         int
-	}{e == nil, status, description, email, csrf, status == "Active", admin, weeklyBytes, sessions})
+	}{e == nil, status, description, email, csrf, status == "Active", admin, bytesValue, sessionsValue})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
