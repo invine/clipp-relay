@@ -25,10 +25,10 @@ func (testAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCrede
 type testCredit struct{}
 
 func (testCredit) Ensure(context.Context, string, int64) (quota.Result, error) {
-	return quota.Result{}, nil
+	return quota.Result{Committed: 65536, Usable: 65536}, nil
 }
 func (testCredit) Take(context.Context, string, int64, int64) (quota.Result, error) {
-	return quota.Result{}, nil
+	return quota.Result{Committed: 65536, Usable: 65536}, nil
 }
 
 func TestServiceChangesAndOutagePublishCompleteSnapshot(t *testing.T) {
@@ -257,5 +257,35 @@ func TestOverrideRemovesOnlyItsTransportDependencyAndMissingUDPWithdrawsAll(t *t
 	d.ServeHTTP(w, r)
 	if w.Code != 503 {
 		t.Fatalf("partial success: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestServiceHostnameKeepsDNSAddressFamilyOpen(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "spec": map[string]any{"ports": []map[string]any{{"protocol": "UDP", "port": 4003}}}, "status": map[string]any{"loadBalancer": map[string]any{"ingress": []map[string]string{{"hostname": "ipv6-only.example.test"}}}}})
+	}))
+	defer api.Close()
+	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	d, err := relay.NewDiscovery(s, testAuthority{}, "relay.example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(d, api.Client(), api.URL, "token", Config{WebRTC: Transport{Enabled: true, PublicPort: 4003, Service: ServiceRef{Namespace: "clipp", Name: "relay-udp"}}}, func(bool) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "https://relay.example.test/v1/relay", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	d.ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "/dns/ipv6-only.example.test/udp/4003/webrtc-direct/certhash/") {
+		t.Fatalf("family-bound hostname: %d %s", w.Code, w.Body.String())
 	}
 }

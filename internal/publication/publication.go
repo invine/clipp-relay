@@ -142,7 +142,7 @@ func (c *Controller) get(ctx context.Context, s *source) ([]ma.Multiaddr, string
 			}
 		}
 		if entry.Hostname != "" && validDNS(entry.Hostname) {
-			candidates = append(candidates, struct{ kind, name string }{"dns4", entry.Hostname})
+			candidates = append(candidates, struct{ kind, name string }{"dns", entry.Hostname})
 		}
 		proto := "tcp"
 		suffix := ""

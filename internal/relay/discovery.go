@@ -100,7 +100,7 @@ func (d *Discovery) PublishAt(addresses []ma.Multiaddr, verified time.Time) erro
 			parts = parts[:len(parts)-1]
 		}
 		switch {
-		case len(parts) == 2 && parts[1].Code == ma.P_TCP && d.server.tcpEnabled:
+		case len(parts) == 2 && parts[1].Code == ma.P_TCP && d.server.tcpEnabled && (parts[0].Code == ma.P_IP4 || parts[0].Code == ma.P_IP6 || parts[0].Code == ma.P_DNS || parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6):
 			kind = "tcp"
 		case len(parts) == 4 && parts[1].Code == ma.P_TCP && parts[2].Code == ma.P_TLS && parts[3].Code == ma.P_WS && d.server.wsEnabled:
 			name, err := a.ValueForProtocol(parts[0].Code)
@@ -108,7 +108,7 @@ func (d *Discovery) PublishAt(addresses []ma.Multiaddr, verified time.Time) erro
 				kind = "websocket"
 			}
 		case (len(parts) == 3 || len(parts) == 4) && parts[1].Code == ma.P_UDP && parts[2].Code == ma.P_WEBRTC_DIRECT && d.server.webrtcEnabled:
-			if parts[0].Code == ma.P_IP4 || parts[0].Code == ma.P_IP6 || parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6 {
+			if parts[0].Code == ma.P_IP4 || parts[0].Code == ma.P_IP6 || parts[0].Code == ma.P_DNS || parts[0].Code == ma.P_DNS4 || parts[0].Code == ma.P_DNS6 {
 				kind = "webrtc-direct"
 				if len(parts) == 4 {
 					if parts[3].Code != ma.P_CERTHASH {
