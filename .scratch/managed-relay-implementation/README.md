@@ -21,6 +21,7 @@ rather than silently changing policy or reviving an obsolete design.
 - [Start a validated Go service](issues/02-start-a-validated-go-service.md) is resolved after local integration and verification.
 - [Register and sign in](issues/03-register-and-sign-in.md) is resolved after reviewed integration and disposable PostgreSQL verification.
 - [Approve accounts and assign plans](issues/04-approve-accounts-and-assign-plans.md) is resolved after reviewed integration and disposable PostgreSQL verification.
+- [Authorize and renew Clipp credentials](issues/05-authorize-and-renew-clipp-credentials.md) and [Commit weekly quota and show usage](issues/06-commit-weekly-quota-and-show-usage.md) are claimed in separate isolated Go worktrees.
 
 Ticket status and each **Blocked by** line remain the source of truth for assignment.
 

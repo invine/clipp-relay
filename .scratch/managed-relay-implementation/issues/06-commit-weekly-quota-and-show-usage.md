@@ -4,7 +4,7 @@
 
 **Blocked by:** [04: Approve accounts and assign plans](04-approve-accounts-and-assign-plans.md).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I2, I5, I11.
@@ -68,3 +68,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Claimed centrally on 2026-09-27 after ticket 04 resolution (`21ab747`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
