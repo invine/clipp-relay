@@ -4,7 +4,7 @@
 
 **Blocked by:** [07: Relay authenticated TCP traffic](07-relay-authenticated-tcp-traffic.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I1, I4, I11, I12.
@@ -41,12 +41,12 @@ no undercount/fork/forced transport preference to conceal constraint.
 
 ## Acceptance criteria
 
-- [ ] Force WSS and WebRTC Direct separately with real libp2p clients, reserving and transferring actual relayed traffic in both directions; no TCP fallback false pass.
-- [ ] Auth initial/renewal/expiry/replacement and same/cross-account accounting outcomes match TCP, including buffered-tail limitations.
-- [ ] Wrong WSS TLS identity and stale/wrong WebRTC certhash/Peer ID fail before token disclosure; restart rotates key/certificate.
-- [ ] Private/account routes are absent on WSS and HTTP portal idle/write deadlines do not kill upgraded libp2p sessions.
-- [ ] RM resolved values/service tagging, descriptor/memory limits and transport setup bounds are asserted; pressure rejects visibly without hidden IP cap or allowlist bypass.
-- [ ] Network harness proves no new outbound peer dial, while STOP on accepted sessions works; actual OCI policy qualification remains separate.
+- [x] Force WSS and WebRTC Direct separately with real libp2p clients, reserving and transferring actual relayed traffic in both directions; no TCP fallback false pass.
+- [x] Auth initial/renewal/expiry/replacement and same/cross-account accounting outcomes match TCP, including buffered-tail limitations.
+- [x] Wrong WSS TLS identity and stale/wrong WebRTC certhash/Peer ID fail before token disclosure; restart rotates key/certificate.
+- [x] Private/account routes are absent on WSS and HTTP portal idle/write deadlines do not kill upgraded libp2p sessions.
+- [x] RM resolved values/service tagging, descriptor/memory limits and transport setup bounds are asserted; pressure rejects visibly without hidden IP cap or allowlist bypass.
+- [x] Network harness proves no new outbound peer dial, while STOP on accepted sessions works; actual OCI policy qualification remains separate.
 
 ## Demonstration
 
@@ -74,3 +74,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 07 resolution (`49eed87`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved centrally on 2026-09-27 after TDD implementation (`d78c9b2`, `2f24af2`, `433d0c6`), independent specification and standards reviews with fixes and clean final rechecks, and combined integration merge (`49083bf`). Go 1.27.1 on darwin/arm64: `go test -count=1 ./...`, `go test -race -count=1 ./internal/relay ./internal/config`, `go vet ./...`, `go build ./...`, `gofmt -l cmd internal`, and `git diff --check` passed on the merged ticket 08+09+10 state with local loopback and offline cache. The integration test expectation was updated for ticket 09's guarded credential recheck; failed TLS/Peer ID connects still produce zero token validations. Forced WSS and WebRTC Direct wire tests cover authentication, renewal/expiry/replacement, bidirectional opaque circuits, account charging/cutoff, and inbound-only behavior. A local exact-name TLS proxy models WSS ingress, and a real incomplete UDP/STUN WebRTC setup releases stock candidate resources at about 10s; exported 128-pending and RM memory/FD scope values are asserted, and memory pressure visibly rejects then recovers. Actual FD saturation, OCI ingress policy and browser/mobile interoperability were not run; those belong to later qualification/runtime tickets. No schema change required another PostgreSQL smoke run. No push, publication, deployment or external load occurred.
