@@ -382,7 +382,13 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	}
 	guard := &s.peerGuards[peerGuardIndex(c.RemotePeer())]
 	guard.Lock()
-	defer guard.Unlock()
+	var oldToClose network.Conn
+	defer func() {
+		guard.Unlock()
+		if oldToClose != nil {
+			_ = oldToClose.Close()
+		}
+	}()
 	credential, err := s.authority.AuthenticateRelay(ctx, raw)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidAccess) {
@@ -390,6 +396,43 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 		}
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
+	var deadline time.Time
+	var renew time.Duration
+	var code string
+	accounts := []string{credential.AccountID}
+	s.mu.Lock()
+	if old := s.byPeer[c.RemotePeer()]; old != nil && old.account != credential.AccountID {
+		accounts = append(accounts, old.account)
+	}
+	s.mu.Unlock()
+	admit := func() {
+		fresh, err := s.authority.AuthenticateRelay(ctx, raw)
+		if err != nil || fresh.AccountID != credential.AccountID {
+			if errors.Is(err, auth.ErrInvalidAccess) || fresh.AccountID != credential.AccountID {
+				code = "authentication_failed"
+			} else {
+				code = "temporarily_unavailable"
+			}
+			return
+		}
+		deadline, renew, code = s.authenticateAdmitted(ctx, c, fresh, &oldToClose)
+	}
+	if guarded, ok := s.authority.(interface {
+		WithAccountGuards(context.Context, []string, func()) bool
+	}); ok {
+		if !guarded.WithAccountGuards(ctx, accounts, admit) {
+			return time.Time{}, 0, "temporarily_unavailable"
+		}
+	} else {
+		admit()
+	}
+	return deadline, renew, code
+}
+
+// The account guard remains held from the authoritative recheck through local
+// credit funding and registry installation. A committed policy change therefore
+// cannot be followed by installation of an older observed credential.
+func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn) (time.Time, time.Duration, string) {
 	s.mu.Lock()
 	current := s.byConn[c]
 	replaced := s.byPeer[c.RemotePeer()]
@@ -464,7 +507,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	v.timer = time.AfterFunc(time.Until(deadline), func() { s.expire(v) })
 	s.mu.Unlock()
 	if replaced != nil && replaced != current {
-		_ = replaced.conn.Close()
+		*oldToClose = replaced.conn
 	}
 	lifetime := time.Until(deadline)
 	return deadline, time.Duration(float64(lifetime) * renewFraction), ""

@@ -31,13 +31,23 @@ func (s *Server) AuthenticateRelay(ctx context.Context, raw string) (RelayCreden
 		var grantGeneration int64
 		var dbNow time.Time
 		before := time.Now()
-		err := s.Pool.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,p.sessions,t.expires_at,clock_timestamp()
+		err := s.Pool.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,COALESCE(a.sessions_override,p.sessions),t.expires_at,clock_timestamp()
 			FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id
 			JOIN public.accounts a ON a.id=g.account_id JOIN public.quota_plans p ON p.id=a.plan_id
 			WHERE t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp()
 			AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&result.AccountID, &status, &grantGeneration, &result.Generation, &result.SessionLimit, &result.ExpiresAt, &dbNow)
 		after := time.Now()
 		if err == nil {
+			if _, uncertain := s.uncertainAccounts.Load(result.AccountID); uncertain {
+				// Wait for a still-in-flight Commit to release the account row, then
+				// re-read authority. A failed reconciliation keeps admission closed.
+				var resolved string
+				if err := s.Pool.QueryRow(ctx, `SELECT id FROM public.accounts WHERE id=$1 FOR SHARE`, result.AccountID).Scan(&resolved); err != nil {
+					return RelayCredential{}, err
+				}
+				s.uncertainAccounts.Delete(result.AccountID)
+				return s.AuthenticateRelay(ctx, raw)
+			}
 			if status != "Active" || grantGeneration != result.Generation {
 				return RelayCredential{}, ErrInvalidAccess
 			}

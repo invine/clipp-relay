@@ -85,7 +85,9 @@ func (r *endpointReporter) GetBandwidthByProtocol() map[protocol.ID]metrics.Stat
 func (r *endpointReporter) Reset()             { r.sent.Store(0); r.received.Store(0); r.unattributed.Store(0) }
 func (r *endpointReporter) TrimIdle(time.Time) {}
 
-func (s *Server) closeAccount(account string) {
+// DetachAccount removes every session while the caller still holds its account
+// guard. The returned connection closes perform I/O after that guard is released.
+func (s *Server) DetachAccount(account string) func() {
 	s.mu.Lock()
 	connections := make([]*session, 0, len(s.byAccount[account]))
 	for v := range s.byAccount[account] {
@@ -93,10 +95,14 @@ func (s *Server) closeAccount(account string) {
 		s.removeLocked(v)
 	}
 	s.mu.Unlock()
-	for _, v := range connections {
-		_ = v.conn.Close()
+	return func() {
+		for _, v := range connections {
+			_ = v.conn.Close()
+		}
 	}
 }
 
 // CloseAccount invalidates all live sessions after an account policy change.
-func (s *Server) CloseAccount(account string) { s.closeAccount(account) }
+func (s *Server) CloseAccount(account string) { s.DetachAccount(account)() }
+
+func (s *Server) closeAccount(account string) { s.CloseAccount(account) }

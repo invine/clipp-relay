@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
@@ -99,7 +100,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, target)
 	})
 	var changed AccountChange
-	s.SetAccountChanged(func(change AccountChange) { changed = change })
+	s.SetAccountChanged(func(change AccountChange) func() { changed = change; return nil })
 	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
@@ -114,6 +115,124 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 	var status string
 	if err = db.Pool.QueryRow(context.Background(), `SELECT status FROM public.accounts WHERE id=$1`, target).Scan(&status); err != nil || status != "Active" {
 		t.Fatalf("commit status=%q error=%v", status, err)
+	}
+}
+
+func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	target, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at,status,plan_id) VALUES($1,'https://accounts.google.com',$2,'target@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp(),'Active','6dd09395-51a0-451c-96b3-716e6038e870')`, target, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.audit_events WHERE account_id=$1`, target)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id=$1`, target)
+	})
+	var changed AccountChange
+	closed := false
+	s.SetAccountChanged(func(change AccountChange) func() {
+		changed = change
+		return func() { closed = true }
+	})
+	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("lost commit acknowledgment")
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {"1"}}
+	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
+	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !changed.DiscardCredit || !closed {
+		t.Fatalf("ambiguous security mutation response=%d callback=%+v closed=%t", out.Code, changed, closed)
+	}
+	var status string
+	var generation int64
+	var audited bool
+	if err := db.Pool.QueryRow(ctx, `SELECT a.status,a.credential_generation,EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_suspended') FROM public.accounts a WHERE a.id=$1`, target).Scan(&status, &generation, &audited); err != nil || status != "Suspended" || generation != 1 || !audited {
+		t.Fatalf("commit state=%s generation=%d audited=%t err=%v", status, generation, audited, err)
+	}
+	if _, quarantined := s.uncertainAccounts.Load(target); !quarantined {
+		t.Fatal("lost security commit did not quarantine admission")
+	}
+}
+
+func TestSuspensionWaitsForAccountRowLockAndRevokesRelayCredential(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	target, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := opaque()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at,status,plan_id) VALUES($1,'https://accounts.google.com',$2,'target@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp(),'Active','6dd09395-51a0-451c-96b3-716e6038e870')`, target, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.relay_access_tokens WHERE grant_id=$1`, grant)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.login_grants WHERE id=$1`, grant)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.audit_events WHERE account_id=$1`, target)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id=$1`, target)
+	})
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES($1,$2,0,'electron',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days')`, grant, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.relay_access_tokens(credential_digest,pepper_version,grant_id,issued_at,expires_at) VALUES($1,$2,$3,clock_timestamp(),clock_timestamp()+interval '15 minutes')`, s.digest(s.CurrentPepper, "relay-access", raw), s.CurrentPepper, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AuthenticateRelay(ctx, raw); err != nil {
+		t.Fatalf("credential before suspension: %v", err)
+	}
+	blocker, err := db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	var locked string
+	if err := blocker.QueryRow(ctx, `SELECT id FROM public.accounts WHERE id=$1 FOR UPDATE`, target).Scan(&locked); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {"1"}}
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() { result <- internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin) }()
+	select {
+	case response := <-result:
+		t.Fatalf("suspension bypassed held row lock: %d", response.Code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case response := <-result:
+		if response.Code != 303 {
+			t.Fatalf("suspension response=%d %s", response.Code, response.Body.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("suspension did not finish")
+	}
+	if _, err := s.AuthenticateRelay(ctx, raw); !errors.Is(err, ErrInvalidAccess) {
+		t.Fatalf("old credential survived suspension: %v", err)
+	}
+	var status string
+	var generation int64
+	var terminated bool
+	if err := db.Pool.QueryRow(ctx, `SELECT a.status,a.credential_generation,g.terminated_at IS NOT NULL FROM public.accounts a JOIN public.login_grants g ON g.account_id=a.id WHERE a.id=$1`, target).Scan(&status, &generation, &terminated); err != nil || status != "Suspended" || generation != 1 || !terminated {
+		t.Fatalf("status=%s generation=%d terminated=%t err=%v", status, generation, terminated, err)
 	}
 }
 
