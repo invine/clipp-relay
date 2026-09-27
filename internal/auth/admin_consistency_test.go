@@ -133,6 +133,7 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE plan_id=$1; DELETE FROM public.quota_plans WHERE id=$1`, form.Get("operation_id"))
 	})
 	lost := true
+	requestContext, cancelRequest := context.WithCancel(context.Background())
 	s.commitPlan = func(ctx context.Context, tx pgx.Tx) error {
 		err := tx.Commit(ctx)
 		if err != nil {
@@ -140,11 +141,17 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 		}
 		if lost {
 			lost = false
+			cancelRequest() // Commit happened, but the request died before its ACK.
 			return errors.New("injected lost acknowledgment")
 		}
 		return nil
 	}
-	first := internalRequest(s, "POST", "/admin/plans", cookie, form, origin)
+	firstRequest := httptest.NewRequest("POST", "/admin/plans", strings.NewReader(form.Encode())).WithContext(requestContext)
+	firstRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	firstRequest.Header.Set("Origin", origin)
+	firstRequest.AddCookie(cookie)
+	first := httptest.NewRecorder()
+	s.Handler().ServeHTTP(first, firstRequest)
 	if first.Code != http.StatusSeeOther {
 		t.Fatalf("ambiguous committed response %d", first.Code)
 	}
@@ -165,5 +172,29 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 	form.Set("weekly_bytes", "18")
 	if changed := internalRequest(s, "POST", "/admin/plans", cookie, form, origin); changed.Code != 409 {
 		t.Fatalf("changed replay %d", changed.Code)
+	}
+	newPage := internalRequest(s, "GET", "/admin", cookie, nil, "")
+	if newPage.Code != 200 {
+		t.Fatalf("new operation page = %d", newPage.Code)
+	}
+	newField := func(name string) string {
+		m := regexp.MustCompile(`name="` + name + `" value="([^"]+)"`).FindStringSubmatch(newPage.Body.String())
+		if len(m) != 2 {
+			t.Fatalf("missing %s", name)
+		}
+		return m[1]
+	}
+	retryForm := url.Values{"csrf": {newField("csrf")}, "operation_id": {newField("operation_id")}, "operation_proof": {newField("operation_proof")}, "reason": {"support_correction"}, "name": {"Retry after unresolved commit"}, "weekly_bytes": {"23"}, "sessions": {"3"}}
+	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE plan_id=$1; DELETE FROM public.quota_plans WHERE id=$1`, retryForm.Get("operation_id"))
+	})
+	s.commitPlan = func(context.Context, pgx.Tx) error { return errors.New("injected unresolved commit") }
+	unresolved := internalRequest(s, "POST", "/admin/plans", cookie, retryForm, origin)
+	if unresolved.Code != 503 || !strings.Contains(unresolved.Body.String(), retryForm.Get("operation_id")) || !strings.Contains(unresolved.Body.String(), retryForm.Get("operation_proof")) || !strings.Contains(unresolved.Body.String(), retryForm.Get("name")) {
+		t.Fatalf("retry form lost operation: %d %s", unresolved.Code, unresolved.Body.String())
+	}
+	s.commitPlan = nil
+	if retried := internalRequest(s, "POST", "/admin/plans", cookie, retryForm, origin); retried.Code != 303 {
+		t.Fatalf("safe retry = %d", retried.Code)
 	}
 }

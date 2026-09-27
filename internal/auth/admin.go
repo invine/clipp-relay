@@ -180,6 +180,18 @@ type adminPageData struct {
 
 var adminPage = template.Must(template.New("admin").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay administration</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:1200px;margin:3vh auto;padding:28px;background:white;border:1px solid #e2e8f0;border-radius:18px}section{margin:20px 0;padding:18px;border:1px solid #e2e8f0;border-radius:12px}table{border-collapse:collapse;width:100%}th,td{padding:8px;border-bottom:1px solid #e2e8f0;text-align:left}input,select,button{font:inherit;padding:6px;margin:3px}button{background:#183f75;color:white;border:0;border-radius:8px}.muted{color:#64748b}</style><main class="shell"><a href="/">Your account</a><h1>Relay administration</h1><p class="muted">Applied allowlist revision {{.PolicyRevision}}</p><section><h2>Service totals</h2><p>Pending {{.Pending}} · Active {{.Active}} · Suspended {{.Suspended}} · Denied {{.Denied}}</p></section><section><h2>Accounts</h2><table><tr><th>Email</th><th>Status</th><th>Revision</th><th>Plan</th><th></th></tr>{{range .Accounts}}<tr><td>{{.Email}}</td><td>{{.Status}}</td><td>{{.Revision}}</td><td>{{.PlanID}}</td><td><a href="/admin?selected={{.ID}}&accounts_after={{$.AccountCursor}}&plans_after={{$.PlanCursor}}&limit={{$.Limit}}">Select</a></td></tr>{{end}}</table>{{if .NextAccount}}<a href="/admin?accounts_after={{.NextAccount}}&plans_after={{.PlanCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next accounts</a>{{end}}</section><section><h2>Selected account</h2>{{with .SelectedAccount}}<p>{{.Email}} · {{.Status}} · revision {{.Revision}}</p><form method="post" action="/admin/accounts/{{.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><label>Action <select name="action"><option value="approve">Approve</option><option value="deny">Deny</option><option value="assign">Assign replacement plan</option></select></label><label>Plan <select name="plan_id">{{range $.Plans}}{{if not .Archived}}<option value="{{.ID}}">{{.Name}} ({{.Bytes}} bytes/week, {{.Sessions}} sessions)</option>{{end}}{{end}}</select></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><button>Apply</button></form>{{end}}</section><section><h2>Quota Plans</h2><table><tr><th>Name</th><th>Weekly bytes</th><th>Sessions</th><th>Revision</th><th>State</th><th></th></tr>{{range .Plans}}<tr><td>{{.Name}}</td><td>{{.Bytes}}</td><td>{{.Sessions}}</td><td>{{.Revision}}</td><td>{{if .Archived}}Archived{{else}}Available{{end}}</td><td>{{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><button>Archive</button></form>{{end}}</td></tr>{{end}}</table>{{if .NextPlan}}<a href="/admin?plans_after={{.NextPlan}}&accounts_after={{.AccountCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next plans</a>{{end}}<h3>Create plan</h3><form method="post" action="/admin/plans"><label>Name <input name="name" maxlength="120" required></label><label>Weekly bytes <input name="weekly_bytes" type="number" min="0" required></label><label>Sessions <input name="sessions" type="number" min="0" required></label><label>Reason <select name="reason"><option>routine_administration</option><option>policy_enforcement</option><option>suspected_abuse</option><option>security_response</option><option>support_correction</option></select></label><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="operation_id" value="{{.OperationID}}"><input type="hidden" name="operation_proof" value="{{.OperationProof}}"><button>Create</button></form></section></main></html>`))
 
+var planRetryPage = template.Must(template.New("plan-retry").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Retry plan creation</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033}.shell{max-width:680px;margin:8vh auto;padding:28px;background:white;border:1px solid #e2e8f0;border-radius:18px}button{background:#183f75;color:white;border:0;border-radius:8px;padding:10px 16px;font:inherit}</style><main class="shell"><h1>Plan result could not be confirmed</h1><p>Retry this same operation to check or finish it. Do not start a new plan form for this attempt.</p><form method="post" action="/admin/plans"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="operation_id" value="{{.OperationID}}"><input type="hidden" name="operation_proof" value="{{.OperationProof}}"><input type="hidden" name="reason" value="{{.Reason}}"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="weekly_bytes" value="{{.Bytes}}"><input type="hidden" name="sessions" value="{{.Sessions}}"><button>Retry this plan</button></form></main></html>`))
+
+func planRetry(w http.ResponseWriter, r *http.Request, actor adminIdentity, name string, bytes, sessions int64) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Retry-After", "1")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = planRetryPage.Execute(w, struct {
+		CSRF, OperationID, OperationProof, Reason, Name string
+		Bytes, Sessions                                 int64
+	}{actor.csrf, r.PostForm.Get("operation_id"), r.PostForm.Get("operation_proof"), r.PostForm.Get("reason"), name, bytes, sessions})
+}
+
 func pageLimit(raw string) (int, bool) {
 	if raw == "" {
 		return 50, true
@@ -518,9 +530,17 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 	} else {
 		e = tx.Commit(ctx)
 	}
-	if e != nil && !s.planCreateCommitted(ctx, id, digest) {
-		fail(w, 503)
-		return
+	if e != nil {
+		// The request may have timed out after PostgreSQL committed. A separate,
+		// tightly bounded read must survive that cancellation; replay keeps the
+		// same signed operation ID when the outcome still cannot be confirmed.
+		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		committed := s.planCreateCommitted(recoveryCtx, id, digest)
+		cancel()
+		if !committed {
+			planRetry(w, r, actor, name, bytes, sessions)
+			return
+		}
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
