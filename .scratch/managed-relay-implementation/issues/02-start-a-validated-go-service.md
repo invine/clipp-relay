@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I1, I5, I9, I11.
@@ -64,3 +64,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Claimed centrally on 2026-09-27 for Go implementation agent; isolated starting commit `2136aa9`. Resolution awaits integration review and acceptance evidence.

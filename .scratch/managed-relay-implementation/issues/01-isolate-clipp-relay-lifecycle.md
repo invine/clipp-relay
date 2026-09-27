@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: Clipp.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I7; Testing.
@@ -57,3 +57,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Claimed centrally on 2026-09-27 for Clipp implementation agent; isolated starting commit `44ddde1`. Resolution awaits integration review and acceptance evidence.
