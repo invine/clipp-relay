@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -58,6 +59,9 @@ type providerDouble struct {
 	subject        string
 	keyAge         string
 	keyID          string
+	issuers        map[string]string
+	onKeys         func()
+	tokenCalls     int
 	oversizeBody   bool
 	oversizeHeader bool
 	tokenGate      chan struct{}
@@ -78,13 +82,19 @@ func newProvider(t *testing.T) *providerDouble {
 			d.calls++
 			keyAge := d.keyAge
 			keyID := d.keyID
+			onKeys := d.onKeys
 			d.mu.Unlock()
 			w.Header().Set("Cache-Control", "public, max-age="+keyAge)
 			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": keyID, "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": "AQAB"}}})
+			if onKeys != nil {
+				onKeys()
+			}
 		case "/token":
 			_ = r.ParseForm()
 			d.mu.Lock()
 			nonce, invalid, subject := r.Form.Get("code"), d.invalid, d.subject
+			d.tokenCalls++
+			issuer := d.issuers[nonce]
 			gate, started := d.tokenGate, d.tokenStarted
 			oversizeBody, oversizeHeader := d.oversizeBody, d.oversizeHeader
 			d.mu.Unlock()
@@ -101,7 +111,10 @@ func newProvider(t *testing.T) *providerDouble {
 			if gate != nil {
 				<-gate
 			}
-			claims := map[string]any{"iss": "accounts.google.com", "sub": subject, "aud": "test-client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": nonce, "email": "latest@example.test", "email_verified": true, "name": "SECRET_CANARY_NAME"}
+			if issuer == "" {
+				issuer = "accounts.google.com"
+			}
+			claims := map[string]any{"iss": issuer, "sub": subject, "aud": "test-client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": nonce, "email": "latest@example.test", "email_verified": true, "name": "SECRET_CANARY_NAME"}
 			switch invalid {
 			case "nonce":
 				claims["nonce"] = "wrong"
@@ -423,6 +436,14 @@ func TestConcurrentEquivalentLoginsCreateOneAccount(t *testing.T) {
 	for i := range flows {
 		flows[i], bindings[i] = start(t, s, nil)
 	}
+	d.issuers = map[string]string{}
+	for i, flow := range flows {
+		if i%2 == 0 {
+			d.issuers[strings.Split(flow, "|")[1]] = "accounts.google.com"
+		} else {
+			d.issuers[strings.Split(flow, "|")[1]] = "https://accounts.google.com"
+		}
+	}
 	var wg sync.WaitGroup
 	errs := make(chan int, len(flows))
 	for i := range flows {
@@ -441,10 +462,12 @@ func TestConcurrentEquivalentLoginsCreateOneAccount(t *testing.T) {
 		t.Errorf("concurrent callback: %d", status)
 	}
 	var count, audits int
+	var issuer string
 	_ = db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&count)
 	_ = db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.audit_events a JOIN public.accounts x ON a.account_id=x.id WHERE x.subject=$1`, d.subject).Scan(&audits)
-	if count != 1 || audits != 1 {
-		t.Fatalf("accounts/audits %d/%d", count, audits)
+	_ = db.Pool.QueryRow(context.Background(), `SELECT issuer FROM public.accounts WHERE subject=$1`, d.subject).Scan(&issuer)
+	if count != 1 || audits != 1 || issuer != "https://accounts.google.com" {
+		t.Fatalf("accounts/audits/issuer %d/%d/%q", count, audits, issuer)
 	}
 }
 
@@ -595,5 +618,202 @@ func TestOversizeAndUnavailableProviderCannotRegister(t *testing.T) {
 				t.Fatal("provider failure persisted account")
 			}
 		})
+	}
+}
+
+func TestSuccessfulCallbackPreservesSharedBrowserBindingForAnotherTab(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "two-tabs"
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	portal := httptest.NewTLSServer(s.Handler())
+	defer portal.Close()
+	jar, e := cookiejar.New(nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	client := portal.Client()
+	client.Jar = jar
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	begin := func() string {
+		t.Helper()
+		response, e := client.Get(portal.URL + "/auth/login")
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 302 {
+			t.Fatalf("login start: %d", response.StatusCode)
+		}
+		u, e := url.Parse(response.Header.Get("Location"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		return u.Query().Get("state") + "|" + u.Query().Get("nonce")
+	}
+	finish := func(flow string) int {
+		t.Helper()
+		parts := strings.Split(flow, "|")
+		response, e := client.Get(portal.URL + "/auth/callback?state=" + url.QueryEscape(parts[0]) + "&code=" + url.QueryEscape(parts[1]))
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	first, second := begin(), begin()
+	if status := finish(first); status != 303 {
+		t.Fatalf("first tab: %d", status)
+	}
+	if status := finish(second); status != 303 {
+		t.Fatalf("second tab after first callback: %d", status)
+	}
+}
+
+func TestExpiredKnownVerificationKeyRefreshesBeforeUnknownKeyCooldown(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "known-key-refresh"
+	d.keyAge = "1"
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	first, binding := start(t, s, nil)
+	if w := complete(s, first, binding); w.Code != 303 {
+		t.Fatalf("first login: %d", w.Code)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	second, binding := start(t, s, binding)
+	if w := complete(s, second, binding); w.Code != 303 {
+		t.Fatalf("expired known key was not refreshed: %d", w.Code)
+	}
+	d.mu.Lock()
+	calls := d.calls
+	d.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("key fetches: got %d, want 2", calls)
+	}
+}
+
+func TestRepeatedSuccessfulCallbacksRespectResolvedAccountRate(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "callback-rate"
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	first, binding := start(t, s, nil)
+	if w := complete(s, first, binding); w.Code != 303 {
+		t.Fatalf("initial callback: %d", w.Code)
+	}
+	refused := false
+	for i := 0; i < 30; i++ {
+		flow, nextBinding := start(t, s, binding)
+		binding = nextBinding
+		var before int
+		if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE a.subject=$1`, d.subject).Scan(&before); e != nil {
+			t.Fatal(e)
+		}
+		w := complete(s, flow, binding)
+		if w.Code == 429 {
+			var after int
+			if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE a.subject=$1`, d.subject).Scan(&after); e != nil {
+				t.Fatal(e)
+			}
+			if after != before {
+				t.Fatalf("refused callback wrote session: %d to %d", before, after)
+			}
+			refused = true
+			break
+		}
+		if w.Code != 303 {
+			t.Fatalf("callback %d: %d", i, w.Code)
+		}
+	}
+	if !refused {
+		t.Fatal("resolved-account callback burst was not bounded")
+	}
+}
+
+func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "cleanup-owner"
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	flow, binding := start(t, s, nil)
+	if w := complete(s, flow, binding); w.Code != 303 {
+		t.Fatalf("setup: %d", w.Code)
+	}
+	ctx := context.Background()
+	_, e := db.Pool.Exec(ctx, `INSERT INTO public.authorization_transactions (id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at)
+ SELECT lpad(to_hex(i+100000),32,'0')::uuid,decode(md5('state'||i)||md5('state2'||i),'hex'),decode(repeat('aa',32),'hex'),decode(repeat('bb',32),'hex'),$1,clock_timestamp()-interval '3 hours',clock_timestamp()-interval '2 hours' FROM generate_series(1,1200) AS i`, m.CurrentPepper)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions (credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+ SELECT decode(md5('session'||i)||md5('session2'||i),'hex'),$1,a.id,0,decode(repeat('cc',32),'hex'),clock_timestamp()-interval '3 hours',clock_timestamp()-interval '3 hours',clock_timestamp()-interval '3 hours',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour' FROM generate_series(1,1200) AS i CROSS JOIN public.accounts a WHERE a.subject=$2`, m.CurrentPepper, d.subject)
+	if e != nil {
+		t.Fatal(e)
+	}
+	maintainCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Maintain(maintainCtx); close(done) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("cleanup did not stop after cancellation")
+		}
+	}()
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		var flows, sessions int
+		err1 := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour'`).Scan(&flows)
+		err2 := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("cleanup query: %v %v", err1, err2)
+		}
+		if flows == 0 && sessions == 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var flows, sessions int
+	_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour'`).Scan(&flows)
+	_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions)
+	t.Fatalf("cleanup backlog after catch-up window: flows=%d sessions=%d", flows, sessions)
+}
+
+func TestDatabaseOutageAfterVerifiedProviderResponseCreatesNoFallbackState(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "verified-before-db-outage"
+	d.onKeys = func() { db.Pool.Close() }
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	flow, binding := start(t, s, nil)
+	w := complete(s, flow, binding)
+	if w.Code != 503 {
+		t.Fatalf("callback after database loss: %d", w.Code)
+	}
+	if sessionFrom(w) != nil {
+		t.Fatal("callback issued portal cookie without database commit")
+	}
+	d.mu.Lock()
+	tokenCalls, keyCalls := d.tokenCalls, d.calls
+	d.mu.Unlock()
+	if tokenCalls != 1 || keyCalls != 1 {
+		t.Fatalf("provider verification path not exercised: token=%d keys=%d", tokenCalls, keyCalls)
+	}
+	fresh, e := database.NewPool(context.Background(), c, m, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer fresh.Close()
+	var accounts, sessions int
+	if e = fresh.QueryRow(context.Background(), `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&accounts); e != nil {
+		t.Fatal(e)
+	}
+	if e = fresh.QueryRow(context.Background(), `SELECT count(*) FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE a.subject=$1`, d.subject).Scan(&sessions); e != nil {
+		t.Fatal(e)
+	}
+	if accounts != 0 || sessions != 0 {
+		t.Fatalf("fallback state: accounts=%d sessions=%d", accounts, sessions)
 	}
 }

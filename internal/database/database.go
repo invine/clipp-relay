@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 2
+const ExpectedRevision = 3
 
 type migration struct {
 	revision int
@@ -73,7 +73,7 @@ CREATE TABLE public.audit_events (
  account_id uuid NOT NULL
 );
 CREATE INDEX audit_events_expiry ON public.audit_events (occurred_at);
-REVOKE ALL ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events FROM PUBLIC`}}
+REVOKE ALL ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events FROM PUBLIC`}, {3, `CREATE INDEX portal_sessions_absolute_expiry ON public.portal_sessions (absolute_expires_at)`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

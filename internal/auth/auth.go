@@ -141,7 +141,8 @@ func (s *Server) bounded(w http.ResponseWriter, r *http.Request, next func(http.
 	w.Header().Set("Cache-Control", "no-store")
 	next(w, r.WithContext(ctx))
 }
-func (s *Server) allowAccount(id string) bool {
+func (s *Server) allowAccount(subject string) bool {
+	rateKey := base64.RawURLEncoding.EncodeToString(s.digest(s.CurrentPepper, "account-rate", googleIssuer+"\x00"+subject))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -155,9 +156,9 @@ func (s *Server) allowAccount(id string) bool {
 			return false
 		}
 	}
-	v := s.accountRates[id]
+	v := s.accountRates[rateKey]
 	ok := v.allow(now, 10, 20)
-	s.accountRates[id] = v
+	s.accountRates[rateKey] = v
 	return ok
 }
 func (s *Server) Handler() http.Handler {
@@ -271,6 +272,10 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401)
 		return
 	}
+	if !s.allowAccount(claims.Subject) {
+		fail(w, 429)
+		return
+	}
 	credential, e := opaque()
 	if e != nil {
 		fail(w, 503)
@@ -317,7 +322,6 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie(w, sessionCookie, credential, 0)
-	cookie(w, bindingCookie, "", -1)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -414,7 +418,7 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 			return k, nil
 		}
 	}
-	if len(s.keys) > 0 && now.Sub(s.lastKeyFetch) < time.Minute {
+	if s.keys[kid] == nil && len(s.keys) > 0 && now.Sub(s.lastKeyFetch) < time.Minute {
 		return nil, errors.New("key unavailable")
 	}
 	req, e := http.NewRequestWithContext(ctx, "GET", s.provider.KeysURL, nil)
@@ -509,13 +513,13 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 	}
 	for version := range s.Peppers {
 		digest := s.digest(version, "portal-session", c.Value)
-		var id, status, email string
+		var id, status, email, subject string
 		var generation int64
 		var storedVersion uint64
 		var storedCSRF []byte
-		e = s.Pool.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation`, digest, version).Scan(&id, &status, &email, &generation, &storedVersion, &storedCSRF)
+		e = s.Pool.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation`, digest, version).Scan(&id, &status, &email, &subject, &generation, &storedVersion, &storedCSRF)
 		if e == nil {
-			if !s.allowAccount(id) {
+			if !s.allowAccount(subject) {
 				return "", 0, "", "", "", errRateLimit
 			}
 			token := s.csrf(storedVersion, c.Value)
