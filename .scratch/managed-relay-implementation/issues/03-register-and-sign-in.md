@@ -4,7 +4,7 @@
 
 **Blocked by:** [02: Start a validated Go service](02-start-a-validated-go-service.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I2, I3, I6, I11.
@@ -36,12 +36,12 @@ burst 400 global and 10/s burst 20 resolved-account; no IP buckets.
 
 ## Acceptance criteria
 
-- [ ] Real PostgreSQL-backed browser flow displays Pending status in the accepted light shell; repeated/concurrent issuer-equivalent logins resolve one account.
-- [ ] Provider-double tests reject signature/claim/state/nonce/browser-binding errors, replay, oversize, key-cache expiry and unavailable verification.
-- [ ] Session idle/absolute expiry, restart persistence, cookie attributes, Origin/CSRF and independent-tab behavior are verified.
-- [ ] Logout invalidates only current portal session and clears its cookie; malformed/expired credentials reveal no sensitive identity detail.
-- [ ] Provider/HTTP/continuation saturation rejects boundedly with no unbounded queue or token logging; no DB lock spans Google I/O.
-- [ ] Secret canaries do not appear in logs, retained Google responses or unsafe cookies; tests prove DB outage cannot create fallback account/session state.
+- [x] Real PostgreSQL-backed browser flow displays Pending status in the accepted light shell; repeated/concurrent issuer-equivalent logins resolve one account.
+- [x] Provider-double tests reject signature/claim/state/nonce/browser-binding errors, replay, oversize, key-cache expiry and unavailable verification.
+- [x] Session idle/absolute expiry, restart persistence, cookie attributes, Origin/CSRF and independent-tab behavior are verified.
+- [x] Logout invalidates only current portal session and clears its cookie; malformed/expired credentials reveal no sensitive identity detail.
+- [x] Provider/HTTP/continuation saturation rejects boundedly with no unbounded queue or token logging; no DB lock spans Google I/O.
+- [x] Secret canaries do not appear in logs, retained Google responses or unsafe cookies; tests prove DB outage cannot create fallback account/session state.
 
 ## Demonstration
 
@@ -69,3 +69,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 02 resolution (`2b9a5f7`); assigned to a fresh isolated Go implementation agent. Resolution awaits integration review and acceptance evidence.
+
+- Resolved on 2026-09-27 after local implementation commits `f737a79` and `29b2537`, independent Spec and Standards review passes, and merge `5e9aa26` into the isolated Go integration branch. Go 1.27.1 darwin/arm64: `go test -count=1 ./...`, `go vet ./...`, `go build ./cmd/clipp-relay`, `git diff --check` all passed on the merged result. `bash scripts/smoke-postgres.sh` passed with disposable loopback, verified-TLS/SCRAM PostgreSQL 18.6 and 17.11, rejected PostgreSQL 16, and ran the deterministic OIDC browser integration tests against PostgreSQL 18. The smoke verified migration revision 3, live/health behavior, lost-DB behavior, and ownership guards. Tests cover real-cookie-jar independent tabs, concurrent canonical issuer spellings and one account/audit, bounded key refresh/provider/workflows/rates, persisted and expired sessions, logout, CSRF/Origin, post-provider DB outage with no fallback account/session, and secret canaries. Real Google remains a later qualification requirement; it was not run. No production target was used.
