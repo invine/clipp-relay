@@ -17,7 +17,7 @@ rather than silently changing policy or reviving an obsolete design.
 
 ## Current frontier
 
-- [Isolate Clipp relay lifecycle](issues/01-isolate-clipp-relay-lifecycle.md) is claimed and under integration review.
+- [Isolate Clipp relay lifecycle](issues/01-isolate-clipp-relay-lifecycle.md) is claimed; implementation is integrated and reviewed, with the baseline type-check gate still open.
 - [Start a validated Go service](issues/02-start-a-validated-go-service.md) is resolved after local integration and verification.
 - [Register and sign in](issues/03-register-and-sign-in.md) is claimed in an isolated Go worktree.
 
@@ -144,4 +144,3 @@ first.
 - Local ticket/source links and required contract/acceptance/demo fields checked.
 - Specification and decision map preserved byte-for-byte during publication.
 - No production implementation or acceptance test was performed by publishing this backlog.
-

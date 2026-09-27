@@ -26,10 +26,10 @@ not part of this behavior-preserving slice.
 
 ## Acceptance criteria
 
-- [ ] Existing startup/shutdown, reservation retry and exact Rendezvous tests pass through the public networking interface before and after the change.
-- [ ] Repeated start/stop and connection loss leave no duplicate timer/listener, leaked live relay work or duplicate registration.
-- [ ] Relay cleanup does not close direct peers, replace the host/Device Identity or change unrelated runtime behavior.
-- [ ] Characterization tests demonstrate signed records stay unchanged and membership/revocation checks are unaffected.
+- [x] Existing startup/shutdown, reservation retry and exact Rendezvous tests pass through the public networking interface before and after the change.
+- [x] Repeated start/stop and connection loss leave no duplicate timer/listener, leaked live relay work or duplicate registration.
+- [x] Relay cleanup does not close direct peers, replace the host/Device Identity or change unrelated runtime behavior.
+- [x] Characterization tests demonstrate signed records stay unchanged and membership/revocation checks are unaffected.
 - [ ] Shared/runtime type checks and npm check pass; document the narrow lifecycle interface and any temporary compatibility adapter.
 
 ## Demonstration
@@ -58,3 +58,6 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 for Clipp implementation agent; isolated starting commit `44ddde1`. Resolution awaits integration review and acceptance evidence.
+
+- Reviewed implementation `b2c3b6d` was merged into isolated Clipp integration branch as `c377c28`. Independent Spec and Standards reviews found no remaining material issue. On the merged result, Node.js 26.10.0/npm 11.19.1: full Jest 456/456 across 56 suites, lint, `git diff --check`, and the localhost pairing harness all passed. The same harness passed on an isolated `44ddde1` baseline after correcting its two stale `FaultTolerance` imports to the already installed package. Detailed commands and the stock Circuit Relay v2 ownership limit are in `packages/core/network/relay-lifecycle.md` in the Clipp integration worktree.
+- Completion remains pending the required shared/runtime type checks and `npm run check`: the pinned committed Clipp baseline `44ddde1` has no `check` script, and its broad direct TypeScript check already fails on existing errors. The merged result has no `RelayLifecycle` TypeScript errors, but the ticket cannot be marked resolved on the available baseline. The primary Clipp checkout and its unrelated uncommitted tooling changes remain untouched.
