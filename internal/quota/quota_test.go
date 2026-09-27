@@ -102,6 +102,18 @@ func TestConfirmedCreditIsSharedAndCommittedOnFunding(t *testing.T) {
 	}
 }
 
+func TestEnsureFundsWithoutInventingTraffic(t *testing.T) {
+	q, id, _ := fixture(t)
+	ready, err := q.Ensure(context.Background(), id, 0)
+	if err != nil || ready.Committed != BlockBytes || ready.Usable != BlockBytes {
+		t.Fatalf("funding without traffic = %+v, %v", ready, err)
+	}
+	charged, err := q.Take(context.Background(), id, 0, 17)
+	if err != nil || charged.Committed != BlockBytes || charged.Usable != BlockBytes-17 {
+		t.Fatalf("real endpoint charge = %+v, %v", charged, err)
+	}
+}
+
 func TestLostCommitReplyReconcilesSameReceipt(t *testing.T) {
 	q, id, _ := fixture(t)
 	q.afterCommit = func() error { q.afterCommit = nil; return errors.New("lost reply") }

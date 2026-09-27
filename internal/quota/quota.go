@@ -278,6 +278,16 @@ func (q *Quota) clockOK() bool {
 // local balance without funding. Reporters should call repeatedly for counts
 // larger than the remaining local credit.
 func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (Result, error) {
+	return q.take(ctx, id, generation, bytes, false)
+}
+
+// Ensure commits credit before relay permission is granted, without counting
+// a byte that has not been reported by the stock Circuit Relay endpoint.
+func (q *Quota) Ensure(ctx context.Context, id string, generation int64) (Result, error) {
+	return q.take(ctx, id, generation, 0, true)
+}
+
+func (q *Quota) take(ctx context.Context, id string, generation, bytes int64, ensure bool) (Result, error) {
 	unitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	select {
@@ -325,10 +335,10 @@ func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (R
 		b.deadline = time.Time{}
 		b.committed = 0
 	}
-	if bytes == 0 {
+	if bytes == 0 && !ensure {
 		return Result{b.committed, b.usable, b.week}, nil
 	}
-	if bytes > b.usable {
+	if bytes > b.usable || ensure && b.usable == 0 {
 		// A caller may not consume a partial block or pre-fund its next block.
 		if b.usable > 0 {
 			return Result{b.committed, b.usable, b.week}, ErrTemporary

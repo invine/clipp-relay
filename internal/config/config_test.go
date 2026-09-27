@@ -63,6 +63,24 @@ func TestLoadRejectsNoncanonicalOrigin(t *testing.T) {
 	}
 }
 
+func TestRelayTCPConfigurationRejectsIncompleteAddresses(t *testing.T) {
+	base := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/x","password_file":"/y","ca_file":"/z"},"secrets":{"google_client_id_file":"/a","google_client_secret_file":"/b","admin_allowlist_file":"/c","pepper_keyring_file":"/d"}}`
+	for _, entry := range []string{
+		`"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082","public_addresses":["/ip4/127.0.0.1"]}`,
+		`"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/0"}`,
+		`"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082","public_addresses":["/ip4/127.0.0.1/tcp/18082/udp/12"]}`,
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := strings.Replace(base, `"database":`, entry+`,"database":`, 1)
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.Load(path); err == nil {
+			t.Fatalf("accepted invalid relay TCP config: %s", entry)
+		}
+	}
+}
+
 func TestMissingSecretFailsWithoutPathDisclosure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

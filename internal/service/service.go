@@ -32,6 +32,7 @@ func New() *Service {
 }
 
 func (s *Service) SetPublicHandler(handler http.Handler) { s.public = handler }
+func (s *Service) SetReady(ready bool)                   { s.ready.Store(ready) }
 
 func (s *Service) PublicHandler() http.Handler {
 	if s.public != nil {
