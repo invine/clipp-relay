@@ -100,6 +100,8 @@ func VerifyServing(ctx context.Context, p *pgxpool.Pool) error {
 		return err
 	}
 	var privileged bool
+	// pg_shdepend covers extensions and other owned objects. Explicit owner
+	// catalog checks remain because initdb-pinned objects can lack dependencies.
 	err = conn.QueryRow(ctx, `
 SELECT
   EXISTS (
@@ -124,6 +126,14 @@ SELECT
     WHERE db.datname = current_database()
       AND (db.datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user)
         OR pg_has_role(db.datdba, 'MEMBER'))
+  )
+  OR EXISTS (
+    SELECT 1 FROM pg_shdepend ownership
+    JOIN pg_database db ON db.datname = current_database()
+    WHERE ownership.deptype = 'o'
+      AND ownership.dbid IN (0, db.oid)
+      AND (ownership.refobjid = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        OR pg_has_role(ownership.refobjid, 'MEMBER'))
   )
   OR EXISTS (
     SELECT 1 FROM pg_namespace ns

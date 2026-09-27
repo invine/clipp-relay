@@ -159,6 +159,28 @@ test "$(docker exec -e PGPASSWORD="$serving_pass" "$name" psql -At -h localhost 
 expect_ddl_role_rejected member-database-owner
 echo 'Inherited database ownership rejection passed'
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -c 'ALTER DATABASE clipp_ticket02_smoke OWNER TO postgres; REVOKE clipp_database_owner FROM clipp_serving; DROP ROLE clipp_database_owner' >/dev/null
+# An empty disposable extension has an owner but no table, routine, or type
+# that the enumerated ownership checks could otherwise catch.
+extension_dir=$(docker exec "$name" pg_config --sharedir | tr -d '\r')/extension
+printf "comment = 'Disposable ownership probe'\ndefault_version = '1.0'\nrelocatable = true\nsuperuser = false\n" > "$work/clipp_ownership_probe.control"
+printf '%s\n' '-- no member objects' > "$work/clipp_ownership_probe--1.0.sql"
+docker cp "$work/clipp_ownership_probe.control" "$name:$extension_dir/clipp_ownership_probe.control"
+docker cp "$work/clipp_ownership_probe--1.0.sql" "$name:$extension_dir/clipp_ownership_probe--1.0.sql"
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT CREATE ON DATABASE clipp_ticket02_smoke TO clipp_serving; GRANT CREATE ON SCHEMA public TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$serving_pass" "$name" psql -v ON_ERROR_STOP=1 -h localhost -U clipp_serving -d clipp_ticket02_smoke -c 'CREATE EXTENSION clipp_ownership_probe' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'REVOKE CREATE ON DATABASE clipp_ticket02_smoke FROM clipp_serving; REVOKE CREATE ON SCHEMA public FROM clipp_serving' >/dev/null
+test "$(docker exec -e PGPASSWORD="$serving_pass" "$name" psql -At -h localhost -U clipp_serving -d clipp_ticket02_smoke -c "SELECT has_database_privilege(current_database(),'CREATE'),has_schema_privilege('public','CREATE')")" = 'f|f'
+test "$(docker exec -e PGPASSWORD="$admin_pass" "$name" psql -At -U postgres -d clipp_ticket02_smoke -c "SELECT extowner::regrole::text FROM pg_extension WHERE extname='clipp_ownership_probe'")" = 'clipp_serving'
+expect_ddl_role_rejected extension-owner
+echo 'Extension ownership rejection passed'
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'DROP EXTENSION clipp_ownership_probe' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'CREATE ROLE clipp_extension_owner NOLOGIN; GRANT CREATE ON DATABASE clipp_ticket02_smoke TO clipp_extension_owner; GRANT CREATE ON SCHEMA public TO clipp_extension_owner' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'SET ROLE clipp_extension_owner; CREATE EXTENSION clipp_ownership_probe; RESET ROLE' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'REVOKE CREATE ON DATABASE clipp_ticket02_smoke FROM clipp_extension_owner; REVOKE CREATE ON SCHEMA public FROM clipp_extension_owner; GRANT clipp_extension_owner TO clipp_serving' >/dev/null
+test "$(docker exec -e PGPASSWORD="$serving_pass" "$name" psql -At -h localhost -U clipp_serving -d clipp_ticket02_smoke -c "SELECT has_database_privilege(current_database(),'CREATE'),has_schema_privilege('public','CREATE')")" = 'f|f'
+expect_ddl_role_rejected member-extension-owner
+echo 'Inherited extension ownership rejection passed'
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'DROP EXTENSION clipp_ownership_probe; REVOKE clipp_extension_owner FROM clipp_serving; DROP ROLE clipp_extension_owner' >/dev/null
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
 echo 'PostgreSQL 18 integration tests passed'
 
@@ -197,4 +219,4 @@ if "$work/clipp-relay" -command migrate -config "$work/wrong-major.json" > "$wor
   echo 'wrong PostgreSQL major unexpectedly accepted' >&2; exit 1
 fi
 grep -q 'unsupported PostgreSQL major' "$work/wrong-major.log"
-echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, table/database ownership rejection, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection'
+echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, table/database/extension ownership rejection, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection'

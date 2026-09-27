@@ -15,9 +15,10 @@ SCRAM-authenticated, separately provisioned roles. The migration identity
 needs CREATE on the target schema. The serving identity needs SELECT on
 `public.schema_migrations`, no persistent DDL authority, and an administrator
 set `temp_file_limit` of at most 64 MB. Revoke database `TEMPORARY` from PUBLIC
-and the serving role as well as schema CREATE; serving cannot own the database
-or application objects, or join an owning/DDL-capable role. Bootstrap and role
-provisioning are explicit operator steps; this binary never creates roles or databases.
+and the serving role as well as schema CREATE; serving cannot own the database,
+an extension, or other application objects, or join an owning/DDL-capable role.
+Bootstrap and role provisioning are explicit operator steps; this binary never
+creates roles or databases.
 
 ```sh
 go run ./cmd/clipp-relay -command migrate -config /path/to/config.json
