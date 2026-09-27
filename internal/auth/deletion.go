@@ -19,8 +19,8 @@ import (
 
 // DeletionJournal is the serving identity's complete storage authority. Its
 // implementation must create immutable events and replace only the head with
-// an If-Match precondition. No delete, overwrite, list, or backup operation is
-// available through this interface.
+// an If-Match precondition. It may list bounded event pages for verification,
+// but has no delete, overwrite, or backup operation.
 type DeletionJournal interface {
 	ReadHead(context.Context) (JournalHead, string, error)
 	CreateEvent(context.Context, string, []byte) error
@@ -56,6 +56,8 @@ type deletionEvent struct {
 }
 
 type uncertainDeletion struct{ operationID string }
+
+var errJournalTargetUncommitted = errors.New("journal target event not committed")
 
 // SetDeletionJournal requires an operator-supplied repository identity and
 // coverage floor. A nil/unqualified journal leaves deletion unavailable.
@@ -259,23 +261,35 @@ func (s *Server) ValidateDeletionJournal(ctx context.Context) error {
 }
 
 // verifyCommittedChain checks a fixed head snapshot from the operator's
-// attested floor. Uploads past that head are uncommitted and ignored. OCI pages
-// are bounded; the caller's deadline bounds the total scan.
+// attested floor. An immutable upload is not committed merely because its
+// sequence is below the head: failed head comparisons can leave orphan events
+// at the same sequence. Only a hash-linked path ending at the head is proof.
+// OCI pages and the reachable set are bounded; the caller bounds total work.
 func (s *Server) verifyCommittedChain(ctx context.Context, head JournalHead, targetSeq int64, targetHash string) error {
+	if head.Sequence == head.CoverageFloor {
+		if targetSeq != 0 {
+			return errJournalTargetUncommitted
+		}
+		return nil
+	}
 	expected := head.CoverageFloor + 1
-	previous := head.CoverageHash
+	reachable := map[string]bool{head.CoverageHash: false}
+	current := map[string]bool{}
 	cursor := ""
-	for expected <= head.Sequence {
+	lastName := ""
+scan:
+	for {
 		bounded, stop := context.WithTimeout(ctx, 5*time.Second)
 		names, next, err := s.deletionJournal.ListEvents(bounded, cursor)
 		stop()
-		if err != nil || len(names) == 0 {
+		if err != nil || len(names) > 250 {
 			return errors.New("journal coverage unavailable")
 		}
 		for _, name := range names {
-			if !strings.HasPrefix(name, "journal/events/") {
+			if !strings.HasPrefix(name, "journal/events/") || name <= lastName {
 				return errors.New("journal event name invalid")
 			}
+			lastName = name
 			key := strings.TrimPrefix(name, "journal/")
 			var sequence int64
 			if _, err := fmt.Sscanf(strings.TrimPrefix(key, "events/"), "%020d-", &sequence); err != nil {
@@ -285,7 +299,14 @@ func (s *Server) verifyCommittedChain(ctx context.Context, head JournalHead, tar
 				continue
 			}
 			if sequence > head.Sequence {
-				break
+				break scan
+			}
+			if sequence > expected {
+				if sequence != expected+1 || len(current) == 0 {
+					return errors.New("journal coverage gap or conflict")
+				}
+				reachable, current = current, map[string]bool{}
+				expected = sequence
 			}
 			if sequence != expected {
 				return errors.New("journal coverage gap or conflict")
@@ -294,35 +315,40 @@ func (s *Server) verifyCommittedChain(ctx context.Context, head JournalHead, tar
 			data, readErr := s.deletionJournal.ReadEvent(bounded, key)
 			stop()
 			if readErr != nil || len(data) > 4<<10 {
-				return errors.New("journal committed event unavailable")
+				continue
 			}
 			var event deletionEvent
-			if json.Unmarshal(data, &event) != nil || event.Format != 1 || event.Sequence != sequence || event.PreviousHash != previous || key != fmt.Sprintf("events/%020d-%s", sequence, event.EventID) {
-				return errors.New("journal committed event invalid")
+			if json.Unmarshal(data, &event) != nil || event.Format != 1 || event.Sequence != sequence || key != fmt.Sprintf("events/%020d-%s", sequence, event.EventID) {
+				continue
 			}
 			bare := event
 			bare.Hash = ""
 			encoded, _ := json.Marshal(bare)
 			digest := sha256.Sum256(encoded)
 			if event.Hash != hex.EncodeToString(digest[:]) {
-				return errors.New("journal committed event hash invalid")
+				continue
 			}
-			if sequence == targetSeq && event.Hash != targetHash {
-				return errors.New("journal target event not committed")
+			if included, ok := reachable[event.PreviousHash]; ok {
+				current[event.Hash] = included || sequence == targetSeq && event.Hash == targetHash
+				if len(current) > 2048 {
+					return errors.New("journal event fanout exceeds bound")
+				}
 			}
-			previous = event.Hash
-			expected++
 		}
-		if expected > head.Sequence {
+		if next == "" {
 			break
 		}
-		if next == "" || next <= cursor {
-			return errors.New("journal coverage incomplete")
+		if next <= cursor {
+			return errors.New("journal cursor did not advance")
 		}
 		cursor = next
 	}
-	if previous != head.Hash {
+	included, ok := current[head.Hash]
+	if !ok || expected != head.Sequence {
 		return errors.New("journal head hash not covered")
+	}
+	if targetSeq != 0 && !included {
+		return errJournalTargetUncommitted
 	}
 	return nil
 }
@@ -345,17 +371,40 @@ func (s *Server) eventFor(ctx context.Context, x pendingDeletion, h JournalHead)
 	if h.Sequence == int64(^uint64(0)>>1) {
 		return deletionEvent{}, nil, errors.New("journal sequence exhausted")
 	}
-	event := deletionEvent{Format: 1, AccountID: x.Account, EventID: x.ID, Sequence: h.Sequence + 1, PreviousHash: h.Hash, AdmittedAt: x.Admitted.UTC()}
-	bare, _ := json.Marshal(event)
-	digest := sha256.Sum256(bare)
-	event.Hash = hex.EncodeToString(digest[:])
-	data, _ := json.Marshal(event)
+	event, data, digest := buildDeletionEvent(x, h)
 	if len(data) > 4<<10 {
 		return event, nil, errors.New("deletion event too large")
 	}
 	tag, err := s.Pool.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence IS NULL AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration)
 	if err != nil || tag.RowsAffected() != 1 {
 		return event, nil, errors.New("deletion event preparation uncertain")
+	}
+	return event, data, nil
+}
+
+func buildDeletionEvent(x pendingDeletion, h JournalHead) (deletionEvent, []byte, [32]byte) {
+	event := deletionEvent{Format: 1, AccountID: x.Account, EventID: x.ID, Sequence: h.Sequence + 1, PreviousHash: h.Hash, AdmittedAt: x.Admitted.UTC()}
+	bare, _ := json.Marshal(event)
+	digest := sha256.Sum256(bare)
+	event.Hash = hex.EncodeToString(digest[:])
+	data, _ := json.Marshal(event)
+	return event, data, digest
+}
+
+// A failed conditional head replacement may leave an immutable orphan upload.
+// Once a later committed head proves that sequence belongs to another event,
+// the same durable deletion operation can prepare a new event on that head.
+func (s *Server) rebaseDeletionEvent(ctx context.Context, x pendingDeletion, h JournalHead) (deletionEvent, []byte, error) {
+	if x.Sequence == nil || x.Generation == nil || *x.Generation != h.MaintenanceGeneration || h.Sequence == int64(^uint64(0)>>1) {
+		return deletionEvent{}, nil, errors.New("deletion event cannot rebase")
+	}
+	event, data, digest := buildDeletionEvent(x, h)
+	if len(data) > 4<<10 {
+		return deletionEvent{}, nil, errors.New("deletion event too large")
+	}
+	tag, err := s.Pool.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence=$6 AND event_hash=$7 AND journal_generation=$8 AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration, *x.Sequence, x.Hash, *x.Generation)
+	if err != nil || tag.RowsAffected() != 1 {
+		return deletionEvent{}, nil, errors.New("deletion event rebase uncertain")
 	}
 	return event, data, nil
 }
@@ -438,41 +487,44 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 	if err != nil {
 		return err
 	}
-	key := fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID)
-	if head.Sequence == event.Sequence && head.Hash == event.Hash {
-		if err = s.proveEvent(ctx, key, data); err != nil {
-			return err
-		}
-	} else if head.Sequence > event.Sequence {
-		if err = s.verifyCommittedChain(ctx, head, event.Sequence, event.Hash); err != nil {
-			return err
-		}
-		if err = s.proveEvent(ctx, key, data); err != nil {
-			return err
-		}
-	} else {
-		if head.Sequence != event.Sequence-1 || head.Hash != event.PreviousHash || (x.Generation != nil && head.MaintenanceGeneration != *x.Generation) {
-			return errors.New("journal chain or maintenance generation changed")
-		}
-		bounded, stop := context.WithTimeout(ctx, 5*time.Second)
-		_ = s.deletionJournal.CreateEvent(bounded, key, data)
-		stop()
-		if err = s.proveEvent(ctx, key, data); err != nil {
-			return err
-		}
-		next := head
-		next.Sequence = event.Sequence
-		next.Hash = event.Hash
-		bounded, stop = context.WithTimeout(ctx, 5*time.Second)
-		replaceErr := s.deletionJournal.ReplaceHead(bounded, etag, next)
-		stop()
-		actual, _, readErr := s.readHead(ctx)
-		if readErr != nil || actual.Sequence != next.Sequence || actual.Hash != next.Hash || actual.MaintenanceGeneration != next.MaintenanceGeneration || actual.RepositoryID != next.RepositoryID || actual.CoverageFloor != next.CoverageFloor {
-			if replaceErr != nil {
-				return errors.New("journal head acknowledgement unresolved")
+	if head.Sequence >= event.Sequence {
+		err = s.verifyCommittedChain(ctx, head, event.Sequence, event.Hash)
+		if err == nil {
+			if err = s.proveEvent(ctx, fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID), data); err != nil {
+				return err
 			}
-			return errors.New("journal head proof failed")
+			return s.finalizeDeletion(ctx, x)
 		}
+		if !errors.Is(err, errJournalTargetUncommitted) {
+			return err
+		}
+		event, data, err = s.rebaseDeletionEvent(ctx, x, head)
+		if err != nil {
+			return err
+		}
+	}
+	if head.Sequence != event.Sequence-1 || head.Hash != event.PreviousHash || (x.Generation != nil && head.MaintenanceGeneration != *x.Generation) {
+		return errors.New("journal chain or maintenance generation changed")
+	}
+	key := fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID)
+	bounded, stop := context.WithTimeout(ctx, 5*time.Second)
+	_ = s.deletionJournal.CreateEvent(bounded, key, data)
+	stop()
+	if err = s.proveEvent(ctx, key, data); err != nil {
+		return err
+	}
+	next := head
+	next.Sequence = event.Sequence
+	next.Hash = event.Hash
+	bounded, stop = context.WithTimeout(ctx, 5*time.Second)
+	replaceErr := s.deletionJournal.ReplaceHead(bounded, etag, next)
+	stop()
+	actual, _, readErr := s.readHead(ctx)
+	if readErr != nil || actual.Sequence != next.Sequence || actual.Hash != next.Hash || actual.MaintenanceGeneration != next.MaintenanceGeneration || actual.RepositoryID != next.RepositoryID || actual.CoverageFloor != next.CoverageFloor {
+		if replaceErr != nil {
+			return errors.New("journal head acknowledgement unresolved")
+		}
+		return errors.New("journal head proof failed")
 	}
 	return s.finalizeDeletion(ctx, x)
 }

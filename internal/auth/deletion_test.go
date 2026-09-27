@@ -363,6 +363,55 @@ func TestCommittedDeletionRecoversAfterHeadAdvancesAndValidatesCoverage(t *testi
 	j.mu.Unlock()
 }
 
+func TestUncommittedUploadLosesSequenceAndRebasesWithoutBlockingStartup(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	zero := strings.Repeat("0", 64)
+	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}, failBeforeHeadOnce: true}
+	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
+	locations := make([]string, 2)
+	owners := make([]*http.Cookie, 2)
+	for i := range locations {
+		subject := "orphan-upload-" + strconv.Itoa(i) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		owner := loginAs(t, s, d, subject, "orphan@example.test", "")
+		csrf := csrfFrom(t, s, owner)
+		out := portalRequest(s, "POST", "/auth/delete", owner, url.Values{"csrf": {csrf}}, c.PortalOrigin)
+		if out.Code != http.StatusAccepted {
+			t.Fatalf("admission %d: %d", i, out.Code)
+		}
+		locations[i] = out.Header().Get("Location")
+		owners[i] = owner
+	}
+	if err := s.ReconcileOneDeletion(context.Background()); err == nil {
+		t.Fatal("first head replacement unexpectedly committed")
+	}
+	if err := s.ReconcileOneDeletion(context.Background()); err != nil {
+		t.Fatalf("second deletion did not commit after first upload: %v", err)
+	}
+	if err := s.ValidateDeletionJournal(context.Background()); err != nil {
+		t.Fatalf("valid committed head rejected because of orphan upload: %v", err)
+	}
+	time.Sleep(time.Second)
+	if err := s.ReconcileOneDeletion(context.Background()); err != nil {
+		t.Fatalf("earlier deletion did not rebase after losing sequence: %v", err)
+	}
+	if err := s.ValidateDeletionJournal(context.Background()); err != nil {
+		t.Fatalf("rebased committed chain rejected: %v", err)
+	}
+	for i, location := range locations {
+		if got := portalRequest(s, "GET", location, owners[i], nil, ""); got.Code != http.StatusOK {
+			t.Fatalf("deletion %d never completed: %d", i, got.Code)
+		}
+	}
+	j.mu.Lock()
+	sequence, eventCount := j.head.Sequence, len(j.events)
+	j.mu.Unlock()
+	if sequence != 2 || eventCount != 3 {
+		t.Fatalf("head sequence %d, immutable events %d; want two commits and one orphan", sequence, eventCount)
+	}
+}
+
 func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
