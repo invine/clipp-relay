@@ -4,7 +4,7 @@
 
 **Blocked by:** [11: Rediscover and drain an ephemeral relay](11-rediscover-and-drain-an-ephemeral-relay.md).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I9, I11.
@@ -56,3 +56,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Claimed centrally on 2026-09-27 after ticket 11 resolution (`a9e941a`); assigned to a fresh isolated Go/Helm implementation agent. Local chart, schema, rendering and disposable database work can proceed without an external cluster. Authorized isolated installation and live ingress/network checks require operator-provided prerequisites; resolution awaits those and integrated review/evidence.
