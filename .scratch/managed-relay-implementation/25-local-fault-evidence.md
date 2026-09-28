@@ -4,15 +4,19 @@ Scope: isolated `codex/managed-relay-25` worktree, macOS Darwin 25.4.0 ARM64,
 Go 1.27.1, Docker Engine 29.8.0. The fixture uses official `postgres:18` and
 `postgres:17` disposable containers bound to `127.0.0.1`, generated TLS and
 SCRAM roles, a local OCI protocol fixture, and the production fixed limit
-profile. No capacity override or external load target was used. PG18 runs the
-real SQL tests; PG17 is verified for migration/startup, TLS and role policy.
+profile. The slow-reader test alone wraps the production public HTTP handler
+in a four-connection local listener; all handler limits stay at production
+values. No external load target was used. PG18 and PG17 run Quota faults.
 
 Commands executed (all passed unless stated):
 
 ```sh
 GOCACHE=/private/tmp/clipp-go-cache bash scripts/smoke-postgres.sh
 CLIPP_FAULT_RACE=1 CLIPP_FAULT_RACE_ONLY=1 GOCACHE=/private/tmp/clipp-go-cache bash scripts/smoke-postgres.sh
+CLIPP_FAULT_PG17_QUOTA=1 CLIPP_FAULT_RACE_ONLY=1 GOCACHE=/private/tmp/clipp-go-cache bash scripts/smoke-postgres.sh
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay ./internal/service ./internal/publication
+GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/service -run 'Test(DefaultPublicSocketCapAndRecovery|SlowReadersRespectSmallSocketProfile)$' -v
+GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run 'Test(RelayAuthConnectionRateRejectsAndRecovers|RendezvousConnectionRateRejectsAndRecovers)$' -v
 GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...
 GOCACHE=/private/tmp/clipp-go-cache go vet ./...
 gofmt -l cmd internal
@@ -22,7 +26,7 @@ git diff --check
 The first race attempt was **not a test result**: the filesystem sandbox denied
 loopback listeners (`bind: operation not permitted`). The same command passed
 with local listener permission. Docker commands likewise needed local daemon
-permission. Both fixture runs removed their own containers and secrets.
+permission. All fixture runs removed their own containers and secrets.
 
 ## Acceptance mapping
 
@@ -35,9 +39,10 @@ permission. Both fixture runs removed their own containers and secrets.
    `TestInvalidatedWorkerCannotInstallLateReceipt`,
    `TestLockWaitCrossingMondayUsesAfterLockWeek`,
    `TestCancelledCallerCannotInstallConfirmedCredit`, and
-   `TestDatabaseOutageOnlyAllowsConfirmedLocalCredit`. The smoke process also
-   paused PG18 and checked local health. PG17 did not run Quota fault tests;
-   process-kill at every individual SQL/commit boundary was not run.
+   `TestDatabaseOutageOnlyAllowsConfirmedLocalCredit`. The full Quota package
+   passed on PG17 and PG18. The smoke process also paused PG18 and checked
+   local health. Process-kill at every individual SQL/commit boundary was not
+   run.
 2. **Clock boundaries and recovery — partial pass.** PG18 tests:
    `TestSkewAndUncertaintyCloseConfirmedCredit`,
    `TestClockWarningIntervalIsVisibleWithoutClosingCredit`,
@@ -77,12 +82,18 @@ permission. Both fixture runs removed their own containers and secrets.
    `TestResolvedAccountRateIsBounded`, and
    `TestPoolSaturationBoundsQuotaAdmission` passed. Relay race tests include
    `TestRendezvousRejectsOversizeAndExtraFrames`,
+   `TestRelayAuthConnectionRateRejectsAndRecovers`,
+   `TestRendezvousConnectionRateRejectsAndRecovers`,
    `TestTransportMemoryPressureRejectsAndRecovers`,
    `TestWebSocketNegotiationTimeoutAndStockWebRTCInFlightBound`, and
-   `TestIncompleteWebRTCSetupReleasesResourcesWithinTenSeconds`. The 512 socket
-   cap, slow HTTP readers, simultaneous saturation of every auth/Rendezvous/
-   session/DB/RM gate, and quantitative recovery under an attacker workload
-   were not run.
+   `TestIncompleteWebRTCSetupReleasesResourcesWithinTenSeconds`.
+   `TestDefaultPublicSocketCapAndRecovery` held 512 real incomplete-header
+   sockets, rejected the 513th, then served a new request after release.
+   `TestSlowReadersRespectSmallSocketProfile` held four responses at slow
+   readers and rejected another socket. Simultaneous saturation of every
+   auth/Rendezvous/session/DB/RM gate was not run. Auth, Quota and
+   `database.Runtime` currently use separate 64-unit gates; this run does
+   not prove one process-wide 64-unit DB admission bound.
 6. **Resolved RM inventory and accounting — partial pass.**
    `TestEveryEnabledScopeMatchesAcceptedFixedLimits` checks every accepted
    named scope and zero/block-all values; `TestRelayEnablesOnlyRequiredTCPProtocols`
@@ -100,8 +111,16 @@ permission. Both fixture runs removed their own containers and secrets.
    `TestCancelledWaiterCannotUseLocalCredit`,
    `TestSuspensionWaitsForAccountRowLockAndRevokesRelayCredential`,
    `TestConcurrentRegistrationImportsRetainedUsageOnce`, and
-   `TestConcurrentEquivalentLoginsCreateOneAccount`. Cleanup under race and
-   measured RSS/FD/goroutine high-water and post-recovery counts were not run.
+   `TestConcurrentEquivalentLoginsCreateOneAccount`,
+   `TestMaintenanceKeepsLiveGrantAndRetentionBoundaries`, and
+   `TestCleanupErrorDoesNotStarveLaterRetentionClass`. The 512-socket test under
+   race detection sampled before/at-limit/after: goroutines 2/520/4, open FDs
+   5/1033/5, Go heap bytes 349888/6472360/6667664, and process RSS KiB
+   30592/93648/96288. The highest observed RSS was 96288 KiB after socket
+   release; these three points are not a continuous high-water trace. Client
+   and server ran in one process, so FDs include both sides; heap after is not
+   a retained-heap measurement. Broader concurrent cleanup/revocation stress
+   was not run.
    `TestDeletionMetricsExposeOnlyBoundedAggregateSignals` and
    `TestPrivateHealthSurvivesSaturatedScrapeGate` check bounded diagnostics
    and health isolation, but do not establish reserved fairness.

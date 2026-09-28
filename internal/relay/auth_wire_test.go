@@ -131,6 +131,36 @@ func TestDelayedExtraAuthFrameIsRejected(t *testing.T) {
 	}
 }
 
+func TestRelayAuthConnectionRateRejectsAndRecovers(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("burst admission: %s", response)
+		}
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"code":"rate_limited"`) {
+		t.Fatalf("burst overload: %s", response)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if response := authResponse(t, ctx, h, s.Host.ID(), "authorized"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("rate recovery: %s", response)
+	}
+}
+
 func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 	for _, tc := range []struct {
 		name string
