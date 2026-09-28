@@ -364,8 +364,8 @@ func TestHiddenAccountBatchDoesNotMonopolizeOtherAccounts(t *testing.T) {
 	c, m, db := fixture(t)
 	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
-	oldID := "c9d3edce-e472-4a0d-b8ed-e45e20b753c1"
-	newID := "042d4989-6695-4b1f-901b-2e9defb53903"
+	oldID := "042d4989-6695-4b1f-901b-2e9defb53903"
+	newID := "c9d3edce-e472-4a0d-b8ed-e45e20b753c1"
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at)
 VALUES($1,'https://accounts.google.com','fair-old','old@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '92 days'),
 ($2,'https://accounts.google.com','fair-new','new@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '91 days')`, oldID, newID)
@@ -405,5 +405,43 @@ VALUES(decode(lpad(to_hex(5001),64,'0'),'hex'),$1,$2,0,decode(repeat('cd',32),'h
 	}
 	if newer != 0 || olderChildren == 0 {
 		t.Fatalf("large account monopolized cleanup: newer=%d older children=%d", newer, olderChildren)
+	}
+}
+
+func TestHiddenAccountCursorPagesAcrossMoreThanOneBatch(t *testing.T) {
+	c, m, db := fixture(t)
+	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	ctx := context.Background()
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at)
+SELECT gen_random_uuid(),'https://accounts.google.com','fair-page-'||n,'page@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '91 days'
+FROM generate_series(1,257) n`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE subject LIKE 'fair-page-%'`)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions(credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+SELECT decode(md5(subject)||md5(subject),'hex'),$1,id,0,decode(repeat('ab',32),'hex'),clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 minutes',clock_timestamp()+interval '12 hours'
+FROM public.accounts WHERE subject LIKE 'fair-page-%'`, s.CurrentPepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id IN (SELECT id FROM public.accounts WHERE subject LIKE 'fair-page-%')`)
+	maintainCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.Maintain(maintainCtx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(12 * time.Second)
+	var remaining int
+	for time.Now().Before(deadline) {
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.accounts WHERE subject LIKE 'fair-page-%'`).Scan(&remaining); err != nil {
+			t.Fatal(err)
+		}
+		if remaining == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if remaining != 0 {
+		t.Fatalf("cursor did not visit all 257 eligible accounts: %d remain", remaining)
 	}
 }
