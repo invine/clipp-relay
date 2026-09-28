@@ -4,7 +4,7 @@
 
 **Blocked by:** [09: Revoke access and change live quotas](09-revoke-access-and-change-live-quotas.md); [11: Rediscover and drain an ephemeral relay](11-rediscover-and-drain-an-ephemeral-relay.md); [17: Enforce retention and pepper rotation](17-enforce-retention-and-pepper-rotation.md).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I3–I6, I8, I11, I12; Testing.
@@ -56,3 +56,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Claimed centrally on 2026-09-28 after all predecessors were resolved, including ticket 17 at `fdf9db2`. Assigned to a fresh-context implementation agent in a separate Go worktree for `/implement`, TDD, review and local commits. Resolution requires integrated fault and overload evidence; no unapproved external target or publication is authorized.
