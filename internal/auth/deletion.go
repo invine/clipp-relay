@@ -101,7 +101,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var subject string
-	if s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, id).Scan(&subject) != nil {
+	if s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, id).Scan(&subject) != nil {
 		fail(w, 409)
 		return
 	}
@@ -112,10 +112,11 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	var admitted, uncertain bool
 	var closeConnections func()
-	_ = s.withIdentityGuard(subject, func() error {
-		if !s.WithAccountGuards(r.Context(), []string{id}, func() {
-			ctx := r.Context()
-			tx, err := s.Pool.Begin(ctx)
+	guardEntered := false
+	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
+		guardEntered = true
+		if !s.WithAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
+			tx, err := s.db.Begin(ctx)
 			if err != nil {
 				fail(w, 503)
 				return
@@ -176,6 +177,9 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if guardErr != nil && !guardEntered {
+		fail(w, 503)
+	}
 	if !admitted {
 		return
 	}
@@ -200,7 +204,7 @@ func (s *Server) deletionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var completed *time.Time
-	err := s.Pool.QueryRow(r.Context(), `SELECT completed_at FROM public.deletion_operations WHERE id=$1`, id).Scan(&completed)
+	err := s.db.QueryRow(r.Context(), `SELECT completed_at FROM public.deletion_operations WHERE id=$1`, id).Scan(&completed)
 	if err == pgx.ErrNoRows {
 		fail(w, 404)
 		return
@@ -230,7 +234,7 @@ type pendingDeletion struct {
 
 func (s *Server) nextDeletion(ctx context.Context) (pendingDeletion, error) {
 	var x pendingDeletion
-	err := s.Pool.QueryRow(ctx, `SELECT id,account_id,admitted_at,event_sequence,event_hash,event_data,journal_generation,attempts FROM public.deletion_operations WHERE completed_at IS NULL AND next_attempt_at<=clock_timestamp() ORDER BY next_attempt_at,admitted_at,id LIMIT 1`).Scan(&x.ID, &x.Account, &x.Admitted, &x.Sequence, &x.Hash, &x.Data, &x.Generation, &x.Attempts)
+	err := s.db.QueryRow(ctx, `SELECT id,account_id,admitted_at,event_sequence,event_hash,event_data,journal_generation,attempts FROM public.deletion_operations WHERE completed_at IS NULL AND next_attempt_at<=clock_timestamp() ORDER BY next_attempt_at,admitted_at,id LIMIT 1`).Scan(&x.ID, &x.Account, &x.Admitted, &x.Sequence, &x.Hash, &x.Data, &x.Generation, &x.Attempts)
 	return x, err
 }
 
@@ -375,7 +379,7 @@ func (s *Server) eventFor(ctx context.Context, x pendingDeletion, h JournalHead)
 	if len(data) > 4<<10 {
 		return event, nil, errors.New("deletion event too large")
 	}
-	tag, err := s.Pool.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence IS NULL AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration)
+	tag, err := s.db.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence IS NULL AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration)
 	if err != nil || tag.RowsAffected() != 1 {
 		return event, nil, errors.New("deletion event preparation uncertain")
 	}
@@ -402,7 +406,7 @@ func (s *Server) rebaseDeletionEvent(ctx context.Context, x pendingDeletion, h J
 	if len(data) > 4<<10 {
 		return deletionEvent{}, nil, errors.New("deletion event too large")
 	}
-	tag, err := s.Pool.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence=$6 AND event_hash=$7 AND journal_generation=$8 AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration, *x.Sequence, x.Hash, *x.Generation)
+	tag, err := s.db.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence=$6 AND event_hash=$7 AND journal_generation=$8 AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration, *x.Sequence, x.Hash, *x.Generation)
 	if err != nil || tag.RowsAffected() != 1 {
 		return deletionEvent{}, nil, errors.New("deletion event rebase uncertain")
 	}
@@ -442,7 +446,7 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 		// Durable backoff is fair across pending operations and cannot be bypassed
 		// by manual calls to this same entry point.
 		retryCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		_, _ = s.Pool.Exec(retryCtx, `UPDATE public.deletion_operations SET attempts=attempts+1,next_attempt_at=clock_timestamp()+make_interval(secs=>$2) WHERE id=$1 AND completed_at IS NULL`, x.ID, retrySeconds(x.ID, x.Attempts))
+		_, _ = s.db.Exec(retryCtx, `UPDATE public.deletion_operations SET attempts=attempts+1,next_attempt_at=clock_timestamp()+make_interval(secs=>$2) WHERE id=$1 AND completed_at IS NULL`, x.ID, retrySeconds(x.ID, x.Attempts))
 		stop()
 	} else {
 		s.deletionCompleted.Add(1)
@@ -530,7 +534,7 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 }
 
 func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error {
-	tx, err := s.Pool.Begin(ctx)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -592,7 +596,7 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	checkCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer stop()
 	var complete bool
-	checkErr := s.Pool.QueryRow(checkCtx, `SELECT d.completed_at IS NOT NULL AND a.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_deleted') FROM public.deletion_operations d JOIN public.accounts a ON a.id=d.account_id WHERE d.id=$1`, x.ID).Scan(&complete)
+	checkErr := s.db.QueryRow(checkCtx, `SELECT d.completed_at IS NOT NULL AND a.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_deleted') FROM public.deletion_operations d JOIN public.accounts a ON a.id=d.account_id WHERE d.id=$1`, x.ID).Scan(&complete)
 	if checkErr == nil && complete {
 		return nil
 	}
@@ -666,7 +670,7 @@ type DeletionSignals struct {
 func (s *Server) SampleDeletionSignals(ctx context.Context) (DeletionSignals, error) {
 	var count int
 	var ageSeconds float64
-	if err := s.Pool.QueryRow(ctx, `SELECT count(*),COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-min(admitted_at)),0) FROM public.deletion_operations WHERE completed_at IS NULL`).Scan(&count, &ageSeconds); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT count(*),COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-min(admitted_at)),0) FROM public.deletion_operations WHERE completed_at IS NULL`).Scan(&count, &ageSeconds); err != nil {
 		return DeletionSignals{}, err
 	}
 	out := DeletionSignals{Pending: count, Completed: s.deletionCompleted.Load(), Retried: s.deletionRetried.Load()}

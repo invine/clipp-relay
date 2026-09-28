@@ -85,7 +85,7 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 	var verified bool
 	var hd *string
 	var authenticated time.Time
-	err = s.Pool.QueryRow(r.Context(), `SELECT a.email,a.email_verified,a.hosted_domain,ps.google_authenticated_at
+	err = s.db.QueryRow(r.Context(), `SELECT a.email,a.email_verified,a.hosted_domain,ps.google_authenticated_at
 FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id
 WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation
 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, id, s.sessionDigest(r, version), version).Scan(&email, &verified, &hd, &authenticated)
@@ -242,7 +242,7 @@ func planRequestDigest(actorID, name, reason string, bytes, sessions int64) [32]
 func (s *Server) planCreateCommitted(ctx context.Context, id string, digest [32]byte) bool {
 	var stored []byte
 	var audited bool
-	err := s.Pool.QueryRow(ctx, `SELECT p.create_request_digest, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.plan_id=p.id AND e.event='plan_created') FROM public.quota_plans p WHERE p.id=$1`, id).Scan(&stored, &audited)
+	err := s.db.QueryRow(ctx, `SELECT p.create_request_digest, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.plan_id=p.id AND e.event='plan_created') FROM public.quota_plans p WHERE p.id=$1`, id).Scan(&stored, &audited)
 	return err == nil && audited && subtle.ConstantTimeCompare(stored, digest[:]) == 1
 }
 
@@ -273,7 +273,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	rows, err := s.Pool.Query(r.Context(), `SELECT status,count(*) FROM public.accounts WHERE deletion_started_at IS NULL GROUP BY status`)
+	rows, err := s.db.Query(r.Context(), `SELECT status,count(*) FROM public.accounts WHERE deletion_started_at IS NULL GROUP BY status`)
 	if err != nil {
 		fail(w, 503)
 		return
@@ -303,7 +303,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	rows, err = s.Pool.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
+	rows, err = s.db.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
 	if err != nil {
 		fail(w, 503)
 		return
@@ -329,7 +329,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	}
 	if data.Selected != "" {
 		var selected adminAccountRow
-		err = s.Pool.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.WeeklyOverride, &selected.SessionOverride, &selected.Revision)
+		err = s.db.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.WeeklyOverride, &selected.SessionOverride, &selected.Revision)
 		if err == pgx.ErrNoRows {
 			fail(w, 404)
 			return
@@ -340,7 +340,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		}
 		data.SelectedAccount = &selected
 	}
-	rows, err = s.Pool.Query(r.Context(), `SELECT id,name,weekly_bytes,sessions,revision,archived_at IS NOT NULL FROM public.quota_plans WHERE id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, planAfter, limit+1)
+	rows, err = s.db.Query(r.Context(), `SELECT id,name,weekly_bytes,sessions,revision,archived_at IS NOT NULL FROM public.quota_plans WHERE id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, planAfter, limit+1)
 	if err != nil {
 		fail(w, 503)
 		return
@@ -398,25 +398,30 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	var uncertain bool
 	var securitySubject string
 	var closeConnections func()
-	update := func() {
-		s.adminAccountUpdate(w, r, actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
+	update := func(unitCtx context.Context) {
+		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
 		if applied != nil && s.accountChanged != nil {
 			closeConnections = s.accountChanged(*applied)
 		}
 	}
 	if spec.security {
 		var subject string
-		if e := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, target).Scan(&subject); e != nil {
+		if e := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, target).Scan(&subject); e != nil {
 			fail(w, 503)
 			return
 		}
 		securitySubject = subject
-		_ = s.withIdentityGuard(subject, func() error {
-			if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, update) {
+		guardEntered := false
+		guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
+			guardEntered = true
+			if !s.WithAccountGuards(unitCtx, []string{actor.id, target}, update) {
 				fail(w, 503)
 			}
 			return nil
 		})
+		if guardErr != nil && !guardEntered {
+			fail(w, 503)
+		}
 	} else if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, update) {
 		fail(w, 503)
 	}
@@ -434,7 +439,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action string, spec accountActionSpec, plan, subject string, applied **AccountChange, uncertain *bool) {
 	ctx := r.Context()
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.db.Begin(ctx)
 	if e != nil {
 		fail(w, 503)
 		return
@@ -628,7 +633,7 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.db.Begin(ctx)
 	if e != nil {
 		fail(w, 503)
 		return
@@ -704,7 +709,7 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.db.Begin(ctx)
 	if e != nil {
 		fail(w, 503)
 		return

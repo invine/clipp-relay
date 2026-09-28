@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -44,6 +45,98 @@ func fixture(t *testing.T) (config.Config, config.Material, config.Material) {
 		t.Fatal(e)
 	}
 	return c, mm, sm
+}
+
+// The serving runtime owns one bounded work budget even when independent
+// account, quota and cleanup callers enter it at the same time.
+func TestRuntimeWorkAdmissionIsSharedAndRejectsOverflow(t *testing.T) {
+	runtime := NewRuntime(nil)
+	entered := make(chan struct{}, 64)
+	release := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 64 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := runtime.WithUnit(context.Background(), func(ctx context.Context) error {
+				entered <- struct{}{}
+				<-release
+				return ctx.Err()
+			}); err != nil && err != context.DeadlineExceeded {
+				t.Errorf("admitted work: %v", err)
+			}
+		}()
+	}
+	for range 64 {
+		<-entered
+	}
+	start := time.Now()
+	if err := runtime.WithUnit(context.Background(), func(context.Context) error {
+		t.Fatal("overflow work entered")
+		return nil
+	}); err == nil || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("overflow admission was not promptly rejected: %v", err)
+	}
+	close(release)
+	workers.Wait()
+}
+
+func TestRuntimeRowRowsAndTransactionRetainWorkUntilCompletion(t *testing.T) {
+	c, _, sm := fixture(t)
+	p, err := NewPool(context.Background(), c, sm, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	runtime := NewRuntime(p)
+	entered := make(chan struct{}, 63)
+	release := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 63 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			_ = runtime.WithUnit(context.Background(), func(context.Context) error {
+				entered <- struct{}{}
+				<-release
+				return nil
+			})
+		}()
+	}
+	defer func() { close(release); workers.Wait() }()
+	for range 63 {
+		<-entered
+	}
+	ctx := context.Background()
+	assertFull := func() {
+		var n int
+		if err := runtime.QueryRow(ctx, "SELECT 1").Scan(&n); !errors.Is(err, ErrWorkUnavailable) {
+			t.Fatalf("work admitted while a result or transaction owned the last slot: %v", err)
+		}
+	}
+	tx, err := runtime.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFull()
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := runtime.Query(ctx, "SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFull()
+	rows.Close()
+	row := runtime.QueryRow(ctx, "SELECT 1")
+	assertFull()
+	var n int
+	if err := row.Scan(&n); err != nil || n != 1 {
+		t.Fatalf("row did not complete: %d %v", n, err)
+	}
+	if err := runtime.QueryRow(ctx, "SELECT 1").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("released work did not recover: %d %v", n, err)
+	}
 }
 
 func TestTLSWrongHostnameAndUntrustedCAFailClosed(t *testing.T) {

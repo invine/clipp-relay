@@ -492,30 +492,3 @@ func migrate(ctx context.Context, p *pgxpool.Pool, steps []migration) error {
 	}
 	return nil
 }
-
-type Runtime struct {
-	Pool      *pgxpool.Pool
-	admission chan struct{}
-}
-
-func NewRuntime(p *pgxpool.Pool) *Runtime {
-	return &Runtime{Pool: p, admission: make(chan struct{}, 64)}
-}
-func (r *Runtime) Unit(parent context.Context, work func(context.Context, *pgxpool.Conn) error) error {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	defer cancel()
-	select {
-	case r.admission <- struct{}{}:
-		defer func() { <-r.admission }()
-	case <-ctx.Done():
-		return errors.New("database work admission unavailable")
-	}
-	acquireCtx, acquireCancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer acquireCancel()
-	conn, err := r.Pool.Acquire(acquireCtx)
-	if err != nil {
-		return errors.New("database pool temporarily unavailable")
-	}
-	defer conn.Release()
-	return work(ctx, conn)
-}

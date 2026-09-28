@@ -328,7 +328,7 @@ func TestDatabaseOutageOnlyAllowsConfirmedLocalCredit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q.pool = offline
+	q.runtime = database.NewRuntime(offline)
 	offline.Close()
 	if got, err := q.Take(ctx, id, 0, 1024); err != nil || got.Usable != 63488 {
 		t.Fatalf("confirmed credit lost during outage: %+v %v", got, err)

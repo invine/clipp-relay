@@ -432,8 +432,8 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 		accounts = append(accounts, old.account)
 	}
 	s.mu.Unlock()
-	admit := func() {
-		fresh, err := s.authority.AuthenticateRelay(ctx, raw)
+	admit := func(unitCtx context.Context) {
+		fresh, err := s.authority.AuthenticateRelay(unitCtx, raw)
 		if err != nil || fresh.AccountID != credential.AccountID {
 			if errors.Is(err, auth.ErrInvalidAccess) || fresh.AccountID != credential.AccountID {
 				code = "authentication_failed"
@@ -442,16 +442,16 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 			}
 			return
 		}
-		deadline, renew, code = s.authenticateAdmitted(ctx, c, fresh, &oldToClose)
+		deadline, renew, code = s.authenticateAdmitted(unitCtx, c, fresh, &oldToClose)
 	}
 	if guarded, ok := s.authority.(interface {
-		WithAccountGuards(context.Context, []string, func()) bool
+		WithAccountGuards(context.Context, []string, func(context.Context)) bool
 	}); ok {
 		if !guarded.WithAccountGuards(ctx, accounts, admit) {
 			return time.Time{}, 0, "temporarily_unavailable"
 		}
 	} else {
-		admit()
+		admit(ctx)
 	}
 	return deadline, renew, code
 }

@@ -16,7 +16,7 @@ type CleanupSignals struct {
 
 func (s *Server) SampleCleanupSignals(ctx context.Context) (CleanupSignals, error) {
 	var seconds float64
-	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-LEAST(
+	err := s.db.QueryRow(ctx, `SELECT COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-LEAST(
 		COALESCE((SELECT min(LEAST(COALESCE(consumed_at,expires_at),expires_at)) FROM public.authorization_codes WHERE LEAST(COALESCE(consumed_at,expires_at),expires_at)<clock_timestamp()),clock_timestamp()),
 		COALESCE((SELECT min(LEAST(t.expires_at,COALESCE(g.terminated_at,t.expires_at))) FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id WHERE LEAST(t.expires_at,COALESCE(g.terminated_at,t.expires_at))<clock_timestamp()),clock_timestamp()),
 		COALESCE((SELECT min(LEAST(COALESCE(claimed_at,expires_at),expires_at)) FROM public.authorization_transactions WHERE LEAST(COALESCE(claimed_at,expires_at),expires_at)<clock_timestamp()),clock_timestamp()),
@@ -37,7 +37,7 @@ func (s *Server) SampleCleanupSignals(ctx context.Context) (CleanupSignals, erro
 	out.Warning = out.OldestAge > time.Hour
 	out.Critical = out.OldestAge >= 12*time.Hour
 	out.Breach = out.OldestAge >= 24*time.Hour
-	if err := s.Pool.QueryRow(ctx, `SELECT episodes FROM public.cleanup_breach_record WHERE singleton=true`).Scan(&out.BreachEpisodes); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT episodes FROM public.cleanup_breach_record WHERE singleton=true`).Scan(&out.BreachEpisodes); err != nil {
 		return CleanupSignals{}, err
 	}
 	return out, nil
@@ -50,7 +50,7 @@ func (s *Server) recordCleanupBreach(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.Pool.Exec(ctx, `UPDATE public.cleanup_breach_record SET
+	_, err = s.db.Exec(ctx, `UPDATE public.cleanup_breach_record SET
 active=$1,
 episodes=episodes+CASE WHEN $1 AND NOT active THEN 1 ELSE 0 END,
 first_observed_at=CASE WHEN $1 AND NOT active THEN clock_timestamp() ELSE first_observed_at END,
@@ -145,7 +145,7 @@ func (s *Server) cleanupPass(ctx context.Context) (bool, error) {
 			}
 			var removed, candidates, take int64
 			var next string
-			err := s.Pool.QueryRow(work, query.sql, query.full, cursor).Scan(&removed, &candidates, &take, &next)
+			err := s.db.QueryRow(work, query.sql, query.full, cursor).Scan(&removed, &candidates, &take, &next)
 			cancel()
 			if err != nil {
 				if firstError == nil {
@@ -159,7 +159,7 @@ func (s *Server) cleanupPass(ctx context.Context) (bool, error) {
 			}
 			return
 		}
-		tag, err := s.Pool.Exec(work, query.sql, query.full)
+		tag, err := s.db.Exec(work, query.sql, query.full)
 		cancel()
 		if err != nil {
 			if firstError == nil {

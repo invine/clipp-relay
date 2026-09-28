@@ -92,7 +92,8 @@ func main() {
 	}
 	logger.Info("service starting", "schema_revision", database.ExpectedRevision)
 	srv := service.New()
-	portal := auth.New(pool, c, material, auth.Google())
+	db := database.NewRuntime(pool)
+	portal := auth.NewWithRuntime(db, c, material, auth.Google())
 	if err := portal.ValidatePepperCoverage(startup); err != nil {
 		if errors.Is(err, auth.ErrRetainedPepperUnavailable) {
 			logger.Warn("retained usage key unavailable; new registration blocked")
@@ -130,7 +131,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	credit := quota.New(pool)
+	credit := quota.NewWithRuntime(db)
 	defer credit.Close()
 	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname})
 	if err != nil {
