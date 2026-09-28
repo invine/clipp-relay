@@ -107,7 +107,7 @@ func main() {
 	})
 	srv.SetCleanupMetrics(func(ctx context.Context) (service.CleanupSample, error) {
 		observed, err := portal.SampleCleanupSignals(ctx)
-		return service.CleanupSample{OldestSeconds: observed.OldestAge.Seconds(), Warning: observed.Warning, Critical: observed.Critical, Breach: observed.Breach, Completed: observed.Completed, Failed: observed.Failed}, err
+		return service.CleanupSample{OldestSeconds: observed.OldestAge.Seconds(), Warning: observed.Warning, Critical: observed.Critical, Breach: observed.Breach, Completed: observed.Completed, Failed: observed.Failed, BreachEpisodes: observed.BreachEpisodes}, err
 	})
 	if c.Journal.Region == "" {
 		logger.Error("journal configuration required before serving")

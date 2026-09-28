@@ -2,11 +2,21 @@ package auth_test
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"clipp-relay/internal/auth"
 )
+
+func retainedDigest(key []byte, subject string) []byte {
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte("clipp-relay/v1/retained-quota\x00https://accounts.google.com\x00" + subject))
+	return h.Sum(nil)
+}
 
 func TestMaintenanceKeepsLiveGrantAndRetentionBoundaries(t *testing.T) {
 	c, m, db := fixture(t)
@@ -195,4 +205,134 @@ VALUES(993,decode(repeat('fa',32),'hex'),date_trunc('week',clock_timestamp() AT 
 		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id IN (SELECT id FROM public.accounts WHERE subject=$1)`, d.subject)
 		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE subject=$1`, d.subject)
 	}()
+}
+
+func TestCleanupErrorDoesNotStarveLaterRetentionClass(t *testing.T) {
+	c, m, db := fixture(t)
+	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	ctx := context.Background()
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+VALUES($1,decode(repeat('da',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7,1)`, s.CurrentPepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('da',32),'hex')`)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,plan_id,reason,actor_email)
+VALUES('80975492-9579-4df7-8aa6-1ce9757be7ca',clock_timestamp()-interval '181 days','plan_created','6dd09395-51a0-451c-96b3-716e6038e870','routine_administration','operator@example.test')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.audit_events WHERE id='80975492-9579-4df7-8aa6-1ce9757be7ca'`)
+	lock, err := db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Rollback(ctx)
+	if _, err := lock.Exec(ctx, `SELECT 1 FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('da',32),'hex') FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	maintainCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.Maintain(maintainCtx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var oldAudit int
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id='80975492-9579-4df7-8aa6-1ce9757be7ca'`).Scan(&oldAudit); err != nil {
+			t.Fatal(err)
+		}
+		if oldAudit == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var oldAudit, lockedRetained int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id='80975492-9579-4df7-8aa6-1ce9757be7ca'`).Scan(&oldAudit); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('da',32),'hex')`).Scan(&lockedRetained); err != nil {
+		t.Fatal(err)
+	}
+	if oldAudit != 0 || lockedRetained != 1 {
+		t.Fatalf("locked class starved audit or bypassed lock: audit=%d retained=%d", oldAudit, lockedRetained)
+	}
+}
+
+func TestDuplicateLogicalRetainedUsageFailsRegistration(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "duplicate-retained-usage"
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	s.Peppers[993] = make([]byte, 32)
+	ctx := context.Background()
+	for _, version := range []uint64{s.CurrentPepper, 993} {
+		_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,100)`, version, retainedDigest(s.Peppers[version], d.subject))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.retained_quota_usage WHERE (pepper_version=$1 AND identity_digest=$2) OR (pepper_version=993 AND identity_digest=$3)`, s.CurrentPepper, retainedDigest(s.Peppers[s.CurrentPepper], d.subject), retainedDigest(s.Peppers[993], d.subject))
+	flow, binding := start(t, s, nil)
+	if got := complete(s, flow, binding); got.Code != 503 {
+		t.Fatalf("duplicate logical record accepted: %d", got.Code)
+	}
+	var accounts, retained int
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&accounts); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=$1 OR (pepper_version=993 AND identity_digest=$2)`, retainedDigest(s.Peppers[s.CurrentPepper], d.subject), retainedDigest(s.Peppers[993], d.subject)).Scan(&retained); err != nil {
+		t.Fatal(err)
+	}
+	if accounts != 0 || retained != 2 {
+		t.Fatalf("duplicate state mutated: accounts=%d retained=%d", accounts, retained)
+	}
+}
+
+func TestConcurrentRegistrationImportsRetainedUsageOnce(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "concurrent-retained-usage"
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	ctx := context.Background()
+	digest := retainedDigest(s.Peppers[s.CurrentPepper], d.subject)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`, s.CurrentPepper, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.retained_quota_usage WHERE identity_digest=$1`, digest)
+	const flows = 4
+	states := make([]string, flows)
+	bindings := make([]*http.Cookie, flows)
+	for i := range states {
+		states[i], bindings[i] = start(t, s, nil)
+	}
+	var wg sync.WaitGroup
+	results := make(chan int, flows)
+	for i := range states {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); results <- complete(s, states[i], bindings[i]).Code }(i)
+	}
+	wg.Wait()
+	close(results)
+	for code := range results {
+		if code != 303 {
+			t.Errorf("concurrent registration status %d", code)
+		}
+	}
+	var accounts, remaining int
+	var committed, sequence int64
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&accounts); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Pool.QueryRow(ctx, `SELECT u.committed_bytes,u.sequence FROM public.weekly_quota_usage u JOIN public.accounts a ON a.id=u.account_id WHERE a.subject=$1 AND u.week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`, d.subject).Scan(&committed, &sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=$1`, digest).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if accounts != 1 || committed != 123 || sequence != 0 || remaining != 0 {
+		t.Fatalf("concurrent import: accounts=%d committed=%d sequence=%d retained=%d", accounts, committed, sequence, remaining)
+	}
 }

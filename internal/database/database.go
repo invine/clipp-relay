@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 9
+const ExpectedRevision = 10
 
 type migration struct {
 	revision int
@@ -248,7 +248,16 @@ ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (e
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted','pending_expired') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
-ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked','account_deleted','pending_expired') OR (reason IS NOT NULL AND actor_email IS NOT NULL));`}}
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked','account_deleted','pending_expired') OR (reason IS NOT NULL AND actor_email IS NOT NULL));`}, {10, `CREATE TABLE public.cleanup_breach_record (
+ singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+ active boolean NOT NULL DEFAULT false,
+ episodes bigint NOT NULL DEFAULT 0 CHECK (episodes >= 0),
+ first_observed_at timestamptz,
+ last_observed_at timestamptz,
+ worst_age_seconds bigint NOT NULL DEFAULT 0 CHECK (worst_age_seconds >= 0)
+);
+INSERT INTO public.cleanup_breach_record(singleton) VALUES(true);
+REVOKE ALL ON public.cleanup_breach_record FROM PUBLIC;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

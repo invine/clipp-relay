@@ -47,6 +47,13 @@ func TestAbandonedPendingExpiresWithoutIdentityOrJournal(t *testing.T) {
 	if err := db.Pool.QueryRow(context.Background(), `SELECT last_portal_login_at<clock_timestamp()-interval '90 days' FROM public.accounts WHERE id=$1`, oldID).Scan(&stillExpired); err != nil || !stillExpired {
 		t.Fatalf("generic portal traffic refreshed Pending: %v", err)
 	}
+	flow, binding = start(t, s, nil)
+	if w := complete(s, flow, binding); w.Code != 503 {
+		t.Fatalf("post-deadline Google login revived Pending: %d", w.Code)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT last_portal_login_at<clock_timestamp()-interval '90 days' FROM public.accounts WHERE id=$1`, oldID).Scan(&stillExpired); err != nil || !stillExpired {
+		t.Fatalf("post-deadline login restarted retention clock: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.Maintain(ctx); close(done) }()

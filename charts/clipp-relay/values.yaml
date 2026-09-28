@@ -1,6 +1,6 @@
 deployment:
   phase: stopped
-  expectedSchema: 8
+  expectedSchema: 10
   runId: ""
 image:
   repository: ""

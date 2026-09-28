@@ -36,6 +36,7 @@ type CleanupSample struct {
 	OldestSeconds             float64
 	Warning, Critical, Breach bool
 	Completed, Failed         uint64
+	BreachEpisodes            uint64
 }
 
 func (s *Service) SetCleanupMetrics(sample func(context.Context) (CleanupSample, error)) {
@@ -166,7 +167,7 @@ func (s *Service) PrivateHandler() http.Handler {
 					}
 					return 0
 				}
-				_, _ = fmt.Fprintf(w, "clipp_relay_cleanup_observation_available 1\nclipp_relay_cleanup_oldest_seconds %.3f\nclipp_relay_cleanup_warning %d\nclipp_relay_cleanup_critical %d\nclipp_relay_cleanup_retention_breach %d\nclipp_relay_cleanup_outcomes_total{result=\"completed\"} %d\nclipp_relay_cleanup_outcomes_total{result=\"failed\"} %d\n", sample.OldestSeconds, flag(sample.Warning), flag(sample.Critical), flag(sample.Breach), sample.Completed, sample.Failed)
+				_, _ = fmt.Fprintf(w, "clipp_relay_cleanup_observation_available 1\nclipp_relay_cleanup_oldest_seconds %.3f\nclipp_relay_cleanup_warning %d\nclipp_relay_cleanup_critical %d\nclipp_relay_cleanup_retention_breach %d\nclipp_relay_cleanup_breach_episodes_total %d\nclipp_relay_cleanup_outcomes_total{result=\"completed\"} %d\nclipp_relay_cleanup_outcomes_total{result=\"failed\"} %d\n", sample.OldestSeconds, flag(sample.Warning), flag(sample.Critical), flag(sample.Breach), sample.BreachEpisodes, sample.Completed, sample.Failed)
 			}
 		}
 	})
