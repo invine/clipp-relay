@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/database"
 )
 
 func retainedDigest(key []byte, subject string) []byte {
@@ -317,7 +319,27 @@ func TestConcurrentRegistrationImportsRetainedUsageOnce(t *testing.T) {
 	d := newProvider(t)
 	d.subject = "concurrent-retained-usage"
 	s := auth.New(db.Pool, c, m, d.endpoints())
+	for attempt := range 2 {
+		t.Run(fmt.Sprintf("attempt-%d", attempt), func(t *testing.T) {
+			concurrentRegistrationImportsRetainedUsageOnce(t, db, d, s)
+		})
+	}
+}
+
+func concurrentRegistrationImportsRetainedUsageOnce(t *testing.T, db *database.Runtime, d *providerDouble, s *auth.Server) {
+	t.Helper()
 	ctx := context.Background()
+	t.Cleanup(func() {
+		for _, table := range []string{"portal_sessions", "weekly_quota_usage", "audit_events"} {
+			_, err := db.Pool.Exec(ctx, `DELETE FROM public.`+table+` WHERE account_id IN (SELECT id FROM public.accounts WHERE subject=$1)`, d.subject)
+			if err != nil {
+				t.Errorf("clean up %s: %v", table, err)
+			}
+		}
+		if _, err := db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE subject=$1`, d.subject); err != nil {
+			t.Errorf("clean up account: %v", err)
+		}
+	})
 	digest := retainedDigest(s.Peppers[s.CurrentPepper], d.subject)
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
 VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`, s.CurrentPepper, digest)
