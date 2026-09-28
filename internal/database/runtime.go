@@ -264,10 +264,12 @@ func (t *leasedTx) Commit(ctx context.Context) error {
 }
 
 func (t *leasedTx) Rollback(ctx context.Context) error {
-	// A canceled caller may make rollback fail; releasing a non-idle pgxpool
-	// connection destroys it rather than treating cancellation as rollback proof.
 	defer t.close()
-	return t.Tx.Rollback(ctx)
+	bounded, finish := transactionCallContext(t.unit.ctx, ctx)
+	defer finish()
+	// A deadline may prevent rollback; releasing a non-idle pgxpool connection
+	// destroys it rather than treating cancellation as rollback proof.
+	return t.Tx.Rollback(bounded)
 }
 
 func (t *leasedTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {

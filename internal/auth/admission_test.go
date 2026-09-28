@@ -55,10 +55,14 @@ func TestOneServingBudgetCoversAccountQuotaAndCleanup(t *testing.T) {
 	}
 	var funded quota.Result
 	var fundingErr error
-	if !account.WithAccountGuards(context.Background(), []string{id}, func(unitCtx context.Context) {
-		funded, fundingErr = credit.Ensure(unitCtx, id, 0)
-	}) || fundingErr != nil || funded.Usable != quota.BlockBytes {
-		t.Fatalf("nested account-to-quota funding reacquired a unit: %+v %v", funded, fundingErr)
+	guarded := false
+	admitted := account.WithServingUnit(context.Background(), func(unitCtx context.Context) {
+		guarded = account.WithAccountGuards(unitCtx, []string{id}, func(guardCtx context.Context) {
+			funded, fundingErr = credit.Ensure(guardCtx, id, 0)
+		})
+	})
+	if !admitted || !guarded || fundingErr != nil || funded.Usable != quota.BlockBytes {
+		t.Fatalf("nested serving-to-account-to-quota funding reacquired a unit: admitted=%t guarded=%t result=%+v err=%v", admitted, guarded, funded, fundingErr)
 	}
 	startGuard(63)
 	<-entered

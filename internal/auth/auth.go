@@ -98,6 +98,15 @@ type Server struct {
 	cleanupAccountCursors              []string
 }
 
+// WithServingUnit admits relay authentication before its peer guard and first
+// credential read. Nested account and quota work reuses the same unit context.
+func (s *Server) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
+	return s.db.WithUnit(ctx, func(unitCtx context.Context) error {
+		work(unitCtx)
+		return nil
+	}) == nil
+}
+
 // WithAccountGuards orders all local account operations before their SQL row
 // locks. Relay admission holds the same guard through registry installation.
 func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(context.Context)) bool {
