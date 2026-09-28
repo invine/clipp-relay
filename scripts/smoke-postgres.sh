@@ -256,12 +256,16 @@ for i in $(seq 1 30); do
   sleep 1
 done
 test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 200
+kill "$pid"; wait "$pid" || true
+pid=
+if [[ "${CLIPP_FAULT_PG17_AUTH:-0}" == 1 ]]; then
+  CLIPP_TEST_MIGRATION_CONFIG="$work/migration17.json" CLIPP_TEST_SERVING_CONFIG="$work/serving17.json" go test -count=1 ./internal/auth
+  echo 'PostgreSQL 17 account, relay, and cleanup integration tests passed'
+fi
 if [[ "${CLIPP_FAULT_PG17_QUOTA:-0}" == 1 ]]; then
   CLIPP_TEST_SERVING_CONFIG="$work/serving17.json" go test -count=1 ./internal/quota
   echo 'PostgreSQL 17 quota fault tests passed'
 fi
-kill "$pid"; wait "$pid" || true
-pid=
 
 # Serving must reject an untrusted CA and a leaf for a different DNS name.
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=Wrong test CA' -keyout "$work/wrong-ca.key" -out "$work/wrong-ca.crt" >/dev/null 2>&1
