@@ -85,7 +85,7 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	}
 	defer p.Close()
 	// The fixture is intentionally disposable. Reset only this owned test table.
-	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.weekly_quota_usage, public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
+	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.cleanup_breach_record, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.weekly_quota_usage, public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
 		t.Fatal(e)
 	}
 	var wg sync.WaitGroup

@@ -93,6 +93,7 @@ type Server struct {
 	cleanupCompleted                   atomic.Uint64
 	cleanupFailed                      atomic.Uint64
 	cleanupWorker                      atomic.Bool
+	cleanupCursor                      atomic.Uint64
 }
 
 // WithAccountGuards orders all local account operations before their SQL row
@@ -500,7 +501,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(ctx)
 	var accountID string
 	var generation int64
-	e = tx.QueryRow(ctx, `INSERT INTO public.accounts (id,issuer,subject,email,email_verified,hosted_domain,validated_at,created_at,last_portal_login_at) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),clock_timestamp()) ON CONFLICT (issuer,subject) DO UPDATE SET email=EXCLUDED.email,email_verified=EXCLUDED.email_verified,hosted_domain=EXCLUDED.hosted_domain,validated_at=clock_timestamp(),last_portal_login_at=clock_timestamp() WHERE accounts.deletion_started_at IS NULL RETURNING id,credential_generation`, account, googleIssuer, claims.Subject, claims.Email, claims.EmailVerified, claims.HostedDomain).Scan(&accountID, &generation)
+	e = tx.QueryRow(ctx, `INSERT INTO public.accounts (id,issuer,subject,email,email_verified,hosted_domain,validated_at,created_at,last_portal_login_at) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),clock_timestamp()) ON CONFLICT (issuer,subject) DO UPDATE SET email=EXCLUDED.email,email_verified=EXCLUDED.email_verified,hosted_domain=EXCLUDED.hosted_domain,validated_at=clock_timestamp(),last_portal_login_at=clock_timestamp() WHERE accounts.deletion_started_at IS NULL AND (accounts.status<>'Pending' OR accounts.last_portal_login_at>=clock_timestamp()-interval '90 days') RETURNING id,credential_generation`, account, googleIssuer, claims.Subject, claims.Email, claims.EmailVerified, claims.HostedDomain).Scan(&accountID, &generation)
 	if e != nil {
 		fail(w, 503)
 		return

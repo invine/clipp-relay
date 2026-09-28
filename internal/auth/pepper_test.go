@@ -57,4 +57,32 @@ func TestCleanupSignalsReportRetentionBreach(t *testing.T) {
 	if signals.OldestAge < 47*time.Hour || !signals.Warning || !signals.Critical || !signals.Breach {
 		t.Fatalf("retention breach invisible: %+v", signals)
 	}
+	baseline := signals.BreachEpisodes
+	if _, err := db.Pool.Exec(ctx, `UPDATE public.cleanup_breach_record SET active=false WHERE singleton=true`); err != nil {
+		t.Fatal(err)
+	}
+	maintainCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.Maintain(maintainCtx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var retained int
+		var episodes uint64
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id='66f8011d-64fb-4988-9211-933188310914'`).Scan(&retained); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Pool.QueryRow(ctx, `SELECT episodes FROM public.cleanup_breach_record WHERE singleton=true`).Scan(&episodes); err != nil {
+			t.Fatal(err)
+		}
+		if retained == 0 && episodes > baseline {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	restarted := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	persisted, err := restarted.SampleCleanupSignals(ctx)
+	if err != nil || persisted.BreachEpisodes <= baseline {
+		t.Fatalf("breach episode lost across restart: %+v %v", persisted, err)
+	}
 }

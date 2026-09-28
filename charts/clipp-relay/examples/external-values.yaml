@@ -1,6 +1,6 @@
 deployment:
   phase: serving
-  expectedSchema: 8
+  expectedSchema: 10
 image:
   repository: registry.example.test/clipp-relay
   digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

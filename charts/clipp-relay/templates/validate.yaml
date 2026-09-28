@@ -4,7 +4,7 @@
 {{- if or (eq $v.database.external.host "") (eq $v.database.name "") (eq $v.database.servingSecret "") (eq $v.database.migrationSecret "") (eq $v.database.caSecret "") }}{{ fail "external database endpoint, name and distinct credential/trust Secret references are required" }}{{ end -}}
 {{- if eq $v.database.servingSecret $v.database.migrationSecret }}{{ fail "serving and migration Secrets must differ" }}{{ end -}}
 {{- if or (eq $v.image.repository "") (not (regexMatch "^sha256:[0-9a-f]{64}$" $v.image.digest)) }}{{ fail "immutable relay image repository and sha256 digest required" }}{{ end -}}
-{{- if ne (int $v.deployment.expectedSchema) 8 }}{{ fail "chart requires application schema revision 8" }}{{ end -}}
+{{- if ne (int $v.deployment.expectedSchema) 10 }}{{ fail "chart requires application schema revision 10" }}{{ end -}}
 {{- if and (eq $v.deployment.phase "migrating") (eq $v.deployment.runId "") }}{{ fail "migration phase requires a run ID" }}{{ end -}}
 {{- if and (ne $v.deployment.phase "migrating") (ne $v.deployment.runId "") }}{{ fail "run ID only valid in migrating phase" }}{{ end -}}
 {{- $portalHost := trimPrefix "https://" $v.public.portalOrigin -}}
