@@ -94,32 +94,44 @@ var cleanupQueries = []cleanupQuery{
 	{`DELETE FROM public.portal_sessions p WHERE p.credential_digest IN (SELECT p2.credential_digest FROM public.portal_sessions p2 JOIN public.accounts a ON a.id=p2.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,p2.credential_digest LIMIT $1)`, cleanupBatchSize},
 	{`DELETE FROM public.weekly_quota_usage u WHERE (u.account_id,u.week_start) IN (SELECT u2.account_id,u2.week_start FROM public.weekly_quota_usage u2 JOIN public.accounts a ON a.id=u2.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,u2.account_id,u2.week_start LIMIT $1)`, cleanupBatchSize},
 	{`DELETE FROM public.deletion_operations d WHERE d.id IN (SELECT d2.id FROM public.deletion_operations d2 JOIN public.accounts a ON a.id=d2.account_id WHERE a.deleted_at<clock_timestamp()-interval '1 hour' AND d2.completed_at IS NOT NULL ORDER BY a.deleted_at,d2.id LIMIT $1)`, cleanupBatchSize},
+	{`DELETE FROM public.audit_events WHERE id IN (SELECT id FROM public.audit_events WHERE occurred_at<clock_timestamp()-interval '180 days' ORDER BY occurred_at LIMIT $1)`, cleanupBatchSize},
 	{`DELETE FROM public.accounts a WHERE a.id IN (SELECT a2.id FROM public.accounts a2 WHERE a2.deleted_at<clock_timestamp()-interval '1 hour' AND NOT EXISTS(SELECT 1 FROM public.authorization_codes c WHERE c.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.authorization_transactions x WHERE x.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.portal_sessions p WHERE p.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.login_grants g WHERE g.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.weekly_quota_usage u WHERE u.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.deletion_operations d WHERE d.account_id=a2.id) ORDER BY a2.deleted_at,a2.id LIMIT $1 FOR UPDATE OF a2 SKIP LOCKED)`, cleanupBatchSize},
 	{`WITH removed AS (DELETE FROM public.accounts a WHERE a.id IN (SELECT a2.id FROM public.accounts a2 WHERE a2.status='Pending' AND a2.deletion_started_at IS NULL AND a2.last_portal_login_at<clock_timestamp()-interval '90 days' AND NOT EXISTS(SELECT 1 FROM public.authorization_codes c WHERE c.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.authorization_transactions x WHERE x.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.portal_sessions p WHERE p.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.login_grants g WHERE g.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.weekly_quota_usage u WHERE u.account_id=a2.id) ORDER BY a2.last_portal_login_at,a2.id LIMIT $1 FOR UPDATE OF a2 SKIP LOCKED) RETURNING a.id) INSERT INTO public.audit_events(id,occurred_at,event,account_id) SELECT gen_random_uuid(),clock_timestamp(),'pending_expired',id FROM removed`, cleanupBatchSize / 2},
-	{`DELETE FROM public.audit_events WHERE id IN (SELECT id FROM public.audit_events WHERE occurred_at<clock_timestamp()-interval '180 days' ORDER BY occurred_at LIMIT $1)`, cleanupBatchSize},
 }
 
 func (s *Server) cleanupPass(ctx context.Context) (bool, error) {
 	more := false
 	var firstError error
-	start := int(s.cleanupCursor.Add(1)-1) % len(cleanupQueries)
-	for offset := range cleanupQueries {
-		if err := ctx.Err(); err != nil {
-			return more, err
-		}
-		query := cleanupQueries[(start+offset)%len(cleanupQueries)]
-		work, cancel := context.WithTimeout(ctx, 2*time.Second)
+	process := func(query cleanupQuery, deadline time.Duration) {
+		work, cancel := context.WithTimeout(ctx, deadline)
 		tag, err := s.Pool.Exec(work, query.sql, query.full)
 		cancel()
 		if err != nil {
 			if firstError == nil {
 				firstError = err
 			}
-			continue
+			return
 		}
 		if tag.RowsAffected() == query.full {
 			more = true
 		}
+	}
+	// The last two statements remove parents. Rotate only the independent and
+	// child statements, then always attempt parent deletion after them. A child
+	// failure cannot starve another class or consume the entire 30-second pass.
+	children := len(cleanupQueries) - 2
+	start := int(s.cleanupCursor.Add(1)-1) % children
+	for offset := 0; offset < children; offset++ {
+		if err := ctx.Err(); err != nil {
+			return more, err
+		}
+		process(cleanupQueries[(start+offset)%children], 1250*time.Millisecond)
+	}
+	for _, query := range cleanupQueries[children:] {
+		if err := ctx.Err(); err != nil {
+			return more, err
+		}
+		process(query, 2*time.Second)
 	}
 	return more, firstError
 }
