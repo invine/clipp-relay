@@ -139,6 +139,68 @@ func TestRuntimeRowRowsAndTransactionRetainWorkUntilCompletion(t *testing.T) {
 	}
 }
 
+func TestRuntimeTransactionHonorsStatementAndUnitContexts(t *testing.T) {
+	c, _, sm := fixture(t)
+	p, err := NewPool(context.Background(), c, sm, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	runtime := NewRuntime(p)
+	for _, operation := range []string{"exec", "query", "row"} {
+		t.Run(operation, func(t *testing.T) {
+			tx, err := runtime.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.Background())
+			short, cancel := context.WithTimeout(context.Background(), 70*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			switch operation {
+			case "exec":
+				_, err = tx.Exec(short, "SELECT pg_sleep(0.4)")
+			case "query":
+				var rows pgx.Rows
+				rows, err = tx.Query(short, "SELECT 1 FROM pg_sleep(0.4)")
+				if err == nil {
+					rows.Next()
+					err = rows.Err()
+					rows.Close()
+				}
+			case "row":
+				var n int
+				err = tx.QueryRow(short, "SELECT 1 FROM pg_sleep(0.4)").Scan(&n)
+			}
+			if err == nil || time.Since(start) > 300*time.Millisecond {
+				t.Fatalf("short statement deadline ignored: %v after %s", err, time.Since(start))
+			}
+		})
+	}
+	tx, err := runtime.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitCtx, cancelCommit := context.WithCancel(context.Background())
+	cancelCommit()
+	if err := tx.Commit(commitCtx); err == nil {
+		t.Fatal("commit ignored caller cancellation")
+	}
+	parent, cancelParent := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancelParent()
+	tx, err = runtime.Begin(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-parent.Done()
+	start := time.Now()
+	var n int
+	if err := tx.QueryRow(context.Background(), "SELECT 1").Scan(&n); err == nil || time.Since(start) > 300*time.Millisecond {
+		t.Fatalf("unit deadline ignored by later statement: %v after %s", err, time.Since(start))
+	}
+	_ = tx.Rollback(context.Background())
+}
+
 func TestTLSWrongHostnameAndUntrustedCAFailClosed(t *testing.T) {
 	c, _, sm := fixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
