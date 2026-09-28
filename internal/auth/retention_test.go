@@ -256,6 +256,29 @@ VALUES('80975492-9579-4df7-8aa6-1ce9757be7ca',clock_timestamp()-interval '181 da
 	if oldAudit != 0 || lockedRetained != 1 {
 		t.Fatalf("locked class starved audit or bypassed lock: audit=%d retained=%d", oldAudit, lockedRetained)
 	}
+	cancel()
+	<-done
+	if err := lock.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	restarted := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	restartCtx, stopRestart := context.WithCancel(ctx)
+	restartDone := make(chan struct{})
+	go func() { restarted.Maintain(restartCtx); close(restartDone) }()
+	defer func() { stopRestart(); <-restartDone }()
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('da',32),'hex')`).Scan(&lockedRetained); err != nil {
+			t.Fatal(err)
+		}
+		if lockedRetained == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if lockedRetained != 0 {
+		t.Fatal("restart did not catch up locked retention class")
+	}
 }
 
 func TestDuplicateLogicalRetainedUsageFailsRegistration(t *testing.T) {
