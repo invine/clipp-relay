@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 8
+const ExpectedRevision = 9
 
 type migration struct {
 	revision int
@@ -240,7 +240,15 @@ ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
 ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
 ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked','account_deleted') OR (reason IS NOT NULL AND actor_email IS NOT NULL));
-REVOKE ALL ON public.deletion_operations,public.deletion_capacity,public.retained_quota_usage FROM PUBLIC;`}}
+REVOKE ALL ON public.deletion_operations,public.deletion_capacity,public.retained_quota_usage FROM PUBLIC;`}, {9, `CREATE INDEX weekly_quota_usage_retention ON public.weekly_quota_usage (week_start,account_id);
+CREATE INDEX accounts_pending_retention ON public.accounts (last_portal_login_at,id) WHERE status='Pending' AND deletion_started_at IS NULL;
+CREATE INDEX authorization_transactions_account_retention ON public.authorization_transactions (account_id) WHERE account_id IS NOT NULL;
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_event_check;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted','pending_expired'));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted','pending_expired') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked','account_deleted','pending_expired') OR (reason IS NOT NULL AND actor_email IS NOT NULL));`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

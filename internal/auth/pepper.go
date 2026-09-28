@@ -5,10 +5,13 @@ import (
 	"errors"
 )
 
+// ErrRetainedPepperUnavailable allows startup to keep existing accounts online
+// while registration remains closed until the current-week key is restored.
+var ErrRetainedPepperUnavailable = errors.New("retained usage key unavailable")
+
 // ValidatePepperCoverage rejects removal of a version that still protects a
 // credential inside its expiry and 24-hour cleanup window. Current-week
-// retained usage is checked separately at registration: an unavailable key
-// blocks a new identity while existing accounts remain usable.
+// retained usage is separately reported for registration-only fail closure.
 func (s *Server) ValidatePepperCoverage(ctx context.Context) error {
 	rows, err := s.Pool.Query(ctx, `
 SELECT DISTINCT pepper_version FROM (
@@ -31,6 +34,20 @@ SELECT DISTINCT pepper_version FROM (
 		}
 	}
 	if rows.Err() != nil {
+		return errors.New("pepper coverage unavailable")
+	}
+	retained, err := s.Pool.Query(ctx, `SELECT DISTINCT pepper_version FROM public.retained_quota_usage WHERE week_start>=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`)
+	if err != nil {
+		return errors.New("pepper coverage unavailable")
+	}
+	defer retained.Close()
+	for retained.Next() {
+		var version uint64
+		if retained.Scan(&version) != nil || len(s.Peppers[version]) == 0 {
+			return ErrRetainedPepperUnavailable
+		}
+	}
+	if retained.Err() != nil {
 		return errors.New("pepper coverage unavailable")
 	}
 	return nil

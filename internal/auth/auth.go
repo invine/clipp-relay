@@ -92,6 +92,7 @@ type Server struct {
 	deletionRetried                    atomic.Uint64
 	cleanupCompleted                   atomic.Uint64
 	cleanupFailed                      atomic.Uint64
+	cleanupWorker                      atomic.Bool
 }
 
 // WithAccountGuards orders all local account operations before their SQL row
@@ -748,7 +749,7 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 		var generation int64
 		var storedVersion uint64
 		var storedCSRF []byte
-		e = s.Pool.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation`, digest, version).Scan(&id, &status, &email, &subject, &generation, &storedVersion, &storedCSRF)
+		e = s.Pool.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, digest, version).Scan(&id, &status, &email, &subject, &generation, &storedVersion, &storedCSRF)
 		if e == nil {
 			if _, uncertain := s.uncertainAccounts.Load(id); uncertain {
 				return "", 0, "", "", "", errInvalidSession
@@ -761,7 +762,7 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 				return "", 0, "", "", "", errors.New("csrf")
 			}
 			var extended bool
-			e = s.Pool.QueryRow(r.Context(), `UPDATE public.portal_sessions ps SET last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 minutes') WHERE ps.credential_digest=$1 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND EXISTS (SELECT 1 FROM public.accounts a WHERE a.id=ps.account_id AND a.credential_generation=ps.credential_generation) RETURNING true`, digest).Scan(&extended)
+			e = s.Pool.QueryRow(r.Context(), `UPDATE public.portal_sessions ps SET last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 minutes') WHERE ps.credential_digest=$1 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND EXISTS (SELECT 1 FROM public.accounts a WHERE a.id=ps.account_id AND a.credential_generation=ps.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')) RETURNING true`, digest).Scan(&extended)
 			if e == pgx.ErrNoRows {
 				return "", 0, "", "", "", errInvalidSession
 			}
@@ -819,7 +820,8 @@ FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id
 LEFT JOIN public.quota_plans p ON p.id=a.plan_id
 WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
 AND ps.credential_generation=a.credential_generation
-AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, id, s.sessionDigest(r, version), version).Scan(&status, &email, &verified, &hd, &weeklyBytes, &sessions, &committed, &historyJSON)
+AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()
+AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, id, s.sessionDigest(r, version), version).Scan(&status, &email, &verified, &hd, &weeklyBytes, &sessions, &committed, &historyJSON)
 		if err == pgx.ErrNoRows {
 			e = errInvalidSession
 		} else if err != nil {

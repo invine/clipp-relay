@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -93,8 +94,12 @@ func main() {
 	srv := service.New()
 	portal := auth.New(pool, c, material, auth.Google())
 	if err := portal.ValidatePepperCoverage(startup); err != nil {
-		logger.Error("pepper keyring coverage failed")
-		os.Exit(1)
+		if errors.Is(err, auth.ErrRetainedPepperUnavailable) {
+			logger.Warn("retained usage key unavailable; new registration blocked")
+		} else {
+			logger.Error("pepper keyring coverage failed")
+			os.Exit(1)
+		}
 	}
 	srv.SetDeletionMetrics(func(ctx context.Context) (service.DeletionSample, error) {
 		observed, err := portal.SampleDeletionSignals(ctx)
