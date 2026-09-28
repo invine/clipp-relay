@@ -10,8 +10,49 @@ import (
 	"testing"
 	"time"
 
+	"clipp-relay/internal/quota"
 	"clipp-relay/internal/service"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestClockUnavailabilityDoesNotWithdrawHTTPReadiness(t *testing.T) {
+	s := service.New()
+	s.SetReady(true)
+	published := false
+	s.SetReadinessCheck(func() bool { return published })
+	check := func(path string, want int) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		s.PrivateHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != want {
+			t.Fatalf("%s: got %d, want %d", path, response.Code, want)
+		}
+	}
+	check("/readyz", http.StatusServiceUnavailable)
+	published = true
+	check("/readyz", http.StatusOK)
+
+	pool, err := pgxpool.New(context.Background(), "postgres://unreachable:unused@127.0.0.1:1/clipp?connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	credit := quota.New(pool)
+	defer credit.Close()
+	if safe, _, _ := credit.ClockHealth(); safe {
+		t.Fatal("unreachable database produced a usable clock sample")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := credit.Ensure(ctx, "unused-account", 0); !errors.Is(err, quota.ErrTemporary) {
+		t.Fatalf("clock-unsafe allocation was accepted: %v", err)
+	}
+	check("/readyz", http.StatusOK)
+	check("/livez", http.StatusOK)
+	published = false
+	check("/readyz", http.StatusServiceUnavailable)
+	check("/livez", http.StatusOK)
+}
 
 func TestPublicNeverExposesOperations(t *testing.T) {
 	s := service.New()

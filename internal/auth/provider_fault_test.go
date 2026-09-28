@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -11,6 +12,39 @@ import (
 
 	"clipp-relay/internal/auth"
 )
+
+func TestProviderOutagePreservesIndependentGrant(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	d := newProvider(t)
+	s := auth.New(db.Pool, c, m, d.endpoints())
+	session := loginAs(t, s, d, "provider-outage-grant", "grant@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	access, refresh := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, session, "android", c.PublicClients.AndroidRedirect))
+	state, binding := start(t, s, nil)
+	d.server.Close()
+	if response := complete(s, state, binding); response.Code == 303 {
+		t.Fatal("new provider login succeeded during outage")
+	}
+	if _, _, err := s.AuthenticateAccess(context.Background(), access); err != nil {
+		t.Fatalf("existing independent access lost during provider outage: %v", err)
+	}
+	response := tokenPost(s, url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refresh}})
+	if response.Code != 200 {
+		t.Fatalf("independent grant could not refresh during provider outage: %d %s", response.Code, response.Body.String())
+	}
+	var renewed struct {
+		Access string `json:"access_token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &renewed); err != nil || renewed.Access == "" {
+		t.Fatalf("renewed access missing: %v", err)
+	}
+	if _, _, err := s.AuthenticateAccess(context.Background(), renewed.Access); err != nil {
+		t.Fatalf("renewed access invalid during provider outage: %v", err)
+	}
+}
 
 func TestCancelledSlowTokenExchangeIsNotRetried(t *testing.T) {
 	c, m, db := fixture(t)
