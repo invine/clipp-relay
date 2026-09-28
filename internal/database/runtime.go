@@ -196,6 +196,59 @@ type leasedTx struct {
 	once sync.Once
 }
 
+// A transaction must obey both the unit deadline and the context supplied for
+// this particular statement. A later statement may have a narrower deadline
+// or be canceled independently of the transaction's original parent.
+func transactionCallContext(unit, caller context.Context) (context.Context, func()) {
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if deadline, ok := caller.Deadline(); ok {
+		ctx, cancel = context.WithDeadline(unit, deadline)
+	} else {
+		ctx, cancel = context.WithCancel(unit)
+	}
+	stop := context.AfterFunc(caller, cancel)
+	if caller.Err() != nil {
+		cancel()
+	}
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
+type boundedRow struct {
+	pgx.Row
+	finish func()
+	once   sync.Once
+}
+
+func (r *boundedRow) Scan(dest ...any) error {
+	defer r.once.Do(r.finish)
+	return r.Row.Scan(dest...)
+}
+
+type boundedRows struct {
+	pgx.Rows
+	finish func()
+	once   sync.Once
+}
+
+func (r *boundedRows) Close() {
+	r.once.Do(func() {
+		r.Rows.Close()
+		r.finish()
+	})
+}
+
+func (r *boundedRows) Next() bool {
+	if !r.Rows.Next() {
+		r.Close()
+		return false
+	}
+	return true
+}
+
 func (t *leasedTx) close() {
 	t.once.Do(func() {
 		t.conn.Release()
@@ -203,26 +256,39 @@ func (t *leasedTx) close() {
 	})
 }
 
-func (t *leasedTx) Commit(_ context.Context) error {
+func (t *leasedTx) Commit(ctx context.Context) error {
 	defer t.close()
-	return t.Tx.Commit(t.unit.ctx)
+	bounded, finish := transactionCallContext(t.unit.ctx, ctx)
+	defer finish()
+	return t.Tx.Commit(bounded)
 }
 
 func (t *leasedTx) Rollback(ctx context.Context) error {
+	// A canceled caller may make rollback fail; releasing a non-idle pgxpool
+	// connection destroys it rather than treating cancellation as rollback proof.
 	defer t.close()
 	return t.Tx.Rollback(ctx)
 }
 
-func (t *leasedTx) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	return t.Tx.Exec(t.unit.ctx, sql, args...)
+func (t *leasedTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	bounded, finish := transactionCallContext(t.unit.ctx, ctx)
+	defer finish()
+	return t.Tx.Exec(bounded, sql, args...)
 }
 
-func (t *leasedTx) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
-	return t.Tx.Query(t.unit.ctx, sql, args...)
+func (t *leasedTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	bounded, finish := transactionCallContext(t.unit.ctx, ctx)
+	rows, err := t.Tx.Query(bounded, sql, args...)
+	if err != nil {
+		finish()
+		return nil, err
+	}
+	return &boundedRows{Rows: rows, finish: finish}, nil
 }
 
-func (t *leasedTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
-	return t.Tx.QueryRow(t.unit.ctx, sql, args...)
+func (t *leasedTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	bounded, finish := transactionCallContext(t.unit.ctx, ctx)
+	return &boundedRow{Row: t.Tx.QueryRow(bounded, sql, args...), finish: finish}
 }
 
 func (r *Runtime) Begin(parent context.Context) (pgx.Tx, error) {
