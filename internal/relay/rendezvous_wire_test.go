@@ -251,6 +251,33 @@ func TestRendezvousStrictRequestsAndV1NumericBytes(t *testing.T) {
 	}
 }
 
+func TestRendezvousConnectionRateRejectsAndRecovers(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	h := rvClient(t, ctx, s, "authorized")
+	request := []byte(`{"action":"unregister","topic":"clipp"}`)
+	denied := false
+	for range 24 {
+		response := rvExchange(t, ctx, h, s.Host.ID(), string(RendezvousV2Protocol), request)
+		if bytes.Equal(response["code"], []byte(`"rate_limited"`)) {
+			denied = true
+			break
+		}
+	}
+	if !denied {
+		t.Fatal("connection rate gate did not reject a burst")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if response := rvExchange(t, ctx, h, s.Host.ID(), string(RendezvousV2Protocol), request); !bytes.Equal(response["ok"], []byte("true")) {
+		t.Fatalf("rate gate did not recover: %v", response)
+	}
+}
+
 func TestRendezvousV1AnswersLegacyOpenWriteStream(t *testing.T) {
 	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {

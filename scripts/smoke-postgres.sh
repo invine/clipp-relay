@@ -226,7 +226,7 @@ if [[ "${CLIPP_FAULT_RACE_ONLY:-0}" != 1 ]]; then
 fi
 if [[ "${CLIPP_FAULT_RACE:-0}" == 1 ]]; then
   CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/quota -run 'Test(LostCommitReplyReconcilesSameReceipt|KnownRollbackRetriesWithoutDoubleDebit|InvalidatedWorkerCannotInstallLateReceipt|CancelledWaiterCannotUseLocalCredit)$'
-  CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/auth -run 'Test(SuspensionWaitsForAccountRowLockAndRevokesRelayCredential|ConcurrentRegistrationImportsRetainedUsageOnce|ConcurrentEquivalentLoginsCreateOneAccount)$'
+  CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/auth -run 'Test(SuspensionWaitsForAccountRowLockAndRevokesRelayCredential|ConcurrentRegistrationImportsRetainedUsageOnce|ConcurrentEquivalentLoginsCreateOneAccount|MaintenanceKeepsLiveGrantAndRetentionBoundaries|CleanupErrorDoesNotStarveLaterRetentionClass)$'
   echo 'PostgreSQL 18 focused quota and account race tests passed'
 fi
 
@@ -256,6 +256,10 @@ for i in $(seq 1 30); do
   sleep 1
 done
 test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/readyz)" = 200
+if [[ "${CLIPP_FAULT_PG17_QUOTA:-0}" == 1 ]]; then
+  CLIPP_TEST_SERVING_CONFIG="$work/serving17.json" go test -count=1 ./internal/quota
+  echo 'PostgreSQL 17 quota fault tests passed'
+fi
 kill "$pid"; wait "$pid" || true
 pid=
 
