@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -69,6 +70,35 @@ const hiddenAccount = `(a.deleted_at<clock_timestamp()-interval '1 hour' OR (a.s
 type cleanupQuery struct {
 	sql  string
 	full int64
+	fair bool
+}
+
+// fairHiddenChild uses a keyset cursor over at most 16 hidden accounts and an
+// indexed, per-account LATERAL lookup. One large account gets the full batch;
+// several accounts share it. The last candidate ID becomes the next cursor.
+func fairHiddenChild(table, key, columns, source, accountRef, eligible string) cleanupQuery {
+	const statement = `WITH after_cursor AS MATERIALIZED (
+ SELECT a.id,0 AS phase FROM public.accounts a WHERE %[5]s AND a.id>$2::uuid
+ AND EXISTS(SELECT 1 FROM %[4]s WHERE %[6]s=a.id %[7]s) ORDER BY a.id LIMIT 16
+), before_cursor AS MATERIALIZED (
+ SELECT a.id,1 AS phase FROM public.accounts a WHERE %[5]s AND a.id<=$2::uuid
+ AND EXISTS(SELECT 1 FROM %[4]s WHERE %[6]s=a.id %[7]s) ORDER BY a.id LIMIT 16
+), candidates AS MATERIALIZED (
+ SELECT id,phase FROM after_cursor UNION ALL SELECT id,phase FROM before_cursor
+ ORDER BY phase,id LIMIT 16
+), budget AS MATERIALIZED (
+ SELECT GREATEST(1,($1::bigint+GREATEST(count(*),1)-1)/GREATEST(count(*),1)) AS take FROM candidates
+), victims AS MATERIALIZED (
+ SELECT child.* FROM candidates e CROSS JOIN budget b
+ JOIN LATERAL (SELECT %[3]s FROM %[4]s WHERE %[6]s=e.id %[7]s LIMIT b.take) child ON true
+ LIMIT $1
+), removed AS (
+ DELETE FROM %[1]s WHERE %[2]s IN (SELECT * FROM victims) RETURNING 1
+)
+SELECT (SELECT count(*) FROM removed),(SELECT count(*) FROM candidates),
+ (SELECT take FROM budget),
+ COALESCE((SELECT id::text FROM candidates ORDER BY phase DESC,id DESC LIMIT 1),'')`
+	return cleanupQuery{sql: fmt.Sprintf(statement, table, key, columns, source, hiddenAccount, accountRef, eligible), full: cleanupBatchSize, fair: true}
 }
 
 // Each statement is one transaction and changes at most 250 rows. A full
@@ -76,34 +106,55 @@ type cleanupQuery struct {
 // The cursor rotates the first query so a slow class cannot always consume the
 // pass deadline before later retention classes are attempted.
 var cleanupQueries = []cleanupQuery{
-	{`DELETE FROM public.retained_quota_usage WHERE (pepper_version,identity_digest,week_start) IN (SELECT pepper_version,identity_digest,week_start FROM public.retained_quota_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date ORDER BY week_start LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.weekly_quota_usage WHERE (account_id,week_start) IN (SELECT account_id,week_start FROM public.weekly_quota_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-84 ORDER BY week_start,account_id LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.authorization_codes WHERE credential_digest IN (SELECT credential_digest FROM public.authorization_codes WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.relay_access_tokens WHERE credential_digest IN (SELECT credential_digest FROM public.relay_access_tokens WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.relay_access_tokens WHERE credential_digest IN (SELECT t.credential_digest FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id WHERE g.terminated_at<clock_timestamp()-interval '1 hour' ORDER BY g.terminated_at LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.refresh_generations WHERE credential_digest IN (SELECT f.credential_digest FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE g.terminated_at<clock_timestamp()-interval '1 hour' OR (g.terminated_at IS NULL AND (g.idle_expires_at<clock_timestamp()-interval '1 hour' OR g.absolute_expires_at<clock_timestamp()-interval '1 hour')) LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.login_grants WHERE id IN (SELECT g.id FROM public.login_grants g WHERE (g.terminated_at<clock_timestamp()-interval '1 hour' OR g.idle_expires_at<clock_timestamp()-interval '1 hour' OR g.absolute_expires_at<clock_timestamp()-interval '1 hour') AND NOT EXISTS(SELECT 1 FROM public.refresh_generations f WHERE f.grant_id=g.id) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens t WHERE t.grant_id=g.id) LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.authorization_transactions WHERE id IN (SELECT id FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour' ORDER BY idle_expires_at LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE absolute_expires_at<clock_timestamp()-interval '1 hour' ORDER BY absolute_expires_at LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.authorization_codes c WHERE c.credential_digest IN (SELECT c2.credential_digest FROM public.authorization_codes c2 JOIN public.accounts a ON a.id=c2.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,c2.credential_digest LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.relay_access_tokens t WHERE t.credential_digest IN (SELECT t2.credential_digest FROM public.relay_access_tokens t2 JOIN public.login_grants g ON g.id=t2.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,t2.credential_digest LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.refresh_generations f WHERE f.credential_digest IN (SELECT f2.credential_digest FROM public.refresh_generations f2 JOIN public.login_grants g ON g.id=f2.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,f2.credential_digest LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.login_grants g WHERE g.id IN (SELECT g2.id FROM public.login_grants g2 JOIN public.accounts a ON a.id=g2.account_id WHERE ` + hiddenAccount + ` AND NOT EXISTS(SELECT 1 FROM public.refresh_generations f WHERE f.grant_id=g2.id) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens t WHERE t.grant_id=g2.id) ORDER BY a.last_portal_login_at,g2.id LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.authorization_transactions x WHERE x.id IN (SELECT x2.id FROM public.authorization_transactions x2 JOIN public.accounts a ON a.id=x2.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,x2.id LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.portal_sessions p WHERE p.credential_digest IN (SELECT p2.credential_digest FROM public.portal_sessions p2 JOIN public.accounts a ON a.id=p2.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,p2.credential_digest LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.weekly_quota_usage u WHERE (u.account_id,u.week_start) IN (SELECT u2.account_id,u2.week_start FROM public.weekly_quota_usage u2 JOIN public.accounts a ON a.id=u2.account_id WHERE ` + hiddenAccount + ` ORDER BY a.last_portal_login_at,u2.account_id,u2.week_start LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.deletion_operations d WHERE d.id IN (SELECT d2.id FROM public.deletion_operations d2 JOIN public.accounts a ON a.id=d2.account_id WHERE a.deleted_at<clock_timestamp()-interval '1 hour' AND d2.completed_at IS NOT NULL ORDER BY a.deleted_at,d2.id LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.audit_events WHERE id IN (SELECT id FROM public.audit_events WHERE occurred_at<clock_timestamp()-interval '180 days' ORDER BY occurred_at LIMIT $1)`, cleanupBatchSize},
-	{`DELETE FROM public.accounts a WHERE a.id IN (SELECT a2.id FROM public.accounts a2 WHERE a2.deleted_at<clock_timestamp()-interval '1 hour' AND NOT EXISTS(SELECT 1 FROM public.authorization_codes c WHERE c.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.authorization_transactions x WHERE x.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.portal_sessions p WHERE p.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.login_grants g WHERE g.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.weekly_quota_usage u WHERE u.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.deletion_operations d WHERE d.account_id=a2.id) ORDER BY a2.deleted_at,a2.id LIMIT $1 FOR UPDATE OF a2 SKIP LOCKED)`, cleanupBatchSize},
-	{`WITH removed AS (DELETE FROM public.accounts a WHERE a.id IN (SELECT a2.id FROM public.accounts a2 WHERE a2.status='Pending' AND a2.deletion_started_at IS NULL AND a2.last_portal_login_at<clock_timestamp()-interval '90 days' AND NOT EXISTS(SELECT 1 FROM public.authorization_codes c WHERE c.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.authorization_transactions x WHERE x.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.portal_sessions p WHERE p.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.login_grants g WHERE g.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.weekly_quota_usage u WHERE u.account_id=a2.id) ORDER BY a2.last_portal_login_at,a2.id LIMIT $1 FOR UPDATE OF a2 SKIP LOCKED) RETURNING a.id) INSERT INTO public.audit_events(id,occurred_at,event,account_id) SELECT gen_random_uuid(),clock_timestamp(),'pending_expired',id FROM removed`, cleanupBatchSize / 2},
+	{`DELETE FROM public.retained_quota_usage WHERE (pepper_version,identity_digest,week_start) IN (SELECT pepper_version,identity_digest,week_start FROM public.retained_quota_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date ORDER BY week_start LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.weekly_quota_usage WHERE (account_id,week_start) IN (SELECT account_id,week_start FROM public.weekly_quota_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-84 ORDER BY week_start,account_id LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.authorization_codes WHERE credential_digest IN (SELECT credential_digest FROM public.authorization_codes WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.relay_access_tokens WHERE credential_digest IN (SELECT credential_digest FROM public.relay_access_tokens WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.relay_access_tokens WHERE credential_digest IN (SELECT t.credential_digest FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id WHERE g.terminated_at<clock_timestamp()-interval '1 hour' ORDER BY g.terminated_at LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.refresh_generations WHERE credential_digest IN (SELECT f.credential_digest FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE g.terminated_at<clock_timestamp()-interval '1 hour' OR (g.terminated_at IS NULL AND (g.idle_expires_at<clock_timestamp()-interval '1 hour' OR g.absolute_expires_at<clock_timestamp()-interval '1 hour')) LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.login_grants WHERE id IN (SELECT g.id FROM public.login_grants g WHERE (g.terminated_at<clock_timestamp()-interval '1 hour' OR g.idle_expires_at<clock_timestamp()-interval '1 hour' OR g.absolute_expires_at<clock_timestamp()-interval '1 hour') AND NOT EXISTS(SELECT 1 FROM public.refresh_generations f WHERE f.grant_id=g.id) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens t WHERE t.grant_id=g.id) LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.authorization_transactions WHERE id IN (SELECT id FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour' ORDER BY idle_expires_at LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE absolute_expires_at<clock_timestamp()-interval '1 hour' ORDER BY absolute_expires_at LIMIT $1)`, cleanupBatchSize, false},
+	fairHiddenChild("public.authorization_codes", "credential_digest", "c.credential_digest", "public.authorization_codes c", "c.account_id", ""),
+	fairHiddenChild("public.relay_access_tokens", "credential_digest", "c.credential_digest", "public.relay_access_tokens c JOIN public.login_grants g ON g.id=c.grant_id", "g.account_id", ""),
+	fairHiddenChild("public.refresh_generations", "credential_digest", "c.credential_digest", "public.refresh_generations c JOIN public.login_grants g ON g.id=c.grant_id", "g.account_id", ""),
+	fairHiddenChild("public.login_grants", "id", "c.id", "public.login_grants c", "c.account_id", "AND NOT EXISTS(SELECT 1 FROM public.refresh_generations f WHERE f.grant_id=c.id) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens t WHERE t.grant_id=c.id)"),
+	fairHiddenChild("public.authorization_transactions", "id", "c.id", "public.authorization_transactions c", "c.account_id", ""),
+	fairHiddenChild("public.portal_sessions", "credential_digest", "c.credential_digest", "public.portal_sessions c", "c.account_id", ""),
+	fairHiddenChild("public.weekly_quota_usage", "(account_id,week_start)", "c.account_id,c.week_start", "public.weekly_quota_usage c", "c.account_id", ""),
+	{`DELETE FROM public.deletion_operations d WHERE d.id IN (SELECT d2.id FROM public.deletion_operations d2 JOIN public.accounts a ON a.id=d2.account_id WHERE a.deleted_at<clock_timestamp()-interval '1 hour' AND d2.completed_at IS NOT NULL ORDER BY a.deleted_at,d2.id LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.audit_events WHERE id IN (SELECT id FROM public.audit_events WHERE occurred_at<clock_timestamp()-interval '180 days' ORDER BY occurred_at LIMIT $1)`, cleanupBatchSize, false},
+	{`DELETE FROM public.accounts a WHERE a.id IN (SELECT a2.id FROM public.accounts a2 WHERE a2.deleted_at<clock_timestamp()-interval '1 hour' AND NOT EXISTS(SELECT 1 FROM public.authorization_codes c WHERE c.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.authorization_transactions x WHERE x.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.portal_sessions p WHERE p.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.login_grants g WHERE g.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.weekly_quota_usage u WHERE u.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.deletion_operations d WHERE d.account_id=a2.id) ORDER BY a2.deleted_at,a2.id LIMIT $1 FOR UPDATE OF a2 SKIP LOCKED)`, cleanupBatchSize, false},
+	{`WITH removed AS (DELETE FROM public.accounts a WHERE a.id IN (SELECT a2.id FROM public.accounts a2 WHERE a2.status='Pending' AND a2.deletion_started_at IS NULL AND a2.last_portal_login_at<clock_timestamp()-interval '90 days' AND NOT EXISTS(SELECT 1 FROM public.authorization_codes c WHERE c.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.authorization_transactions x WHERE x.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.portal_sessions p WHERE p.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.login_grants g WHERE g.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.weekly_quota_usage u WHERE u.account_id=a2.id) ORDER BY a2.last_portal_login_at,a2.id LIMIT $1 FOR UPDATE OF a2 SKIP LOCKED) RETURNING a.id) INSERT INTO public.audit_events(id,occurred_at,event,account_id) SELECT gen_random_uuid(),clock_timestamp(),'pending_expired',id FROM removed`, cleanupBatchSize / 2, false},
 }
 
 func (s *Server) cleanupPass(ctx context.Context) (bool, error) {
 	more := false
 	var firstError error
-	process := func(query cleanupQuery, deadline time.Duration) {
+	process := func(index int, query cleanupQuery, deadline time.Duration) {
 		work, cancel := context.WithTimeout(ctx, deadline)
+		if query.fair {
+			cursor := s.cleanupAccountCursors[index]
+			if cursor == "" {
+				cursor = "00000000-0000-0000-0000-000000000000"
+			}
+			var removed, candidates, take int64
+			var next string
+			err := s.Pool.QueryRow(work, query.sql, query.full, cursor).Scan(&removed, &candidates, &take, &next)
+			cancel()
+			if err != nil {
+				if firstError == nil {
+					firstError = err
+				}
+				return
+			}
+			s.cleanupAccountCursors[index] = next
+			if removed == query.full || candidates == 16 || (removed > 0 && removed >= take) {
+				more = true
+			}
+			return
+		}
 		tag, err := s.Pool.Exec(work, query.sql, query.full)
 		cancel()
 		if err != nil {
@@ -125,13 +176,14 @@ func (s *Server) cleanupPass(ctx context.Context) (bool, error) {
 		if err := ctx.Err(); err != nil {
 			return more, err
 		}
-		process(cleanupQueries[(start+offset)%children], 1250*time.Millisecond)
+		index := (start + offset) % children
+		process(index, cleanupQueries[index], 1250*time.Millisecond)
 	}
-	for _, query := range cleanupQueries[children:] {
+	for index, query := range cleanupQueries[children:] {
 		if err := ctx.Err(); err != nil {
 			return more, err
 		}
-		process(query, 2*time.Second)
+		process(children+index, query, 2*time.Second)
 	}
 	return more, firstError
 }

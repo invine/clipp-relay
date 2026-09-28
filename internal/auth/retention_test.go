@@ -359,3 +359,51 @@ VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`
 		t.Fatalf("concurrent import: accounts=%d committed=%d sequence=%d retained=%d", accounts, committed, sequence, remaining)
 	}
 }
+
+func TestHiddenAccountBatchDoesNotMonopolizeOtherAccounts(t *testing.T) {
+	c, m, db := fixture(t)
+	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	ctx := context.Background()
+	oldID := "c9d3edce-e472-4a0d-b8ed-e45e20b753c1"
+	newID := "042d4989-6695-4b1f-901b-2e9defb53903"
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at)
+VALUES($1,'https://accounts.google.com','fair-old','old@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '92 days'),
+($2,'https://accounts.google.com','fair-new','new@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '91 days')`, oldID, newID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id IN ($1,$2)`, oldID, newID)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions(credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+SELECT decode(lpad(to_hex(n),64,'0'),'hex'),$1,$2,0,decode(repeat('ab',32),'hex'),clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 minutes',clock_timestamp()+interval '12 hours'
+FROM generate_series(1,5000) n`, s.CurrentPepper, oldID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id IN ($1,$2)`, oldID, newID)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions(credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+VALUES(decode(lpad(to_hex(5001),64,'0'),'hex'),$1,$2,0,decode(repeat('cd',32),'hex'),clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 minutes',clock_timestamp()+interval '12 hours')`, s.CurrentPepper, newID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintainCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.Maintain(maintainCtx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(3 * time.Second)
+	var newer, olderChildren int
+	for time.Now().Before(deadline) {
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.accounts WHERE id=$1`, newID).Scan(&newer); err != nil {
+			t.Fatal(err)
+		}
+		if newer == 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE account_id=$1`, oldID).Scan(&olderChildren); err != nil {
+		t.Fatal(err)
+	}
+	if newer != 0 || olderChildren == 0 {
+		t.Fatalf("large account monopolized cleanup: newer=%d older children=%d", newer, olderChildren)
+	}
+}
