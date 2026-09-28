@@ -407,25 +407,68 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	if !allowed {
 		return time.Time{}, 0, "rate_limited"
 	}
-	guard := &s.peerGuards[peerGuardIndex(c.RemotePeer())]
-	guard.Lock()
+	var deadline time.Time
+	var renew time.Duration
+	var code string
 	var oldToClose network.Conn
-	defer func() {
-		guard.Unlock()
-		if oldToClose != nil {
-			_ = oldToClose.Close()
+	var installed *session
+	admit := func(unitCtx context.Context) {
+		deadline, renew, code, oldToClose, installed = s.authenticateSerial(unitCtx, c, raw)
+	}
+	unitOK := true
+	if bounded, ok := s.authority.(interface {
+		WithServingUnit(context.Context, func(context.Context)) bool
+	}); ok {
+		unitOK = bounded.WithServingUnit(ctx, admit)
+	} else {
+		admit(ctx)
+	}
+	if (!unitOK || code != "") && installed != nil {
+		s.mu.Lock()
+		owned := s.byConn[c] == installed
+		if owned {
+			s.removeLocked(installed)
 		}
-	}()
+		s.mu.Unlock()
+		if owned {
+			_ = c.Close()
+		}
+	}
+	if oldToClose != nil {
+		_ = oldToClose.Close()
+	}
+	if !unitOK {
+		return time.Time{}, 0, "temporarily_unavailable"
+	}
+	return deadline, renew, code
+}
+
+func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, network.Conn, *session) {
+	guard := &s.peerGuards[peerGuardIndex(c.RemotePeer())]
+	for !guard.TryLock() {
+		select {
+		case <-ctx.Done():
+			return time.Time{}, 0, "temporarily_unavailable", nil, nil
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if ctx.Err() != nil {
+		guard.Unlock()
+		return time.Time{}, 0, "temporarily_unavailable", nil, nil
+	}
+	var oldToClose network.Conn
+	defer guard.Unlock()
 	credential, err := s.authority.AuthenticateRelay(ctx, raw)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidAccess) {
-			return time.Time{}, 0, "authentication_failed"
+			return time.Time{}, 0, "authentication_failed", nil, nil
 		}
-		return time.Time{}, 0, "temporarily_unavailable"
+		return time.Time{}, 0, "temporarily_unavailable", nil, nil
 	}
 	var deadline time.Time
 	var renew time.Duration
 	var code string
+	var installed *session
 	accounts := []string{credential.AccountID}
 	s.mu.Lock()
 	if old := s.byPeer[c.RemotePeer()]; old != nil && old.account != credential.AccountID {
@@ -443,23 +486,31 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 			return
 		}
 		deadline, renew, code = s.authenticateAdmitted(unitCtx, c, fresh, &oldToClose)
+		if code == "" {
+			s.mu.Lock()
+			installed = s.byConn[c]
+			s.mu.Unlock()
+		}
 	}
 	if guarded, ok := s.authority.(interface {
 		WithAccountGuards(context.Context, []string, func(context.Context)) bool
 	}); ok {
 		if !guarded.WithAccountGuards(ctx, accounts, admit) {
-			return time.Time{}, 0, "temporarily_unavailable"
+			return time.Time{}, 0, "temporarily_unavailable", oldToClose, installed
 		}
 	} else {
 		admit(ctx)
 	}
-	return deadline, renew, code
+	return deadline, renew, code, oldToClose, installed
 }
 
 // The account guard remains held from the authoritative recheck through local
 // credit funding and registry installation. A committed policy change therefore
 // cannot be followed by installation of an older observed credential.
 func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn) (time.Time, time.Duration, string) {
+	if ctx.Err() != nil {
+		return time.Time{}, 0, "temporarily_unavailable"
+	}
 	s.mu.Lock()
 	current := s.byConn[c]
 	replaced := s.byPeer[c.RemotePeer()]
@@ -487,7 +538,7 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 	// Uniform 75–85% of admitted lifetime, independent of a stable Peer ID.
 	renewFraction := 0.75 + float64(binary.LittleEndian.Uint64(jitter[:])%10001)/100000
 	s.mu.Lock()
-	if s.closing || c.IsClosed() {
+	if ctx.Err() != nil || s.closing || c.IsClosed() {
 		s.mu.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable"
 	}

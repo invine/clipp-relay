@@ -198,7 +198,13 @@ func TestRuntimeTransactionHonorsStatementAndUnitContexts(t *testing.T) {
 	if err := tx.QueryRow(context.Background(), "SELECT 1").Scan(&n); err == nil || time.Since(start) > 300*time.Millisecond {
 		t.Fatalf("unit deadline ignored by later statement: %v after %s", err, time.Since(start))
 	}
-	_ = tx.Rollback(context.Background())
+	start = time.Now()
+	if err := tx.Rollback(context.Background()); err == nil || time.Since(start) > 300*time.Millisecond {
+		t.Fatalf("rollback ignored expired unit: %v after %s", err, time.Since(start))
+	}
+	if err := runtime.QueryRow(context.Background(), "SELECT 1").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("pool did not recover after canceled rollback: %d %v", n, err)
+	}
 }
 
 func TestTLSWrongHostnameAndUntrustedCAFailClosed(t *testing.T) {
