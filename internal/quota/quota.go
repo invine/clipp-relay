@@ -368,6 +368,11 @@ func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, byt
 		b.deadline = time.Time{}
 		b.committed = 0
 	}
+	// A small backward clock step can cross Monday while staying below the
+	// general skew threshold. Credit belongs only to its funded week.
+	if !b.week.IsZero() && !weekStart(now).Equal(b.week) {
+		return Result{}, ErrTemporary
+	}
 	if bytes == 0 && !ensure {
 		return Result{b.committed, b.usable, b.week}, nil
 	}
@@ -406,7 +411,8 @@ func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, byt
 		if q.beforeInstall != nil {
 			q.beforeInstall()
 		}
-		if unitCtx.Err() != nil || b.epoch.Load() != epoch || receipt.generation != generation || !q.now().Before(receipt.deadline) || !q.clockOK() {
+		installTime := q.now()
+		if unitCtx.Err() != nil || b.epoch.Load() != epoch || receipt.generation != generation || !installTime.Before(receipt.deadline) || !weekStart(installTime).Equal(receipt.week) || !q.clockOK() {
 			b.clearPending()
 			return Result{}, ErrTemporary
 		}

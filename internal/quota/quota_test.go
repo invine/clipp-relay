@@ -288,6 +288,71 @@ func TestLockWaitCrossingMondayUsesAfterLockWeek(t *testing.T) {
 	}
 }
 
+func TestSmallBackwardClockStepAcrossMondayRefusesConfirmedCredit(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx := context.Background()
+	boundary := weekStart(time.Now()).AddDate(0, 0, 7)
+	var shift atomic.Int64
+	shift.Store(int64(boundary.Add(time.Second).Sub(time.Now())))
+	q.adjustTime = func(t time.Time) time.Time { return t.Add(time.Duration(shift.Load())) }
+	q.clock.mu.Lock()
+	q.clock.sampled = time.Time{}
+	q.clock.sampledMono = time.Time{}
+	q.clock.safe = false
+	q.clock.mu.Unlock()
+	if err := q.Probe(ctx); err != nil {
+		t.Fatal(err)
+	}
+	funded, err := q.Ensure(ctx, id, 0)
+	if err != nil || !funded.WeekStart.Equal(boundary) || funded.Usable != BlockBytes {
+		t.Fatalf("Monday credit = %+v, %v", funded, err)
+	}
+	shift.Store(int64(boundary.Add(-time.Second).Sub(time.Now())))
+	if safe, _, _ := q.ClockHealth(); !safe {
+		t.Fatal("two-second backward step unexpectedly crossed the five-second clock-health threshold")
+	}
+	if result, err := q.Take(ctx, id, 0, 1); !errors.Is(err, ErrTemporary) {
+		t.Fatalf("Monday credit spent during Sunday after small clock regression: %+v, %v", result, err)
+	}
+	var committed int64
+	if err := pool.QueryRow(ctx, `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, boundary).Scan(&committed); err != nil || committed != BlockBytes {
+		t.Fatalf("durable Monday debit changed: %d, %v", committed, err)
+	}
+}
+
+func TestSmallBackwardClockStepBeforeInstallDiscardsMondayCredit(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx := context.Background()
+	boundary := weekStart(time.Now()).AddDate(0, 0, 7)
+	var shift atomic.Int64
+	shift.Store(int64(boundary.Add(time.Second).Sub(time.Now())))
+	q.adjustTime = func(t time.Time) time.Time { return t.Add(time.Duration(shift.Load())) }
+	q.clock.mu.Lock()
+	q.clock.sampled = time.Time{}
+	q.clock.sampledMono = time.Time{}
+	q.clock.safe = false
+	q.clock.mu.Unlock()
+	if err := q.Probe(ctx); err != nil {
+		t.Fatal(err)
+	}
+	q.beforeInstall = func() {
+		shift.Store(int64(boundary.Add(-time.Second).Sub(time.Now())))
+	}
+	if result, err := q.Ensure(ctx, id, 0); !errors.Is(err, ErrTemporary) {
+		t.Fatalf("Monday receipt installed during Sunday after small clock regression: %+v, %v", result, err)
+	}
+	if safe, _, _ := q.ClockHealth(); !safe {
+		t.Fatal("two-second backward step unexpectedly crossed the five-second clock-health threshold")
+	}
+	if result, err := q.Take(ctx, id, 0, 0); err != nil || result.Usable != 0 {
+		t.Fatalf("regressed receipt remained usable: %+v, %v", result, err)
+	}
+	var committed int64
+	if err := pool.QueryRow(ctx, `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, boundary).Scan(&committed); err != nil || committed != BlockBytes {
+		t.Fatalf("durable Monday debit changed: %d, %v", committed, err)
+	}
+}
+
 func TestReducedAllowancePreservesCommittedUsageButStopsCredit(t *testing.T) {
 	q, id, pool := fixture(t)
 	ctx := context.Background()
