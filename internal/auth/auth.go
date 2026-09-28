@@ -94,6 +94,7 @@ type Server struct {
 	cleanupFailed                      atomic.Uint64
 	cleanupWorker                      atomic.Bool
 	cleanupCursor                      atomic.Uint64
+	cleanupAccountCursors              []string
 }
 
 // WithAccountGuards orders all local account operations before their SQL row
@@ -214,7 +215,7 @@ func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provid
 		client = &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{MaxResponseHeaderBytes: 16 << 10}}
 	}
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	s := &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), accountUnits: make(chan struct{}, 64), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}}
+	s := &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), accountUnits: make(chan struct{}, 64), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}, cleanupAccountCursors: make([]string, len(cleanupQueries))}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
