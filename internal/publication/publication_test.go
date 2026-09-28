@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -206,6 +207,72 @@ func TestNamedServiceWatchRepublishesOnEvent(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("watch event did not republish")
+}
+
+func TestWatchFailureExpiresPublicationUntilVerifiedResync(t *testing.T) {
+	var broken atomic.Bool
+	var offset atomic.Int64
+	var ready atomic.Bool
+	watchSeen := make(chan struct{}, 1)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("watch") == "1" {
+			select {
+			case watchSeen <- struct{}{}:
+			default:
+			}
+			http.Error(w, "watch unavailable", 503)
+			return
+		}
+		if broken.Load() {
+			http.Error(w, "Service unavailable", 503)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "spec": map[string]any{"ports": []map[string]any{{"protocol": "TCP", "port": 4001}}}, "status": map[string]any{"loadBalancer": map[string]any{"ingress": []map[string]string{{"ip": "127.0.0.1"}}}}})
+	}))
+	defer api.Close()
+	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	d, err := relay.NewDiscovery(s, testAuthority{}, "relay.example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(d, api.Client(), api.URL, "token", Config{TCP: Transport{Enabled: true, PublicPort: 4001, Service: ServiceRef{Namespace: "clipp", Name: "relay-tcp"}}}, ready.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for !ready.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !ready.Load() || !d.Published() {
+		t.Fatal("initial verified publication missing")
+	}
+	select {
+	case <-watchSeen:
+	case <-time.After(time.Second):
+		t.Fatal("watch failure was not exercised")
+	}
+	broken.Store(true)
+	offset.Store(int64(6 * time.Minute))
+	deadline = time.Now().Add(2 * time.Second)
+	for ready.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ready.Load() || d.Published() {
+		t.Fatal("failed watch retained stale public publication")
+	}
+	broken.Store(false)
+	offset.Store(0)
+	if err := c.Sync(ctx); err != nil || !ready.Load() || !d.Published() {
+		t.Fatalf("verified resync did not restore publication: %v", err)
+	}
 }
 
 func TestOverrideRemovesOnlyItsTransportDependencyAndMissingUDPWithdrawsAll(t *testing.T) {

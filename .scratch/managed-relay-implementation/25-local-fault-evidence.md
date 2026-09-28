@@ -14,11 +14,15 @@ Commands executed (all passed unless stated):
 GOCACHE=/private/tmp/clipp-go-cache bash scripts/smoke-postgres.sh
 CLIPP_FAULT_RACE=1 CLIPP_FAULT_RACE_ONLY=1 GOCACHE=/private/tmp/clipp-go-cache bash scripts/smoke-postgres.sh
 CLIPP_FAULT_PG17_QUOTA=1 CLIPP_FAULT_RACE_ONLY=1 GOCACHE=/private/tmp/clipp-go-cache bash scripts/smoke-postgres.sh
+CLIPP_FAULT_PG17_QUOTA=1 GOCACHE=/private/tmp/clipp-go-cache bash scripts/smoke-postgres.sh
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay ./internal/service ./internal/publication
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/service -run 'Test(DefaultPublicSocketCapAndRecovery|SlowReadersPreservePrivateHealthAndRelease)$' -v
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run 'Test(RelayAuthConnectionRateRejectsAndRecovers|RendezvousConnectionRateRejectsAndRecovers)$' -v
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run TestCustomStreamsChargeAndReleaseServiceBuffers -v
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run 'Test(CustomStreamsChargeAndReleaseServiceBuffers|ResourceManagerDoesNotApplyStockIPBuckets|UnknownResourceScopesBlockAtRuntime)$' -v
+GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/publication -run TestWatchFailureExpiresPublicationUntilVerifiedResync -v
+GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run 'Test(ReporterChargesCurrentPeerAssociationAndRecordsUnattributedTail|SessionCapRejectsDistinctPeerAndRecovers)$' -v
+GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run TestTransientConnectionScopeRejectsAtLimitAndRecovers -v
 GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...
 GOCACHE=/private/tmp/clipp-go-cache go vet ./...
 gofmt -l cmd internal
@@ -41,10 +45,14 @@ permission. All fixture runs removed their own containers and secrets.
    `TestInvalidatedWorkerCannotInstallLateReceipt`,
    `TestLockWaitCrossingMondayUsesAfterLockWeek`,
    `TestCancelledCallerCannotInstallConfirmedCredit`, and
-   `TestDatabaseOutageOnlyAllowsConfirmedLocalCredit`. The full Quota package
-   passed on PG17 and PG18. The smoke process also paused PG18 and checked
-   local health. Process-kill at every individual SQL/commit boundary was not
-   run.
+   `TestDatabaseOutageOnlyAllowsConfirmedLocalCredit`.
+   `TestAllocationProcessCrashAtCommitBoundary` killed an actual child Go
+   process before and after PostgreSQL commit on both PG17 and PG18. A fresh
+   Quota instance observed 0/64 KiB durable debit at those boundaries and
+   then funded 64/128 KiB respectively, without restoring unspent credit.
+   The full Quota package passed on PG17 and PG18. The smoke process also
+   paused PG18 and checked local health. Process-kill at every individual
+   SQL statement boundary was not run.
 2. **Clock boundaries and recovery — partial pass.** PG18 tests:
    `TestSkewAndUncertaintyCloseConfirmedCredit`,
    `TestClockWarningIntervalIsVisibleWithoutClosingCredit`,
@@ -62,18 +70,24 @@ permission. All fixture runs removed their own containers and secrets.
    `TestUnknownKeyFetchHasSharedCooldown`,
    `TestOversizeAndUnavailableProviderCannotRegister`,
    `TestExpiredKnownVerificationKeyRefreshesBeforeUnknownKeyCooldown`,
+   `TestCancelledSlowTokenExchangeIsNotRetried`,
    `TestRestartCancelsUnfinishedLogin`, and
    `TestDatabaseOutageAfterVerifiedProviderResponseCreatesNoFallbackState`.
-   These use local provider fixtures. A real Google account/endpoints and every
-   malformed claim variant were not run in this slice.
+   The new test cancels an in-flight local token endpoint response, confirms
+   the callback worker exits, and rejects replay without a second provider
+   call. These use complete local provider HTTP fixtures; a live Google account
+   is a separate runtime integration gate, not a ticket-25 fault prerequisite.
 4. **Service publication and independent DB loss — partial pass.** HTTP/relay
    tests `TestServiceChangesAndOutagePublishCompleteSnapshot`,
    `TestNamedServiceWatchRepublishesOnEvent`,
    `TestOverrideRemovesOnlyItsTransportDependencyAndMissingUDPWithdrawsAll`,
    `TestFakeServiceRealClientDrainRestartAndRediscovery`, and
    `TestDrainingDiscoveryWithdrawsBeforeBackendAuth` passed in the race suite.
-   PG18 pause kept `/livez` and `/readyz` responsive; public `/livez` returned
-   404. A real Kubernetes API watch failure was not run.
+   `TestWatchFailureExpiresPublicationUntilVerifiedResync` returned 503 from a
+   local Kubernetes watch endpoint, advanced the publication clock, observed
+   Run's expiry tick withdraw the snapshot, then used a verified Service GET
+   to restore it. PG18 pause kept `/livez` and `/readyz` responsive; public
+   `/livez` returned 404. No real Kubernetes API was used.
 5. **Overload gates — partial pass.** New HTTP handler tests
    `TestPublicOverloadRejectsWithoutQueuingAndRecovers` (128 active, 129th
    immediate 503, recovery) and `TestPrivateHealthSurvivesSaturatedScrapeGate`
@@ -93,7 +107,12 @@ permission. All fixture runs removed their own containers and secrets.
    sockets, rejected the 513th, then served a new request after release.
    `TestSlowReadersPreservePrivateHealthAndRelease` held four responses at
    slow readers, kept private health responsive, and verified the handlers
-   exit on disconnect. Simultaneous saturation of every
+   exit on disconnect. `TestSessionCapRejectsDistinctPeerAndRecovers`
+   admitted one real libp2p session at a one-session test profile, rejected a
+   second distinct peer, then admitted a third after release.
+   `TestTransientConnectionScopeRejectsAtLimitAndRecovers` admitted 256 live
+   transient RM scopes, rejected the 257th, then admitted one after release.
+   Simultaneous saturation of every
    auth/Rendezvous/session/DB/RM gate was not run. Auth, Quota and
    `database.Runtime` use separate 64-unit gates, while other Auth/cleanup
    queries bypass them. This is a confirmed defect: one process-wide 64-unit
@@ -110,10 +129,15 @@ permission. All fixture runs removed their own containers and secrets.
    connections for one non-loopback address, beyond stock 8-connection subnet
    and 16-connection rate defaults. `TestUnknownResourceScopesBlockAtRuntime`
    rejected unknown protocol and service scopes at the live RM interface.
-   No independent runtime dump of all
-   resolved RM scopes, no stock traffic byte
-   attribution/overshoot measurement, and no Linux ARM64 representative
-   capacity run occurred.
+   `TestReporterChargesCurrentPeerAssociationAndRecordsUnattributedTail`
+   drove the report-time HOP/STOP callback against real authenticated sessions
+   and a complete Credit interface, measuring 24 bytes to the first account,
+   19 unattributed tail bytes, and 23 late bytes to a new account for the
+   same peer. It also ignored 17 custom-control bytes. Stock circuits already
+   assert both endpoint charges, but this callback test does not measure a
+   numerical asynchronous cutoff overshoot bound (none is specified). No
+   independent runtime dump of all resolved RM scopes or Linux ARM64
+   representative capacity run occurred.
 7. **Race and process resources — partial pass.** `go test -race` passed for
    relay replacement, revocation, drain, WebRTC setup, publication, and the
    new HTTP overload tests. The optional PG18 race pass ran
