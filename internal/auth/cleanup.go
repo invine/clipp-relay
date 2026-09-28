@@ -76,7 +76,11 @@ type cleanupQuery struct {
 // fairHiddenChild uses a keyset cursor over at most 16 hidden accounts and an
 // indexed, per-account LATERAL lookup. One large account gets the full batch;
 // several accounts share it. The last candidate ID becomes the next cursor.
-func fairHiddenChild(table, key, columns, source, accountRef, eligible string) cleanupQuery {
+type fairChildSpec struct {
+	table, key, columns, source, accountRef, eligible string
+}
+
+func fairHiddenChild(spec fairChildSpec) cleanupQuery {
 	const statement = `WITH after_cursor AS MATERIALIZED (
  SELECT a.id,0 AS phase FROM public.accounts a WHERE %[5]s AND a.id>$2::uuid
  AND EXISTS(SELECT 1 FROM %[4]s WHERE %[6]s=a.id %[7]s) ORDER BY a.id LIMIT 16
@@ -98,7 +102,7 @@ func fairHiddenChild(table, key, columns, source, accountRef, eligible string) c
 SELECT (SELECT count(*) FROM removed),(SELECT count(*) FROM candidates),
  (SELECT take FROM budget),
  COALESCE((SELECT id::text FROM candidates ORDER BY phase DESC,id DESC LIMIT 1),'')`
-	return cleanupQuery{sql: fmt.Sprintf(statement, table, key, columns, source, hiddenAccount, accountRef, eligible), full: cleanupBatchSize, fair: true}
+	return cleanupQuery{sql: fmt.Sprintf(statement, spec.table, spec.key, spec.columns, spec.source, hiddenAccount, spec.accountRef, spec.eligible), full: cleanupBatchSize, fair: true}
 }
 
 // Each statement is one transaction and changes at most 250 rows. A full
@@ -116,13 +120,13 @@ var cleanupQueries = []cleanupQuery{
 	{`DELETE FROM public.authorization_transactions WHERE id IN (SELECT id FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`, cleanupBatchSize, false},
 	{`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour' ORDER BY idle_expires_at LIMIT $1)`, cleanupBatchSize, false},
 	{`DELETE FROM public.portal_sessions WHERE credential_digest IN (SELECT credential_digest FROM public.portal_sessions WHERE absolute_expires_at<clock_timestamp()-interval '1 hour' ORDER BY absolute_expires_at LIMIT $1)`, cleanupBatchSize, false},
-	fairHiddenChild("public.authorization_codes", "credential_digest", "c.credential_digest", "public.authorization_codes c", "c.account_id", ""),
-	fairHiddenChild("public.relay_access_tokens", "credential_digest", "c.credential_digest", "public.relay_access_tokens c JOIN public.login_grants g ON g.id=c.grant_id", "g.account_id", ""),
-	fairHiddenChild("public.refresh_generations", "credential_digest", "c.credential_digest", "public.refresh_generations c JOIN public.login_grants g ON g.id=c.grant_id", "g.account_id", ""),
-	fairHiddenChild("public.login_grants", "id", "c.id", "public.login_grants c", "c.account_id", "AND NOT EXISTS(SELECT 1 FROM public.refresh_generations f WHERE f.grant_id=c.id) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens t WHERE t.grant_id=c.id)"),
-	fairHiddenChild("public.authorization_transactions", "id", "c.id", "public.authorization_transactions c", "c.account_id", ""),
-	fairHiddenChild("public.portal_sessions", "credential_digest", "c.credential_digest", "public.portal_sessions c", "c.account_id", ""),
-	fairHiddenChild("public.weekly_quota_usage", "(account_id,week_start)", "c.account_id,c.week_start", "public.weekly_quota_usage c", "c.account_id", ""),
+	fairHiddenChild(fairChildSpec{table: "public.authorization_codes", key: "credential_digest", columns: "c.credential_digest", source: "public.authorization_codes c", accountRef: "c.account_id"}),
+	fairHiddenChild(fairChildSpec{table: "public.relay_access_tokens", key: "credential_digest", columns: "c.credential_digest", source: "public.relay_access_tokens c JOIN public.login_grants g ON g.id=c.grant_id", accountRef: "g.account_id"}),
+	fairHiddenChild(fairChildSpec{table: "public.refresh_generations", key: "credential_digest", columns: "c.credential_digest", source: "public.refresh_generations c JOIN public.login_grants g ON g.id=c.grant_id", accountRef: "g.account_id"}),
+	fairHiddenChild(fairChildSpec{table: "public.login_grants", key: "id", columns: "c.id", source: "public.login_grants c", accountRef: "c.account_id", eligible: "AND NOT EXISTS(SELECT 1 FROM public.refresh_generations f WHERE f.grant_id=c.id) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens t WHERE t.grant_id=c.id)"}),
+	fairHiddenChild(fairChildSpec{table: "public.authorization_transactions", key: "id", columns: "c.id", source: "public.authorization_transactions c", accountRef: "c.account_id"}),
+	fairHiddenChild(fairChildSpec{table: "public.portal_sessions", key: "credential_digest", columns: "c.credential_digest", source: "public.portal_sessions c", accountRef: "c.account_id"}),
+	fairHiddenChild(fairChildSpec{table: "public.weekly_quota_usage", key: "(account_id,week_start)", columns: "c.account_id,c.week_start", source: "public.weekly_quota_usage c", accountRef: "c.account_id"}),
 	{`DELETE FROM public.deletion_operations d WHERE d.id IN (SELECT d2.id FROM public.deletion_operations d2 JOIN public.accounts a ON a.id=d2.account_id WHERE a.deleted_at<clock_timestamp()-interval '1 hour' AND d2.completed_at IS NOT NULL ORDER BY a.deleted_at,d2.id LIMIT $1)`, cleanupBatchSize, false},
 	{`DELETE FROM public.audit_events WHERE id IN (SELECT id FROM public.audit_events WHERE occurred_at<clock_timestamp()-interval '180 days' ORDER BY occurred_at LIMIT $1)`, cleanupBatchSize, false},
 	{`DELETE FROM public.accounts a WHERE a.id IN (SELECT a2.id FROM public.accounts a2 WHERE a2.deleted_at<clock_timestamp()-interval '1 hour' AND NOT EXISTS(SELECT 1 FROM public.authorization_codes c WHERE c.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.authorization_transactions x WHERE x.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.portal_sessions p WHERE p.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.login_grants g WHERE g.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.weekly_quota_usage u WHERE u.account_id=a2.id) AND NOT EXISTS(SELECT 1 FROM public.deletion_operations d WHERE d.account_id=a2.id) ORDER BY a2.deleted_at,a2.id LIMIT $1 FOR UPDATE OF a2 SKIP LOCKED)`, cleanupBatchSize, false},
