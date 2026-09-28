@@ -218,10 +218,17 @@ docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postg
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
 echo 'PostgreSQL 18 integration tests passed'
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
-CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/auth
-echo 'PostgreSQL 18 OIDC browser integration tests passed'
-CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/quota
-echo 'PostgreSQL 18 quota integration tests passed'
+if [[ "${CLIPP_FAULT_RACE_ONLY:-0}" != 1 ]]; then
+  CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/auth
+  echo 'PostgreSQL 18 OIDC browser integration tests passed'
+  CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/quota
+  echo 'PostgreSQL 18 quota integration tests passed'
+fi
+if [[ "${CLIPP_FAULT_RACE:-0}" == 1 ]]; then
+  CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/quota -run 'Test(LostCommitReplyReconcilesSameReceipt|KnownRollbackRetriesWithoutDoubleDebit|InvalidatedWorkerCannotInstallLateReceipt|CancelledWaiterCannotUseLocalCredit)$'
+  CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/auth -run 'Test(SuspensionWaitsForAccountRowLockAndRevokesRelayCredential|ConcurrentRegistrationImportsRetainedUsageOnce|ConcurrentEquivalentLoginsCreateOneAccount)$'
+  echo 'PostgreSQL 18 focused quota and account race tests passed'
+fi
 
 # Both supported majors must migrate and start with the same verified TLS policy.
 start_tls_pg "$supported_name" 17
