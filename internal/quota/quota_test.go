@@ -409,6 +409,36 @@ func TestClockWarningIntervalIsVisibleWithoutClosingCredit(t *testing.T) {
 	}
 }
 
+func TestClockUncertaintyIntervalBoundaries(t *testing.T) {
+	q := &Quota{}
+	// The sampled database time is deliberately near each limit. A 400ms
+	// request/response interval places the midpoint inside the limit, but its
+	// uncertainty interval crosses it.
+	probeAtOffset := func(offset time.Duration) {
+		t.Helper()
+		q.probeQuery = func(context.Context) (time.Time, error) {
+			time.Sleep(200 * time.Millisecond)
+			at := time.Now().Add(offset)
+			time.Sleep(200 * time.Millisecond)
+			return at, nil
+		}
+	}
+	probeAtOffset(900 * time.Millisecond)
+	if err := q.Probe(context.Background()); err != nil {
+		t.Fatalf("warning-only interval closed credit: %v", err)
+	}
+	if safe, warning, _ := q.ClockHealth(); !safe || !warning {
+		t.Fatalf("interval crossing 1s: safe=%v warning=%v", safe, warning)
+	}
+	probeAtOffset(4900 * time.Millisecond)
+	if err := q.Probe(context.Background()); !errors.Is(err, ErrTemporary) {
+		t.Fatalf("interval crossing 5s remained open: %v", err)
+	}
+	if safe, _, _ := q.ClockHealth(); safe {
+		t.Fatal("interval crossing 5s remained healthy")
+	}
+}
+
 func TestDelayedCommitReplyCannotExtendMondayCredit(t *testing.T) {
 	q, id, pool := fixture(t)
 	boundary := weekStart(time.Now()).AddDate(0, 0, 7)

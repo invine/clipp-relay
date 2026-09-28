@@ -87,6 +87,10 @@ type clockState struct {
 	warning     bool
 }
 
+func clockIntervalWithin(offset, uncertainty, limit time.Duration) bool {
+	return uncertainty >= 0 && uncertainty <= limit && offset >= -limit+uncertainty && offset <= limit-uncertainty
+}
+
 // ClockHealth exposes bounded, identity-free clock status for diagnostics.
 func (q *Quota) ClockHealth() (safe, warning bool, sampled time.Time) {
 	safe = q.clockOK()
@@ -246,8 +250,8 @@ func (q *Quota) Probe(ctx context.Context) error {
 	}
 	q.clock.sampled = after
 	q.clock.sampledMono = time.Now()
-	q.clock.warning = offset > time.Second || offset < -time.Second || uncertainty > time.Second
-	valid := uncertainty <= time.Second && offset <= 5*time.Second && offset >= -5*time.Second
+	q.clock.warning = !clockIntervalWithin(offset, uncertainty, time.Second)
+	valid := uncertainty <= time.Second && clockIntervalWithin(offset, uncertainty, 5*time.Second)
 	if !valid {
 		q.clock.safe = false
 		q.clock.recovering = 0
@@ -458,7 +462,10 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 	dbTime = q.dbTime(dbTime)
 	uncertainty := after.Sub(before) / 2
 	offset := dbTime.Sub(before.Add(uncertainty))
-	if uncertainty > time.Second || offset > 5*time.Second || offset < -5*time.Second {
+	q.clock.mu.Lock()
+	q.clock.warning = !clockIntervalWithin(offset, uncertainty, time.Second)
+	q.clock.mu.Unlock()
+	if uncertainty > time.Second || !clockIntervalWithin(offset, uncertainty, 5*time.Second) {
 		q.clock.mu.Lock()
 		q.clock.safe = false
 		q.clock.recovering = 0

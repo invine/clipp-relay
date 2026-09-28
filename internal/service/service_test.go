@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"clipp-relay/internal/service"
 )
@@ -121,5 +123,91 @@ func TestRendezvousMetricsHaveOnlyFixedVersionLabels(t *testing.T) {
 	body := metric.Body.String()
 	if metric.Code != 200 || !strings.Contains(body, `clipp_relay_rendezvous_requests_total{version="1"} 7`) || !strings.Contains(body, `clipp_relay_rendezvous_requests_total{version="2"} 11`) || strings.Contains(body, "peer=") || strings.Contains(body, "account=") {
 		t.Fatalf("metrics: %d %q", metric.Code, body)
+	}
+}
+
+func TestPublicOverloadRejectsWithoutQueuingAndRecovers(t *testing.T) {
+	s := service.New()
+	entered := make(chan struct{}, 128)
+	release := make(chan struct{})
+	s.SetPublicHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		entered <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	var workers sync.WaitGroup
+	for range 128 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			out := httptest.NewRecorder()
+			s.PublicHandler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/", nil))
+			if out.Code != http.StatusNoContent {
+				t.Errorf("admitted request: %d", out.Code)
+			}
+		}()
+	}
+	for range 128 {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			close(release)
+			workers.Wait()
+			t.Fatal("public gate failed to admit 128 requests")
+		}
+	}
+	start := time.Now()
+	out := httptest.NewRecorder()
+	s.PublicHandler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/", nil))
+	if out.Code != http.StatusServiceUnavailable || time.Since(start) > time.Second {
+		close(release)
+		workers.Wait()
+		t.Fatalf("overload queued: %d after %s", out.Code, time.Since(start))
+	}
+	close(release)
+	workers.Wait()
+	// A released slot must admit new work.
+	out = httptest.NewRecorder()
+	s.SetPublicHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	s.PublicHandler().ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/", nil))
+	if out.Code != http.StatusNoContent {
+		t.Fatalf("gate did not recover: %d", out.Code)
+	}
+}
+
+func TestPrivateHealthSurvivesSaturatedScrapeGate(t *testing.T) {
+	s := service.New()
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	s.SetCleanupMetrics(func(context.Context) (service.CleanupSample, error) {
+		entered <- struct{}{}
+		<-release
+		return service.CleanupSample{}, nil
+	})
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			s.PrivateHandler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(release)
+			workers.Wait()
+			t.Fatal("scrape gate did not fill")
+		}
+	}
+	metric := httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(metric, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	health := httptest.NewRecorder()
+	s.PrivateHandler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/livez", nil))
+	close(release)
+	workers.Wait()
+	if metric.Code != http.StatusServiceUnavailable || health.Code != http.StatusOK {
+		t.Fatalf("scrape=%d health=%d", metric.Code, health.Code)
 	}
 }
