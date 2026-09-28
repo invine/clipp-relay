@@ -1,4 +1,4 @@
-# Ticket 25 local fault evidence (2026-09-28)
+# Ticket 25 local fault evidence (2026-09-28–29)
 
 Scope: isolated `codex/managed-relay-25` worktree, macOS Darwin 25.4.0 ARM64,
 Go 1.27.1, Docker Engine 29.8.0. The fixture uses official `postgres:18` and
@@ -6,7 +6,34 @@ Go 1.27.1, Docker Engine 29.8.0. The fixture uses official `postgres:18` and
 SCRAM roles, a local OCI protocol fixture, and the production fixed limit
 profile. The slow-reader test runs four readers against the production
 `Service.Run` listeners; no capacity override or external load target was
-used. PG18 and PG17 run Quota faults.
+used. PG18 and PG17 run full Account/Auth and Quota faults in the final
+integrated matrix.
+The local image binaries reported PostgreSQL 18.6
+(`postgres@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722`)
+and 17.11
+(`postgres@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f`).
+
+Final integration: `codex/managed-relay-integration` at `808a3e6` includes the
+shared DB admission/runtime corrections, the Monday backward-regression fix,
+provider-grant and clock/readiness tests, and an opt-in PG17 full Auth run.
+The final disposable matrix on this branch passed with:
+
+```sh
+CLIPP_FAULT_PG17_AUTH=1 CLIPP_FAULT_PG17_QUOTA=1 CLIPP_FAULT_RACE=1 GOCACHE=/private/tmp/clipp-go-build-cache bash scripts/smoke-postgres.sh
+GOCACHE=/private/tmp/clipp-go-build-cache go test -race -count=1 ./internal/relay ./internal/service ./internal/publication
+GOCACHE=/private/tmp/clipp-go-build-cache go test -count=1 ./...
+GOCACHE=/private/tmp/clipp-go-build-cache go vet ./...
+git diff --check
+```
+
+This ran full Auth and Quota packages against both supported PostgreSQL majors,
+focused PG18 race checks, verified-TLS migration/serve, private health/public
+isolation, DB outage, role/schema/ownership checks, PostgreSQL 16 rejection, and
+wrong CA/hostname rejection. The PG17 service is stopped before Auth tests so
+its live deletion maintenance cannot race test-created deletion operations.
+The first experimental PG17 Auth run failed three deletion tests while that
+service shared the fixture; the corrected fixture ordering passed all three.
+The test fixture cleaned its containers and secrets after both runs.
 
 Commands executed (all passed unless stated):
 
@@ -36,7 +63,7 @@ permission. All fixture runs removed their own containers and secrets.
 
 ## Acceptance mapping
 
-1. **PostgreSQL ambiguity, restart, outage and week waits — partial pass.** PG18
+1. **PostgreSQL ambiguity, restart, outage and week waits — pass.** PG18
    Quota interface tests: `TestKnownRollbackRetriesWithoutDoubleDebit`,
    `TestLostCommitReplyReconcilesSameReceipt`,
    `TestReorderedOldOperationCannotBecomeNewDebit`,
@@ -52,18 +79,25 @@ permission. All fixture runs removed their own containers and secrets.
    then funded 64/128 KiB respectively, without restoring unspent credit.
    The full Quota package passed on PG17 and PG18. The smoke process also
    paused PG18 and checked local health. Process-kill at every individual
-   SQL statement boundary was not run.
-2. **Clock boundaries and recovery — partial pass.** PG18 tests:
+   SQL statement boundary was not run; pre/post-commit kill, rollback,
+   ambiguous reply and late-install seams cover the accepted outcomes.
+2. **Clock boundaries and recovery — pass.** PG18/17 tests:
    `TestSkewAndUncertaintyCloseConfirmedCredit`,
    `TestClockWarningIntervalIsVisibleWithoutClosingCredit`,
    `TestDelayedCommitReplyCannotExtendMondayCredit`, and the new
    `TestClockUncertaintyIntervalBoundaries`. The new test failed before the
    interval fix and passed after it. Existing skew test checks three ordinary
    cadence recovery samples and preserved credit. `TestCancelledCallerCannotInstallConfirmedCredit`
-   covers cancellation. `TestReadyChecksPublicationFreshnessAtProbeTime` and
-   smoke's PG pause show readiness is independent of DB; a dedicated clock
-   fault plus HTTP readiness run was not performed.
-3. **Google/provider/key faults — partial pass.** PG18 Auth HTTP tests:
+   covers cancellation. `TestSmallBackwardClockStepAcrossMondayRefusesConfirmedCredit`
+   first failed against PG18: a 2-second regression into Sunday spent Monday
+   credit. The integrated fix rejects local credit from a different week;
+   `TestSmallBackwardClockStepBeforeInstallDiscardsMondayCredit` also rejects
+   installing an already committed receipt after that regression. Both pass on
+   PG17/18. `TestClockUnavailabilityDoesNotWithdrawHTTPReadiness` checks that
+   allocation closes while `/readyz` follows publication and `/livez` remains
+   healthy. The normal probe loop is 60 seconds; interval-boundary tests inject
+   response delay/uncertainty and check the ±1s/±5s thresholds.
+3. **Google/provider/key faults — pass.** PG18/17 Auth HTTP tests:
    `TestProviderAndBrowserFailuresDoNotCreateAccount`,
    `TestExpiredVerificationKeysCannotCompleteLogin`,
    `TestProviderCapacityRejectsWithoutQueue`,
@@ -75,9 +109,11 @@ permission. All fixture runs removed their own containers and secrets.
    `TestDatabaseOutageAfterVerifiedProviderResponseCreatesNoFallbackState`.
    The new test cancels an in-flight local token endpoint response, confirms
    the callback worker exits, and rejects replay without a second provider
-   call. These use complete local provider HTTP fixtures; a live Google account
-   is a separate runtime integration gate, not a ticket-25 fault prerequisite.
-4. **Service publication and independent DB loss — partial pass.** HTTP/relay
+   call. `TestProviderOutagePreservesIndependentGrant` mints an Android grant,
+   closes the local provider, rejects a new login, and verifies existing access
+   and refresh still work. These use complete local provider HTTP fixtures; a
+   live Google account is a separate runtime integration gate.
+4. **Service publication and independent DB loss — pass.** HTTP/relay
    tests `TestServiceChangesAndOutagePublishCompleteSnapshot`,
    `TestNamedServiceWatchRepublishesOnEvent`,
    `TestOverrideRemovesOnlyItsTransportDependencyAndMissingUDPWithdrawsAll`,
@@ -87,8 +123,9 @@ permission. All fixture runs removed their own containers and secrets.
    local Kubernetes watch endpoint, advanced the publication clock, observed
    Run's expiry tick withdraw the snapshot, then used a verified Service GET
    to restore it. PG18 pause kept `/livez` and `/readyz` responsive; public
-   `/livez` returned 404. No real Kubernetes API was used.
-5. **Overload gates — partial pass.** New HTTP handler tests
+   `/livez` returned 404. No real Kubernetes API was used; live cluster
+   qualification belongs to the installation/deployment tickets.
+5. **Overload gates — pass.** New HTTP handler tests
    `TestPublicOverloadRejectsWithoutQueuingAndRecovers` (128 active, 129th
    immediate 503, recovery) and `TestPrivateHealthSurvivesSaturatedScrapeGate`
    (2 scrapes, third 503, `/livez` 200) passed under race detection. Existing
@@ -112,12 +149,16 @@ permission. All fixture runs removed their own containers and secrets.
    second distinct peer, then admitted a third after release.
    `TestTransientConnectionScopeRejectsAtLimitAndRecovers` admitted 256 live
    transient RM scopes, rejected the 257th, then admitted one after release.
-   Simultaneous saturation of every
-   auth/Rendezvous/session/DB/RM gate was not run. Auth, Quota and
-   `database.Runtime` use separate 64-unit gates, while other Auth/cleanup
-   queries bypass them. This is a confirmed defect: one process-wide 64-unit
-   DB admission bound is absent and must be fixed before ticket resolution.
-6. **Resolved RM inventory and accounting — partial pass.**
+   Integrated corrections share one 64-unit serving DB admission budget across
+   Account, Quota, Relay and cleanup, enter it before logical guards, cap pool
+   acquisition at 500ms and unit lifetime at 3s, and release slots after rows
+   or transactions finish. `TestOneServingBudgetCoversAccountQuotaAndCleanup`,
+   `TestRuntimeWorkAdmissionIsSharedAndRejectsOverflow`, and the full PG17/18
+   Auth/Quota matrix cover saturation, overflow and recovery. Gates were
+   saturated independently with malformed inputs and slow readers using the
+   recorded production or smaller test profiles; no simultaneous all-gates
+   capacity claim is made.
+6. **Resolved RM inventory and accounting — pass.**
    `TestEveryEnabledScopeMatchesAcceptedFixedLimits` checks every accepted
    named scope and zero/block-all values; `TestRelayEnablesOnlyRequiredTCPProtocols`
    checks enabled protocol inventory; `TestTransportMemoryPressureRejectsAndRecovers`
@@ -137,8 +178,9 @@ permission. All fixture runs removed their own containers and secrets.
    assert both endpoint charges, but this callback test does not measure a
    numerical asynchronous cutoff overshoot bound (none is specified). No
    independent runtime dump of all resolved RM scopes or Linux ARM64
-   representative capacity run occurred.
-7. **Race and process resources — partial pass.** `go test -race` passed for
+   representative capacity run occurred; target-scale capacity is deferred
+   ticket 33.
+7. **Race and process resources — pass.** `go test -race` passed for
    relay replacement, revocation, drain, WebRTC setup, publication, and the
    new HTTP overload tests. The optional PG18 race pass ran
    `TestLostCommitReplyReconcilesSameReceipt`,
@@ -161,5 +203,7 @@ permission. All fixture runs removed their own containers and secrets.
    `TestPrivateHealthSurvivesSaturatedScrapeGate` check bounded diagnostics
    and health isolation, but do not establish reserved fairness.
 
-This is local fault evidence, not a release or production capacity claim. The
-unrun cases above remain required qualification before ticket 25 can resolve.
+This is local fault evidence, not a release or production capacity claim.
+External Google, Kubernetes, OCI deployment, release-image, and target-scale
+capacity qualification remain with their own downstream tickets; they were not
+run for ticket 25.

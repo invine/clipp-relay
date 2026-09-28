@@ -4,7 +4,7 @@
 
 **Blocked by:** [09: Revoke access and change live quotas](09-revoke-access-and-change-live-quotas.md); [11: Rediscover and drain an ephemeral relay](11-rediscover-and-drain-an-ephemeral-relay.md); [17: Enforce retention and pepper rotation](17-enforce-retention-and-pepper-rotation.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I3–I6, I8, I11, I12; Testing.
@@ -23,13 +23,13 @@ Exercise every accepted fixed Resource Manager scope, control/body/time/rate gat
 
 ## Acceptance criteria
 
-- [ ] Run real PostgreSQL rollback, ambiguous commit, lost allocation response, late receipt, crash/restart, Monday-crossing guard waits and outage scenarios; never double-install credit or spend unconfirmed allocation.
-- [ ] Verify clock warning/closed/recovery boundaries, jittered timing, unsafe week regression and cancellation without refund/deadline extension or readiness dependency.
-- [ ] Fault Google endpoint/key refresh/cooldown/oversize/slow I/O and ambiguous exchanges; prove strict validation, bounded work and existing-grant behavior.
-- [ ] Fault Service watch/resync and DB independently, proving publication expiry and correct readiness/drain behavior with no public self-dial dependency.
-- [ ] Saturate each HTTP/auth/Rendezvous/session/RM/DB gate with malformed inputs and slow readers; measure bounded active/waiting state, rejection/retry recovery and resource release.
-- [ ] Check exact resolved RM inventory—including zero/block-all semantics, no hidden autoscaling/allowlist/IP/subnet defaults—and per-handler service/buffer accounting.
-- [ ] Run Go race detection for replacement/revocation/cleanup/drain/concurrent allocation scenarios; report memory/FD/goroutine behavior and bounded private health/diagnostic queues without claiming reserved fairness.
+- [x] Run real PostgreSQL rollback, ambiguous commit, lost allocation response, late receipt, crash/restart, Monday-crossing guard waits and outage scenarios; never double-install credit or spend unconfirmed allocation.
+- [x] Verify clock warning/closed/recovery boundaries, jittered timing, unsafe week regression and cancellation without refund/deadline extension or readiness dependency.
+- [x] Fault Google endpoint/key refresh/cooldown/oversize/slow I/O and ambiguous exchanges; prove strict validation, bounded work and existing-grant behavior.
+- [x] Fault Service watch/resync and DB independently, proving publication expiry and correct readiness/drain behavior with no public self-dial dependency.
+- [x] Saturate each HTTP/auth/Rendezvous/session/RM/DB gate with malformed inputs and slow readers; measure bounded active/waiting state, rejection/retry recovery and resource release.
+- [x] Check exact resolved RM inventory—including zero/block-all semantics, no hidden autoscaling/allowlist/IP/subnet defaults—and per-handler service/buffer accounting.
+- [x] Run Go race detection for replacement/revocation/cleanup/drain/concurrent allocation scenarios; report memory/FD/goroutine behavior and bounded private health/diagnostic queues without claiming reserved fairness.
 
 ## Demonstration
 
@@ -57,3 +57,5 @@ provisioning, publication or load generation against an unapproved target.
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-28 after all predecessors were resolved, including ticket 17 at `fdf9db2`. Assigned to a fresh-context implementation agent in a separate Go worktree for `/implement`, TDD, review and local commits. Resolution requires integrated fault and overload evidence; no unapproved external target or publication is authorized.
+
+- Resolved centrally on 2026-09-29 after reviewed isolated implementation, TDD for the shared DB budget and Monday regression, local commits, cherry-pick integration, and final-tree verification. [Local fault evidence](../25-local-fault-evidence.md) records the reproducible PG17/18 matrix, provider/publication/clock/resource faults, bounds and measurements, an initially failing PG17 fixture run and its correction, and exact pass/not-run scope. Final canonical commands passed: `CLIPP_FAULT_PG17_AUTH=1 CLIPP_FAULT_PG17_QUOTA=1 CLIPP_FAULT_RACE=1 GOCACHE=/private/tmp/clipp-go-build-cache bash scripts/smoke-postgres.sh`, `GOCACHE=/private/tmp/clipp-go-build-cache go test -race -count=1 ./internal/relay ./internal/service ./internal/publication`, `GOCACHE=/private/tmp/clipp-go-build-cache go test -count=1 ./...`, and `GOCACHE=/private/tmp/clipp-go-build-cache go vet ./...`. All work stayed local; no external provider, cluster, publication or load target was changed.
