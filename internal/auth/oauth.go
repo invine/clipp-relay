@@ -150,7 +150,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	}
 	s.consents[id] = oauthConsent{intent: intent, account: account, binding: binding, version: version, expires: now.Add(10 * time.Minute), epoch: s.flowEpoch}
 	s.mu.Unlock()
-	tx, e := s.Pool.Begin(r.Context())
+	tx, e := s.db.Begin(r.Context())
 	if e != nil {
 		s.dropConsent(id)
 		s.oauthError(w, 503)
@@ -215,12 +215,22 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var subject string
-	if e = s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); e != nil {
+	if e = s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); e != nil {
 		s.oauthError(w, 401)
 		return
 	}
+	unitCtx, releaseUnit, e := s.db.StartUnit(r.Context())
+	if e != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	defer releaseUnit()
+	r = r.WithContext(unitCtx)
 	guard := s.identityGuard(s.identityKey(subject))
-	guard.Lock()
+	if !lockIdentity(unitCtx, guard) {
+		s.oauthError(w, 503)
+		return
+	}
 	defer guard.Unlock()
 	id := r.PostForm.Get("flow")
 	s.mu.Lock()
@@ -235,7 +245,7 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var storedGeneration int64
-	e = s.Pool.QueryRow(r.Context(), `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND pepper_version=$3 AND flow_kind='clipp' AND account_id=$4 AND client_type=$5 AND redirect_uri=$6 AND challenge=$7 AND client_state_digest=$8 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING credential_generation`, s.digest(version, "consent-id", id), consent.binding, version, account, consent.intent.client, consent.intent.redirect, consent.intent.challenge, s.digest(version, "client-state", consent.intent.state)).Scan(&storedGeneration)
+	e = s.db.QueryRow(r.Context(), `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND pepper_version=$3 AND flow_kind='clipp' AND account_id=$4 AND client_type=$5 AND redirect_uri=$6 AND challenge=$7 AND client_state_digest=$8 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING credential_generation`, s.digest(version, "consent-id", id), consent.binding, version, account, consent.intent.client, consent.intent.redirect, consent.intent.challenge, s.digest(version, "client-state", consent.intent.state)).Scan(&storedGeneration)
 	if e != nil {
 		s.oauthError(w, 401)
 		return
@@ -248,7 +258,7 @@ func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, account strin
 		s.oauthError(w, 503)
 		return
 	}
-	tx, e := s.Pool.Begin(r.Context())
+	tx, e := s.db.Begin(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
@@ -378,7 +388,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client str
 	var digest []byte
 	for v := range s.Peppers {
 		d := s.digest(v, "authorization-code", code)
-		e := s.Pool.QueryRow(r.Context(), `SELECT account_id FROM public.authorization_codes WHERE credential_digest=$1 AND pepper_version=$2`, d, v).Scan(&account)
+		e := s.db.QueryRow(r.Context(), `SELECT account_id FROM public.authorization_codes WHERE credential_digest=$1 AND pepper_version=$2`, d, v).Scan(&account)
 		if e == nil {
 			version = v
 			digest = d
@@ -393,7 +403,7 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client str
 		s.oauthError(w, 401)
 		return
 	}
-	tx, e := s.Pool.Begin(r.Context())
+	tx, e := s.db.Begin(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
@@ -476,7 +486,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 	var digest []byte
 	for v := range s.Peppers {
 		d := s.digest(v, "refresh-token", raw)
-		e := s.Pool.QueryRow(r.Context(), `SELECT g.account_id FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE f.credential_digest=$1 AND f.pepper_version=$2`, d, v).Scan(&account)
+		e := s.db.QueryRow(r.Context(), `SELECT g.account_id FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE f.credential_digest=$1 AND f.pepper_version=$2`, d, v).Scan(&account)
 		if e == nil {
 			version = v
 			digest = d
@@ -491,7 +501,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 		s.oauthError(w, 401)
 		return
 	}
-	tx, e := s.Pool.Begin(r.Context())
+	tx, e := s.db.Begin(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
@@ -571,7 +581,7 @@ func (s *Server) AuthenticateAccess(ctx context.Context, raw string) (string, ti
 		var account, status string
 		var tokenGeneration, accountGeneration int64
 		var until time.Time
-		e := s.Pool.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,t.expires_at FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp() AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&account, &status, &tokenGeneration, &accountGeneration, &until)
+		e := s.db.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,t.expires_at FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp() AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&account, &status, &tokenGeneration, &accountGeneration, &until)
 		if e == nil {
 			if status != "Active" || tokenGeneration != accountGeneration {
 				return "", time.Time{}, errInvalidSession

@@ -37,15 +37,15 @@ func (a *policyAuthority) AuthenticateRelay(_ context.Context, token string) (au
 	return auth.RelayCredential{AccountID: "a", SessionLimit: cap, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
 }
 
-func (a *policyAuthority) WithAccountGuards(_ context.Context, _ []string, work func()) bool {
+func (a *policyAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
 	a.guard.Lock()
 	defer a.guard.Unlock()
-	work()
+	work(ctx)
 	return true
 }
 
 func (a *policyAuthority) change(active bool, cap int, s *Server) {
-	a.WithAccountGuards(context.Background(), []string{"a"}, func() {
+	a.WithAccountGuards(context.Background(), []string{"a"}, func(context.Context) {
 		a.mu.Lock()
 		a.active, a.cap = active, cap
 		a.mu.Unlock()

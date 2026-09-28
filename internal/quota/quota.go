@@ -48,9 +48,7 @@ func (b *balance) clearPending() {
 }
 
 type Quota struct {
-	pool          *pgxpool.Pool
 	runtime       *database.Runtime
-	units         chan struct{}
 	mu            sync.Mutex
 	balances      map[string]*balance
 	clock         clockState
@@ -100,7 +98,12 @@ func (q *Quota) ClockHealth() (safe, warning bool, sampled time.Time) {
 }
 
 func New(pool *pgxpool.Pool) *Quota {
-	q := &Quota{pool: pool, runtime: database.NewRuntime(pool), units: make(chan struct{}, 64), balances: make(map[string]*balance), stop: make(chan struct{}), done: make(chan struct{})}
+	return NewWithRuntime(database.NewRuntime(pool))
+}
+
+// NewWithRuntime joins Quota to the serving process's shared DB work budget.
+func NewWithRuntime(runtime *database.Runtime) *Quota {
+	q := &Quota{runtime: runtime, balances: make(map[string]*balance), stop: make(chan struct{}), done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = q.Probe(ctx)
 	cancel()
@@ -307,14 +310,19 @@ func (q *Quota) Ensure(ctx context.Context, id string, generation int64) (Result
 }
 
 func (q *Quota) take(ctx context.Context, id string, generation, bytes int64, ensure bool) (Result, error) {
-	unitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	select {
-	case q.units <- struct{}{}:
-		defer func() { <-q.units }()
-	case <-unitCtx.Done():
+	var result Result
+	err := q.runtime.WithUnit(ctx, func(unitCtx context.Context) error {
+		var workErr error
+		result, workErr = q.takeAdmitted(unitCtx, id, generation, bytes, ensure)
+		return workErr
+	})
+	if errors.Is(err, database.ErrWorkUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return Result{}, ErrTemporary
 	}
+	return result, err
+}
+
+func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, bytes int64, ensure bool) (Result, error) {
 	if unitCtx.Err() != nil {
 		return Result{}, ErrTemporary
 	}
@@ -336,7 +344,13 @@ func (q *Quota) take(ctx context.Context, id string, generation, bytes int64, en
 	}
 	b := q.acquire(id)
 	defer q.release(id, b)
-	b.mu.Lock()
+	for !b.mu.TryLock() {
+		select {
+		case <-unitCtx.Done():
+			return Result{}, ErrTemporary
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 	defer b.mu.Unlock()
 	if unitCtx.Err() != nil || !q.clockOK() {
 		return Result{}, ErrTemporary
@@ -425,9 +439,7 @@ var errExpiredReceipt = errors.New("old-week receipt discarded")
 var errStaleOperation = errors.New("stale quota operation")
 
 func (q *Quota) fund(ctx context.Context, id string, generation int64, op string, pendingWeek time.Time, pendingGeneration, pendingSequence int64) (funding, error) {
-	admissionCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-	tx, err := q.pool.BeginTx(admissionCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	cancel()
+	tx, err := q.runtime.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return funding{}, ErrTemporary
 	}

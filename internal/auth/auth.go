@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/config"
+	"clipp-relay/internal/database"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -52,6 +53,7 @@ func Google() Provider {
 
 type Server struct {
 	Pool                               *pgxpool.Pool
+	db                                 *database.Runtime
 	Origin, ClientID, ClientSecret     string
 	AndroidRedirect, ExtensionRedirect string
 	AdminAllowlistFile                 string
@@ -63,7 +65,6 @@ type Server struct {
 	mu                                 sync.Mutex
 	identityGuards                     [4096]sync.Mutex
 	accountGuards                      sync.Map
-	accountUnits                       chan struct{}
 	uncertainAccounts                  sync.Map
 	fenceKey                           [32]byte
 	fences                             map[[32]byte]identityFence
@@ -99,34 +100,40 @@ type Server struct {
 
 // WithAccountGuards orders all local account operations before their SQL row
 // locks. Relay admission holds the same guard through registry installation.
-func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func()) bool {
-	select {
-	case s.accountUnits <- struct{}{}:
-		defer func() { <-s.accountUnits }()
-	case <-ctx.Done():
-		return false
-	}
-	ordered := append([]string(nil), ids...)
-	sort.Strings(ordered)
-	guards := make([]*sync.Mutex, 0, len(ordered))
-	var previous string
-	for _, id := range ordered {
-		if len(guards) > 0 && id == previous {
-			continue
+func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(context.Context)) bool {
+	executed := false
+	err := s.db.WithUnit(ctx, func(unitCtx context.Context) error {
+		ordered := append([]string(nil), ids...)
+		sort.Strings(ordered)
+		guards := make([]chan struct{}, 0, len(ordered))
+		defer func() {
+			for i := len(guards) - 1; i >= 0; i-- {
+				<-guards[i]
+			}
+		}()
+		var previous string
+		for _, id := range ordered {
+			if len(guards) > 0 && id == previous {
+				continue
+			}
+			previous = id
+			value, _ := s.accountGuards.LoadOrStore(id, make(chan struct{}, 1))
+			guard := value.(chan struct{})
+			select {
+			case guard <- struct{}{}:
+				guards = append(guards, guard)
+			case <-unitCtx.Done():
+				return unitCtx.Err()
+			}
 		}
-		previous = id
-		value, _ := s.accountGuards.LoadOrStore(id, &sync.Mutex{})
-		guard := value.(*sync.Mutex)
-		guard.Lock()
-		guards = append(guards, guard)
-	}
-	defer func() {
-		for i := len(guards) - 1; i >= 0; i-- {
-			guards[i].Unlock()
+		if err := unitCtx.Err(); err != nil {
+			return err
 		}
-	}()
-	work()
-	return true
+		executed = true
+		work(unitCtx)
+		return nil
+	})
+	return err == nil && executed
 }
 
 // CapacitySample is a separate, aggregate live observation. Nil counts mean
@@ -158,7 +165,7 @@ func (s *Server) SampleActiveGrants(parent context.Context, accountID string) (C
 	ctx, cancel := context.WithTimeout(parent, 500*time.Millisecond)
 	defer cancel()
 	var count int
-	err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM public.login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
 	if err != nil {
 		return CapacitySample{}, err
 	}
@@ -210,12 +217,19 @@ type uncertainMutation struct {
 }
 
 func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provider) *Server {
+	return NewWithRuntime(database.NewRuntime(pool), c, m, provider)
+}
+
+// NewWithRuntime joins the Account module to the serving process's shared DB
+// admission budget. The runtime must be the same one passed to Quota.
+func NewWithRuntime(runtime *database.Runtime, c config.Config, m config.Material, provider Provider) *Server {
+	pool := runtime.Pool
 	client := provider.Client
 	if client == nil {
 		client = &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{MaxResponseHeaderBytes: 16 << 10}}
 	}
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	s := &Server{Pool: pool, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), accountUnits: make(chan struct{}, 64), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}, cleanupAccountCursors: make([]string, len(cleanupQueries))}
+	s := &Server{Pool: pool, db: runtime, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}, cleanupAccountCursors: make([]string, len(cleanupQueries))}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
@@ -232,21 +246,47 @@ func (s *Server) identityGuard(key [32]byte) *sync.Mutex {
 	return &s.identityGuards[int(key[0])<<4|int(key[1]>>4)]
 }
 
+func lockIdentity(ctx context.Context, guard *sync.Mutex) bool {
+	for !guard.TryLock() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if ctx.Err() != nil {
+		guard.Unlock()
+		return false
+	}
+	return true
+}
+
 // WithIdentityFence serializes a security mutation against Google callback completion.
 // It fences every older continuation even if work returns an uncertain error.
 func (s *Server) WithIdentityFence(subject string, work func() error) error {
-	return s.withIdentityGuard(subject, func() error {
-		s.installIdentityFence(subject)
-		return work()
-	})
-}
-
-func (s *Server) withIdentityGuard(subject string, work func() error) error {
-	key := s.identityKey(subject)
-	guard := s.identityGuard(key)
+	guard := s.identityGuard(s.identityKey(subject))
 	guard.Lock()
 	defer guard.Unlock()
+	s.installIdentityFence(subject)
 	return work()
+}
+
+func (s *Server) withIdentityGuard(ctx context.Context, subject string, work func(context.Context) error) error {
+	unitCtx, releaseUnit, err := s.db.StartUnit(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseUnit()
+	key := s.identityKey(subject)
+	guard := s.identityGuard(key)
+	if !lockIdentity(unitCtx, guard) {
+		return unitCtx.Err()
+	}
+	defer guard.Unlock()
+	if err := work(unitCtx); err != nil {
+		return err
+	}
+	return unitCtx.Err()
 }
 
 // The caller holds the identity guard. Installing this after a security commit
@@ -406,7 +446,7 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	_, e = s.Pool.Exec(ctx, `INSERT INTO public.authorization_transactions (id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp()+interval '10 minutes')`, id, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "google-nonce", nonce), s.digest(s.CurrentPepper, "browser-binding", binding), s.CurrentPepper)
+	_, e = s.db.Exec(ctx, `INSERT INTO public.authorization_transactions (id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp()+interval '10 minutes')`, id, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "google-nonce", nonce), s.digest(s.CurrentPepper, "browser-binding", binding), s.CurrentPepper)
 	if e != nil {
 		s.mu.Lock()
 		delete(s.flows, state)
@@ -449,7 +489,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	var claimed string
-	e = s.Pool.QueryRow(ctx, `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND nonce_digest=$3 AND pepper_version=$4 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING id`, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "browser-binding", bind.Value), s.digest(s.CurrentPepper, "google-nonce", f.nonce), s.CurrentPepper).Scan(&claimed)
+	e = s.db.QueryRow(ctx, `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND nonce_digest=$3 AND pepper_version=$4 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING id`, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "browser-binding", bind.Value), s.digest(s.CurrentPepper, "google-nonce", f.nonce), s.CurrentPepper).Scan(&claimed)
 	if e != nil {
 		fail(w, 400)
 		return
@@ -464,8 +504,17 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := s.identityKey(claims.Subject)
+	ctx, releaseUnit, e := s.db.StartUnit(ctx)
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	defer releaseUnit()
 	guard := s.identityGuard(key)
-	guard.Lock()
+	if !lockIdentity(ctx, guard) {
+		fail(w, 503)
+		return
+	}
 	defer guard.Unlock()
 	s.mu.Lock()
 	fence := s.fences[key]
@@ -494,7 +543,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.db.Begin(ctx)
 	if e != nil {
 		fail(w, 503)
 		return
@@ -751,7 +800,7 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 		var generation int64
 		var storedVersion uint64
 		var storedCSRF []byte
-		e = s.Pool.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, digest, version).Scan(&id, &status, &email, &subject, &generation, &storedVersion, &storedCSRF)
+		e = s.db.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, digest, version).Scan(&id, &status, &email, &subject, &generation, &storedVersion, &storedCSRF)
 		if e == nil {
 			if _, uncertain := s.uncertainAccounts.Load(id); uncertain {
 				return "", 0, "", "", "", errInvalidSession
@@ -764,7 +813,7 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 				return "", 0, "", "", "", errors.New("csrf")
 			}
 			var extended bool
-			e = s.Pool.QueryRow(r.Context(), `UPDATE public.portal_sessions ps SET last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 minutes') WHERE ps.credential_digest=$1 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND EXISTS (SELECT 1 FROM public.accounts a WHERE a.id=ps.account_id AND a.credential_generation=ps.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')) RETURNING true`, digest).Scan(&extended)
+			e = s.db.QueryRow(r.Context(), `UPDATE public.portal_sessions ps SET last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 minutes') WHERE ps.credential_digest=$1 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND EXISTS (SELECT 1 FROM public.accounts a WHERE a.id=ps.account_id AND a.credential_generation=ps.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')) RETURNING true`, digest).Scan(&extended)
 			if e == pgx.ErrNoRows {
 				return "", 0, "", "", "", errInvalidSession
 			}
@@ -812,7 +861,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		if s.beforeProfileRead != nil {
 			s.beforeProfileRead()
 		}
-		err := s.Pool.QueryRow(r.Context(), `WITH current_week AS MATERIALIZED (SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date AS monday)
+		err := s.db.QueryRow(r.Context(), `WITH current_week AS MATERIALIZED (SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date AS monday)
 SELECT a.status,a.email,a.email_verified,a.hosted_domain,COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions),
 COALESCE((SELECT u.committed_bytes FROM public.weekly_quota_usage u WHERE u.account_id=a.id AND u.week_start=(SELECT monday FROM current_week)),0),
 (SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'committed',COALESCE(u.committed_bytes,0)) ORDER BY w.week_start DESC)
@@ -926,7 +975,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	c, _ := r.Cookie(sessionCookie)
 	digest := s.digest(version, "portal-session", c.Value)
-	_, e = s.Pool.Exec(r.Context(), `DELETE FROM public.portal_sessions WHERE credential_digest=$1`, digest)
+	_, e = s.db.Exec(r.Context(), `DELETE FROM public.portal_sessions WHERE credential_digest=$1`, digest)
 	if e != nil {
 		fail(w, 503)
 		return
@@ -955,16 +1004,17 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var subject string
-	if err := s.Pool.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, id).Scan(&subject); err != nil {
+	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, id).Scan(&subject); err != nil {
 		fail(w, 503)
 		return
 	}
 	var applied, uncertain bool
 	var closeConnections func()
-	_ = s.withIdentityGuard(subject, func() error {
-		if !s.WithAccountGuards(r.Context(), []string{id}, func() {
-			ctx := r.Context()
-			tx, e := s.Pool.Begin(ctx)
+	guardEntered := false
+	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
+		guardEntered = true
+		if !s.WithAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
+			tx, e := s.db.Begin(ctx)
 			if e != nil {
 				fail(w, 503)
 				return
@@ -1013,6 +1063,9 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if guardErr != nil && !guardEntered {
+		fail(w, 503)
+	}
 	if applied {
 		if closeConnections != nil {
 			closeConnections()
