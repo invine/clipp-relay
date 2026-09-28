@@ -4,7 +4,7 @@
 
 **Blocked by:** [16: Delete and re-register safely](16-delete-and-re-register-safely.md).
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Repository scope: clipp-relay.
 Source: [Accepted specification](../../managed-relay-service/spec.md), I3, I5, I6, I11.
@@ -54,3 +54,4 @@ provisioning, publication or load generation against an unapproved target.
 
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
+- Claimed centrally on 2026-09-28 after ticket 16 resolution (`1a4284d`). Assigned to a fresh isolated Go implementation agent for `/implement` and TDD. Resolution awaits integration, independent specification and standards reviews, and real-PostgreSQL acceptance evidence. The capacity ticket remains deferred.
