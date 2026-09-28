@@ -90,6 +90,8 @@ type Server struct {
 	deletionWorker                     sync.Mutex
 	deletionCompleted                  atomic.Uint64
 	deletionRetried                    atomic.Uint64
+	cleanupCompleted                   atomic.Uint64
+	cleanupFailed                      atomic.Uint64
 }
 
 // WithAccountGuards orders all local account operations before their SQL row

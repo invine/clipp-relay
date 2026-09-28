@@ -92,9 +92,17 @@ func main() {
 	logger.Info("service starting", "schema_revision", database.ExpectedRevision)
 	srv := service.New()
 	portal := auth.New(pool, c, material, auth.Google())
+	if err := portal.ValidatePepperCoverage(startup); err != nil {
+		logger.Error("pepper keyring coverage failed")
+		os.Exit(1)
+	}
 	srv.SetDeletionMetrics(func(ctx context.Context) (service.DeletionSample, error) {
 		observed, err := portal.SampleDeletionSignals(ctx)
 		return service.DeletionSample{Pending: observed.Pending, OldestSeconds: observed.OldestAge.Seconds(), Warning: observed.Warning, Critical: observed.Critical, Completed: observed.Completed, Retried: observed.Retried}, err
+	})
+	srv.SetCleanupMetrics(func(ctx context.Context) (service.CleanupSample, error) {
+		observed, err := portal.SampleCleanupSignals(ctx)
+		return service.CleanupSample{OldestSeconds: observed.OldestAge.Seconds(), Warning: observed.Warning, Critical: observed.Critical, Breach: observed.Breach, Completed: observed.Completed, Failed: observed.Failed}, err
 	})
 	if c.Journal.Region == "" {
 		logger.Error("journal configuration required before serving")
