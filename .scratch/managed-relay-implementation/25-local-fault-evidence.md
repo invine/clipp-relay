@@ -17,6 +17,8 @@ CLIPP_FAULT_PG17_QUOTA=1 CLIPP_FAULT_RACE_ONLY=1 GOCACHE=/private/tmp/clipp-go-c
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay ./internal/service ./internal/publication
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/service -run 'Test(DefaultPublicSocketCapAndRecovery|SlowReadersPreservePrivateHealthAndRelease)$' -v
 GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run 'Test(RelayAuthConnectionRateRejectsAndRecovers|RendezvousConnectionRateRejectsAndRecovers)$' -v
+GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run TestCustomStreamsChargeAndReleaseServiceBuffers -v
+GOCACHE=/private/tmp/clipp-go-cache go test -race -count=1 ./internal/relay -run 'Test(CustomStreamsChargeAndReleaseServiceBuffers|ResourceManagerDoesNotApplyStockIPBuckets|UnknownResourceScopesBlockAtRuntime)$' -v
 GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...
 GOCACHE=/private/tmp/clipp-go-cache go vet ./...
 gofmt -l cmd internal
@@ -101,9 +103,17 @@ permission. All fixture runs removed their own containers and secrets.
    named scope and zero/block-all values; `TestRelayEnablesOnlyRequiredTCPProtocols`
    checks enabled protocol inventory; `TestTransportMemoryPressureRejectsAndRecovers`
    and `TestTransportOnlyCircuitsTransferAndChargeBothDirections` exercise
-   resource/traffic behavior. No independent runtime dump of all resolved RM
-   scopes, no stock per-handler byte attribution measurement, and no Linux
-   ARM64 representative capacity run occurred.
+   resource/traffic behavior. `TestCustomStreamsChargeAndReleaseServiceBuffers`
+   opened real Auth and Rendezvous streams, observed their service scope hold
+   4 KiB and 64 KiB respectively, and observed release after reset.
+   `TestResourceManagerDoesNotApplyStockIPBuckets` admitted 32 concurrent RM
+   connections for one non-loopback address, beyond stock 8-connection subnet
+   and 16-connection rate defaults. `TestUnknownResourceScopesBlockAtRuntime`
+   rejected unknown protocol and service scopes at the live RM interface.
+   No independent runtime dump of all
+   resolved RM scopes, no stock traffic byte
+   attribution/overshoot measurement, and no Linux ARM64 representative
+   capacity run occurred.
 7. **Race and process resources — partial pass.** `go test -race` passed for
    relay replacement, revocation, drain, WebRTC setup, publication, and the
    new HTTP overload tests. The optional PG18 race pass ran

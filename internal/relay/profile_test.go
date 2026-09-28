@@ -1,12 +1,15 @@
 package relay
 
 import (
+	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	rcmgr "github.com/libp2p/go-libp2p/p2p/host/resource-manager"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 func TestFixedTCPProfile(t *testing.T) {
@@ -110,5 +113,101 @@ func TestRelayEnablesOnlyRequiredTCPProtocols(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("enabled protocol inventory = %v; want %v", got, want)
+	}
+}
+
+func TestCustomStreamsChargeAndReleaseServiceBuffers(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := rvClient(t, ctx, s, "authorized")
+	state := s.manager.(rcmgr.ResourceManagerState)
+	await := func(service string, want int64) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			stat := state.Stat().Services[service]
+			if stat.Memory == want && (want == 0 || stat.NumStreamsInbound == 1) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("service %s did not account %d bytes: %+v", service, want, state.Stat().Services[service])
+	}
+	for _, tc := range []struct {
+		name     string
+		protocol protocol.ID
+		memory   int64
+	}{
+		{"clipp.rendezvous", RendezvousV2Protocol, 2 * rvV2Limit},
+		{"clipp.relay-auth", AuthProtocol, 4096},
+	} {
+		stream, err := h.NewStream(ctx, s.Host.ID(), tc.protocol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Write([]byte{0x80}); err != nil {
+			t.Fatal(err)
+		}
+		await(tc.name, tc.memory)
+		_ = stream.Reset()
+		await(tc.name, 0)
+	}
+}
+
+func TestResourceManagerDoesNotApplyStockIPBuckets(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// Thirty-two in-flight connections from one non-loopback address exceed
+	// the stock subnet concurrency gate (8) and rate burst (16). This checks
+	// the resolved manager rather than only its configuration literals.
+	endpoint := ma.StringCast("/ip4/203.0.113.7/tcp/4001")
+	var scopes []network.ConnManagementScope
+	defer func() {
+		for _, scope := range scopes {
+			scope.Done()
+		}
+	}()
+	for range 32 {
+		scope, err := s.manager.OpenConnection(network.DirInbound, true, endpoint)
+		if err != nil {
+			t.Fatalf("unexpected IP/subnet gate after %d connections: %v", len(scopes), err)
+		}
+		scopes = append(scopes, scope)
+	}
+}
+
+func TestUnknownResourceScopesBlockAtRuntime(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	stream, err := s.manager.OpenStream(s.Host.ID(), network.DirInbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetProtocol("/clipp/unknown/1.0.0"); err == nil {
+		stream.Done()
+		t.Fatal("unknown protocol inherited an active limit")
+	}
+	stream.Done()
+	stream, err = s.manager.OpenStream(s.Host.ID(), network.DirInbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Done()
+	if err := stream.SetProtocol(AuthProtocol); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetService("clipp.unknown"); err == nil {
+		t.Fatal("unknown service inherited an active limit")
 	}
 }
