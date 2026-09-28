@@ -411,16 +411,26 @@ func TestClockWarningIntervalIsVisibleWithoutClosingCredit(t *testing.T) {
 
 func TestClockUncertaintyIntervalBoundaries(t *testing.T) {
 	q := &Quota{}
-	// The sampled database time is deliberately near each limit. A 400ms
-	// request/response interval places the midpoint inside the limit, but its
-	// uncertainty interval crosses it.
+	// The sampled database time is near each limit. A deterministic 400ms
+	// request/response interval places the midpoint inside the limit while
+	// its uncertainty interval crosses it.
 	probeAtOffset := func(offset time.Duration) {
 		t.Helper()
+		before := time.Now()
+		calls := 0
+		q.adjustTime = func(t time.Time) time.Time {
+			calls++
+			switch calls {
+			case 1:
+				return before
+			case 2:
+				return before.Add(400 * time.Millisecond)
+			default:
+				return t
+			}
+		}
 		q.probeQuery = func(context.Context) (time.Time, error) {
-			time.Sleep(200 * time.Millisecond)
-			at := time.Now().Add(offset)
-			time.Sleep(200 * time.Millisecond)
-			return at, nil
+			return before.Add(200*time.Millisecond + offset), nil
 		}
 	}
 	probeAtOffset(900 * time.Millisecond)

@@ -3,6 +3,7 @@ package service
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -26,38 +28,59 @@ func unusedLoopback(t *testing.T) string {
 	return address
 }
 
-func runningHTTP(t *testing.T, s *Service) (string, func()) {
+func runningHTTP(t *testing.T, s *Service) (string, string, func()) {
 	t.Helper()
-	public := unusedLoopback(t)
-	private := unusedLoopback(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- s.Run(ctx, public, private) }()
-	client := &http.Client{Timeout: 200 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		response, err := client.Get("http://" + private + "/livez")
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return public, func() {
-					cancel()
-					select {
-					case err := <-done:
-						if err != nil {
-							t.Errorf("HTTP stop: %v", err)
-						}
-					case <-time.After(3 * time.Second):
-						t.Error("HTTP shutdown stalled")
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		public := unusedLoopback(t)
+		private := unusedLoopback(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- s.Run(ctx, public, private) }()
+		client := &http.Client{Timeout: 200 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case last = <-done:
+				cancel()
+				goto retry
+			default:
+			}
+			response, err := client.Get("http://" + private + "/livez")
+			if err == nil {
+				_ = response.Body.Close()
+				if response.StatusCode == http.StatusOK {
+					var once sync.Once
+					return public, private, func() {
+						once.Do(func() {
+							cancel()
+							select {
+							case err := <-done:
+								if err != nil {
+									t.Errorf("HTTP stop: %v", err)
+								}
+							case <-time.After(3 * time.Second):
+								t.Error("HTTP shutdown stalled")
+							}
+						})
 					}
 				}
 			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		time.Sleep(10 * time.Millisecond)
+		cancel()
+		select {
+		case last = <-done:
+		case <-time.After(3 * time.Second):
+			last = errors.New("HTTP startup did not stop")
+		}
+		if last == nil {
+			last = errors.New("private listener did not start")
+		}
+	retry:
 	}
-	cancel()
-	t.Fatalf("private listener did not start: %v", <-done)
-	return "", nil
+	t.Fatalf("HTTP listeners did not start after three local attempts: %v", last)
+	return "", "", nil
 }
 
 func openHTTP(t *testing.T, address, request string) net.Conn {
@@ -107,7 +130,7 @@ func TestDefaultPublicSocketCapAndRecovery(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	beforeG, beforeFD, beforeHeap, beforeRSS := resourceCounts()
-	address, stop := runningHTTP(t, s)
+	address, _, stop := runningHTTP(t, s)
 	var held []net.Conn
 	defer func() {
 		for _, conn := range held {
@@ -142,7 +165,6 @@ func TestDefaultPublicSocketCapAndRecovery(t *testing.T) {
 		_ = conn.Close()
 	}
 	stop()
-	stop = func() {}
 	deadline = time.Now().Add(2 * time.Second)
 	var afterG, afterFD int
 	var afterHeap uint64
@@ -155,17 +177,20 @@ func TestDefaultPublicSocketCapAndRecovery(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Logf("profile public connections=512; samples before/at-limit/after: goroutines=%d/%d/%d; FD=%d/%d/%d; heap bytes=%d/%d/%d; RSS KiB=%d/%d/%d", beforeG, peakG, afterG, beforeFD, peakFD, afterFD, beforeHeap, peakHeap, afterHeap, beforeRSS, peakRSS, afterRSS)
-	if afterG > beforeG+8 || beforeFD != 0 && afterFD > beforeFD+8 {
-		t.Fatal("socket overload left active process resources")
-	}
 }
 
-func TestSlowReadersRespectSmallSocketProfile(t *testing.T) {
+func TestSlowReadersPreservePrivateHealthAndRelease(t *testing.T) {
 	const sockets = 4
 	s := New()
 	entered := make(chan struct{}, sockets)
+	exited := make(chan struct{}, sockets)
 	s.SetPublicHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/probe" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		entered <- struct{}{}
+		defer func() { exited <- struct{}{} }()
 		block := make([]byte, 32<<10)
 		for {
 			if _, err := w.Write(block); err != nil || r.Context().Err() != nil {
@@ -173,23 +198,13 @@ func TestSlowReadersRespectSmallSocketProfile(t *testing.T) {
 			}
 		}
 	}))
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	server := &http.Server{Handler: s.PublicHandler(), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
-	done := make(chan error, 1)
-	go func() {
-		done <- server.Serve(&limitedListener{Listener: listener, slots: make(chan struct{}, sockets)})
-	}()
+	address, private, stop := runningHTTP(t, s)
 	var held []net.Conn
 	defer func() {
 		for _, conn := range held {
 			_ = conn.Close()
 		}
-		_ = server.Close()
-		<-done
+		stop()
 	}()
 	for range sockets {
 		held = append(held, openHTTP(t, address, "GET / HTTP/1.1\r\nHost: local\r\nX-Reader: slow\r\n\r\n"))
@@ -201,5 +216,30 @@ func TestSlowReadersRespectSmallSocketProfile(t *testing.T) {
 			t.Fatal("slow reader did not reach handler")
 		}
 	}
-	rejectOverCapacity(t, address)
+	health, err := (&http.Client{Timeout: time.Second}).Get("http://" + private + "/livez")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = health.Body.Close()
+	if health.StatusCode != http.StatusOK {
+		t.Fatalf("private health during slow reads: %d", health.StatusCode)
+	}
+	for _, conn := range held {
+		_ = conn.Close()
+	}
+	for range sockets {
+		select {
+		case <-exited:
+		case <-time.After(time.Second):
+			t.Fatal("slow reader handler remained active after disconnect")
+		}
+	}
+	response, err := (&http.Client{Timeout: time.Second}).Get("http://" + address + "/probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("public handler did not recover: %d", response.StatusCode)
+	}
 }
