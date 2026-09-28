@@ -184,6 +184,39 @@ func TestResourceManagerDoesNotApplyStockIPBuckets(t *testing.T) {
 	}
 }
 
+func TestTransientConnectionScopeRejectsAtLimitAndRecovers(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	endpoint := ma.StringCast("/ip4/203.0.113.7/tcp/4001")
+	var scopes []network.ConnManagementScope
+	defer func() {
+		for _, scope := range scopes {
+			scope.Done()
+		}
+	}()
+	for range 256 {
+		scope, err := s.manager.OpenConnection(network.DirInbound, true, endpoint)
+		if err != nil {
+			t.Fatalf("transient gate rejected before 256 connections: %d: %v", len(scopes), err)
+		}
+		scopes = append(scopes, scope)
+	}
+	if scope, err := s.manager.OpenConnection(network.DirInbound, true, endpoint); err == nil {
+		scope.Done()
+		t.Fatal("257th transient connection bypassed fixed ceiling")
+	}
+	scopes[0].Done()
+	scopes = scopes[1:]
+	scope, err := s.manager.OpenConnection(network.DirInbound, true, endpoint)
+	if err != nil {
+		t.Fatalf("transient admission did not recover after release: %v", err)
+	}
+	scopes = append(scopes, scope)
+}
+
 func TestUnknownResourceScopesBlockAtRuntime(t *testing.T) {
 	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {

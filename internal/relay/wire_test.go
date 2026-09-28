@@ -177,6 +177,55 @@ func TestFullCapacitySamePeerReplacementIsOneForOne(t *testing.T) {
 	}
 }
 
+func TestSessionCapRejectsDistinctPeerAndRecovers(t *testing.T) {
+	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	newClient := func() host.Host {
+		t.Helper()
+		h, err := libp2p.New(libp2p.NoListenAddrs, libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+			_ = h.Close()
+			t.Fatal(err)
+		}
+		return h
+	}
+	first := newClient()
+	defer first.Close()
+	sendWireAuth(t, ctx, first, s.Host.ID())
+	second := newClient()
+	defer second.Close()
+	if response := authResponse(t, ctx, second, s.Host.ID(), "authorized"); !strings.Contains(response, `"code":"session_limit_exceeded"`) {
+		t.Fatalf("second peer bypassed session ceiling: %s", response)
+	}
+	if got := s.ActiveSessions(); got != 1 {
+		t.Fatalf("session count after rejection = %d", got)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for s.ActiveSessions() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := s.ActiveSessions(); got != 0 {
+		t.Fatalf("session count after disconnect = %d", got)
+	}
+	third := newClient()
+	defer third.Close()
+	sendWireAuth(t, ctx, third, s.Host.ID())
+	if got := s.ActiveSessions(); got != 1 {
+		t.Fatalf("session count after recovery = %d", got)
+	}
+}
+
 func TestSTOPPinsAuthenticatedPhysicalConnection(t *testing.T) {
 	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
