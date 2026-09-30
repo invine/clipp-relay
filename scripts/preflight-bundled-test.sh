@@ -63,10 +63,18 @@ for name in $(awk '$1 == "secretName:" {gsub(/\"/, "", $2); print $2}' "$work/se
 done
 claim=$(ruby -ryaml -e 'docs=YAML.load_stream(File.read(ARGV[0])).compact; p=docs.find { |d| d["kind"] == "PersistentVolumeClaim" }; puts p.dig("metadata", "name") if p' "$work/stopped.yaml")
 if [[ -n $claim ]]; then
+  initializing=$(ruby -ryaml -e 'docs=YAML.load_stream(File.read(ARGV[0])).compact; p=docs.find { |d| d["kind"] == "StatefulSet" && d.dig("metadata", "name").end_with?("-postgres") }; c=p.dig("spec", "template", "spec", "initContainers").find { |x| x["name"] == "initialize" }; puts c["env"].find { |e| e["name"] == "CLIPP_INITIALIZE" }["value"]' "$work/initial.yaml")
+  if ! existing_claim=$(kubectl --context "$context" -n "$namespace" get pvc "$claim" --ignore-not-found -o name); then
+    echo "FAIL PVC collision lookup: $claim" >&2; exit 1
+  fi
+  if [[ $initializing == true && -n $existing_claim ]]; then
+    echo "FAIL existing same-name PVC blocks first initialization: $claim; use the explicit existing-claim path only after verifying ownership and data" >&2
+    exit 1
+  fi
   storage_class=$(ruby -ryaml -e 'docs=YAML.load_stream(File.read(ARGV[0])).compact; puts docs.find { |d| d["kind"] == "PersistentVolumeClaim" }.dig("spec", "storageClassName")' "$work/stopped.yaml")
   kubectl --context "$context" get storageclass "$storage_class" -o name >/dev/null
   echo "PASS existing StorageClass name: $storage_class"
-  echo "PENDING PVC admission/reclaim verification: $claim (chart-created only at authorized install)"
+  echo "PENDING PVC admission/reclaim and ownership verification: $claim (chart-created only at authorized install)"
 else
   claim=$(ruby -ryaml -e 'docs=YAML.load_stream(File.read(ARGV[0])).compact; puts docs.find { |d| d["kind"] == "StatefulSet" && d.dig("metadata", "name").end_with?("-postgres") }.dig("spec", "template", "spec", "volumes").find { |v| v["name"] == "data" }.dig("persistentVolumeClaim", "claimName")' "$work/stopped.yaml")
   kubectl --context "$context" -n "$namespace" get pvc "$claim" -o name >/dev/null

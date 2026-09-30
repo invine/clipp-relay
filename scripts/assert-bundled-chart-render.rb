@@ -26,6 +26,8 @@ find = ->(docs, kind, suffix) { docs.find { |d| d['kind'] == kind && d.dig('meta
   abort 'admin/migration credential reached relay' if relay.to_s.include?('pg-admin-v1') || relay.to_s.include?('clipp-db-migration-v1')
   dbpolicy = find.call(docs, 'NetworkPolicy', '-postgres') or abort 'database policy missing'
   abort 'database policy not isolated' unless dbpolicy.dig('spec', 'policyTypes').sort == %w[Egress Ingress]
+  sources = dbpolicy.dig('spec', 'ingress', 0, 'from').map { |source| source.dig('podSelector', 'matchLabels', 'app.kubernetes.io/name') }
+  abort 'application migration job cannot reach PostgreSQL' unless sources.include?('clipp-relay-migration')
 end
 pvc = find.call(stopped, 'PersistentVolumeClaim', '-postgres') or abort 'new claim missing'
 abort 'PVC not retained' unless pvc.dig('metadata', 'annotations', 'helm.sh/resource-policy') == 'keep' && pvc.dig('metadata', 'annotations', 'argocd.argoproj.io/sync-options') == 'Prune=false,Delete=false'

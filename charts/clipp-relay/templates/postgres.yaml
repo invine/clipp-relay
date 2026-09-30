@@ -225,6 +225,8 @@ spec:
             matchLabels: {{ dict "app.kubernetes.io/name" "clipp-relay" "app.kubernetes.io/instance" .Release.Name | toJson }}
         - podSelector:
             matchLabels: {{ dict "app.kubernetes.io/name" "clipp-relay-postgres-bootstrap" "app.kubernetes.io/instance" .Release.Name | toJson }}
+        - podSelector:
+            matchLabels: {{ dict "app.kubernetes.io/name" "clipp-relay-migration" "app.kubernetes.io/instance" .Release.Name | toJson }}
       ports:
         - {protocol: TCP, port: 5432}
   egress: []

@@ -62,6 +62,8 @@ cat > "$work/kubectl" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$KUBECTL_TEST_LOG"
 case " $* " in
+  *' get pvc '* )
+    if [ "${KUBECTL_MOCK_PVC:-absent}" = present ]; then printf 'persistentvolumeclaim/isolated-clipp-relay-postgres\n'; fi ;;
   *' get '*) printf 'resource/name\n' ;;
   *) echo 'preflight attempted cluster mutation' >&2; exit 1 ;;
 esac
@@ -71,3 +73,9 @@ KUBECTL_TEST_LOG="$work/kubectl.log" PATH="$work:$PATH" \
   bash scripts/preflight-bundled-test.sh "$values" isolated relay-portal-test fake-context > "$work/preflight-context.log"
 grep -q 'PASS existing StorageClass name' "$work/preflight-context.log"
 grep -q 'PASS existing Secret name' "$work/preflight-context.log"
+if KUBECTL_MOCK_PVC=present KUBECTL_TEST_LOG="$work/kubectl-collision.log" PATH="$work:$PATH" \
+  bash scripts/preflight-bundled-test.sh "$values" isolated relay-portal-test fake-context > "$work/collision.log" 2>&1; then
+  echo 'first initialization accepted an existing same-name PVC' >&2
+  exit 1
+fi
+grep -q 'existing same-name PVC' "$work/collision.log"

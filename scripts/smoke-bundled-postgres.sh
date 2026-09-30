@@ -4,15 +4,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 work=$(mktemp -d)
 name="clipp-bundled-smoke-$$"
-data_volume="$name-data"
-tls_volume="$name-tls"
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
-  docker volume rm "$data_volume" "$tls_volume" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
-mkdir -p "$work/admin" "$work/serving" "$work/migration" "$work/tls" "$work/ca"
+mkdir -p "$work/admin" "$work/serving" "$work/migration" "$work/tls" "$work/ca" "$work/pgdata" "$work/tls-volume"
 printf 'postgres\n' > "$work/admin/username"
 printf 'clipp_serving\n' > "$work/serving/username"
 printf 'clipp_migration\n' > "$work/migration/username"
@@ -25,11 +22,9 @@ printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' > "$work/tl
 openssl x509 -req -in "$work/tls/server.csr" -CA "$work/ca/ca.crt" -CAkey "$work/ca.key" -CAcreateserial -days 1 -extfile "$work/tls/server.ext" -out "$work/tls/tls.crt" >/dev/null 2>&1
 chmod 755 "$work" "$work/admin" "$work/serving" "$work/migration" "$work/ca" "$work/tls"
 chmod 644 "$work"/{admin,serving,migration}/{username,password} "$work/ca/ca.crt" "$work/tls"/{tls.crt,tls.key}
-docker volume create "$data_volume" >/dev/null
-docker volume create "$tls_volume" >/dev/null
-docker run --rm -v "$data_volume:/var/lib/postgresql" -v "$tls_volume:/target" -v "$work/tls:/source:ro" --entrypoint sh postgres:18 -ec 'chown 999:999 /var/lib/postgresql; cp /source/tls.crt /source/tls.key /target/; chown root:999 /target/tls.key; chmod 640 /target/tls.key' >/dev/null
-docker run --rm --user 999:999 -v "$data_volume:/var/lib/postgresql" -v "$work/admin:/run/secrets/admin:ro" -v "$PWD/charts/clipp-relay/files/postgres:/etc/postgres:ro" -e CLIPP_INITIALIZE=true -e CLIPP_NAMESPACE=relay-portal-test -e CLIPP_RELEASE=isolated --entrypoint /bin/sh postgres:18 /etc/postgres/initialize.sh > "$work/init.log"
-docker run -d --name "$name" --user 999:999 -v "$data_volume:/var/lib/postgresql" -v "$tls_volume:/run/secrets/tls:ro" -v "$PWD/charts/clipp-relay/files/postgres:/etc/postgres:ro" --entrypoint postgres postgres:18 -D /var/lib/postgresql/18/docker -c listen_addresses='*' -c hba_file=/etc/postgres/pg_hba.conf -c ssl=on -c ssl_cert_file=/run/secrets/tls/tls.crt -c ssl_key_file=/run/secrets/tls/tls.key -c unix_socket_directories=/tmp >/dev/null
+docker run --rm -v "$work/pgdata:/var/lib/postgresql" -v "$work/tls-volume:/target" -v "$work/tls:/source:ro" --entrypoint sh postgres:18 -ec 'chown 999:999 /var/lib/postgresql; cp /source/tls.crt /source/tls.key /target/; chown 999:999 /target/tls.key; chmod 600 /target/tls.key' >/dev/null
+docker run --rm --user 999:999 -v "$work/pgdata:/var/lib/postgresql" -v "$work/admin:/run/secrets/admin:ro" -v "$PWD/charts/clipp-relay/files/postgres:/etc/postgres:ro" -e CLIPP_INITIALIZE=true -e CLIPP_NAMESPACE=relay-portal-test -e CLIPP_RELEASE=isolated --entrypoint /bin/sh postgres:18 /etc/postgres/initialize.sh > "$work/init.log"
+docker run -d --name "$name" --user 999:999 -v "$work/pgdata:/var/lib/postgresql" -v "$work/tls-volume:/run/secrets/tls:ro" -v "$PWD/charts/clipp-relay/files/postgres:/etc/postgres:ro" --entrypoint postgres postgres:18 -D /var/lib/postgresql/18/docker -c listen_addresses='*' -c hba_file=/etc/postgres/pg_hba.conf -c ssl=on -c ssl_cert_file=/run/secrets/tls/tls.crt -c ssl_key_file=/run/secrets/tls/tls.key -c unix_socket_directories=/tmp >/dev/null
 ready=false
 for i in $(seq 1 30); do
   if docker exec "$name" pg_isready -h 127.0.0.1 >/dev/null 2>&1; then ready=true; break; fi
@@ -58,6 +53,21 @@ client() {
     -e CLIPP_SQL="$sql" --entrypoint /bin/sh postgres:18 -ec \
     'PGPASSWORD=$(cat /run/secrets/role/password) psql -X -qAt -v ON_ERROR_STOP=1 -U "$(cat /run/secrets/role/username)" -c "$CLIPP_SQL"'
 }
+client admin verify-full "$work/ca" 'GRANT CREATE ON SCHEMA public TO clipp_serving' > "$work/ddl-grant.log"
+client serving verify-full "$work/ca" "SELECT has_schema_privilege(current_user, 'public', 'CREATE')" | grep -qx t
+if bootstrap > "$work/ddl-grant-conflict.log" 2>&1; then
+  echo 'bootstrap accepted serving CREATE grant' >&2; exit 1
+fi
+client admin verify-full "$work/ca" 'REVOKE CREATE ON SCHEMA public FROM clipp_serving' > "$work/ddl-revoke.log"
+bootstrap > "$work/ddl-revoke-bootstrap.log"
+client admin verify-full "$work/ca" 'GRANT CREATE ON SCHEMA public TO clipp_serving' > "$work/owner-grant.log"
+client serving verify-full "$work/ca" 'CREATE TABLE public.serving_owned (id integer)' > "$work/owner-create.log"
+client admin verify-full "$work/ca" 'REVOKE CREATE ON SCHEMA public FROM clipp_serving' > "$work/owner-revoke.log"
+if bootstrap > "$work/owner-conflict.log" 2>&1; then
+  echo 'bootstrap accepted serving-owned table' >&2; exit 1
+fi
+client admin verify-full "$work/ca" 'DROP TABLE public.serving_owned' > "$work/owner-drop.log"
+bootstrap > "$work/owner-clean-bootstrap.log"
 client migration verify-full "$work/ca" 'CREATE TABLE public.bootstrap_smoke (id integer); INSERT INTO public.bootstrap_smoke VALUES (1)' > "$work/migration-check.log"
 client serving verify-full "$work/ca" 'SELECT id FROM public.bootstrap_smoke' | grep -qx 1
 if client serving verify-full "$work/ca" 'CREATE TABLE public.forbidden (id integer)' > "$work/ddl.log" 2>&1; then

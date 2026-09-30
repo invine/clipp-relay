@@ -8,15 +8,13 @@ SELECT count(*) = 2 AND bool_and(rolcanlogin AND NOT rolsuper AND NOT rolcreated
 ) AS safe_roles FROM pg_roles WHERE rolname IN (:'serving_user', :'migration_user') \gset
 \if :safe_roles
 \else
-  \echo 'existing application role has unsafe privileges'
-  \quit 1
+  DO $$ BEGIN RAISE EXCEPTION 'existing application role has unsafe privileges'; END $$;
 \endif
 SELECT format('CREATE DATABASE %I OWNER %I', :'dbname', :'migration_user') WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'dbname') \gexec
 SELECT datdba = (SELECT oid FROM pg_roles WHERE rolname = :'migration_user') AS owner_ok FROM pg_database WHERE datname = :'dbname' \gset
 \if :owner_ok
 \else
-  \echo 'database owner differs from migration role'
-  \quit 1
+  DO $$ BEGIN RAISE EXCEPTION 'database owner differs from migration role'; END $$;
 \endif
 SELECT format('REVOKE ALL ON DATABASE %I FROM PUBLIC', :'dbname') \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO %I, %I', :'dbname', :'serving_user', :'migration_user') \gexec

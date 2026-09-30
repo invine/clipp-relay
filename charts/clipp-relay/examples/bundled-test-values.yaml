@@ -11,8 +11,8 @@ public:
   wssTLSSecret: wss-tls-v1
   ingressClass: nginx
 certificates:
-  enabled: false
-  clusterIssuer: ""
+  enabled: true
+  clusterIssuer: letsencrypt-prod
 clients:
   androidRedirect: clipp-relay://oauth/callback
   extensionRedirect: https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay
@@ -65,7 +65,7 @@ oci:
 networkPolicy:
   publicCidrs: ["0.0.0.0/0"]
   ingressNamespaceSelector:
-    kubernetes.io/metadata.name: ingress-nginx
+    kubernetes.io/metadata.name: nginx-ingress
   ingressPodSelector:
     app.kubernetes.io/name: nginx-ingress
   operationsCidrs: ["10.0.0.0/24"]
