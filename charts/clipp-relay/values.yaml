@@ -12,6 +12,9 @@ public:
   portalTLSSecret: ""
   wssTLSSecret: ""
   ingressClass: ""
+certificates:
+  enabled: false
+  clusterIssuer: ""
 clients:
   androidRedirect: ""
   extensionRedirect: ""

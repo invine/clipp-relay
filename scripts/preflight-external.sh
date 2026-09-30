@@ -40,10 +40,33 @@ if [[ -z $context ]]; then
   exit 0
 fi
 kubectl --context "$context" get namespace "$namespace" -o name >/dev/null
+managed_tls_secrets=$(awk '
+  /^---$/ { certificate = 0 }
+  /^kind: Certificate$/ { certificate = 1 }
+  certificate && /^  secretName:/ { gsub(/"/, "", $2); print $2 }
+' "$work/serving.yaml")
+certificate_issuers=$(awk '
+  /^---$/ { certificate = 0; issuer_ref = 0 }
+  /^kind: Certificate$/ { certificate = 1 }
+  certificate && /^  issuerRef:$/ { issuer_ref = 1; next }
+  issuer_ref && /^    name:/ { gsub(/"/, "", $2); print $2; issuer_ref = 0 }
+' "$work/serving.yaml" | sort -u)
+for issuer in $certificate_issuers; do
+  kubectl --context "$context" get clusterissuer "$issuer" -o name >/dev/null
+  echo "PASS existing ClusterIssuer: $issuer"
+done
 for name in $(awk '$1 == "secretName:" {gsub(/\"/, "", $2); print $2}' "$work/serving.yaml" | sort -u); do
-  kubectl --context "$context" -n "$namespace" get secret "$name" -o name >/dev/null
-  echo "PASS existing Secret reference: $name"
+  if printf '%s\n' "$managed_tls_secrets" | grep -Fxq "$name"; then
+    if kubectl --context "$context" -n "$namespace" get secret "$name" -o name >/dev/null 2>&1; then
+      echo "PASS cert-manager TLS Secret: $name"
+    else
+      echo "PENDING cert-manager TLS Secret: $name (Certificate renders; issuance and trusted TLS require live verification)"
+    fi
+  else
+    kubectl --context "$context" -n "$namespace" get secret "$name" -o name >/dev/null
+    echo "PASS existing Secret reference: $name"
+  fi
 done
 ingress_class=$(awk '$1 == "ingressClassName:" {gsub(/\"/, "", $2); print $2; exit}' "$work/serving.yaml")
 kubectl --context "$context" get ingressclass "$ingress_class" -o name >/dev/null
-echo 'PASS existing isolated namespace, Secret names and ingress class (contents and authority not inspected)'
+echo 'PASS existing namespace, non-TLS Secret names and ingress class; cert-manager TLS may remain pending (contents and authority not inspected)'
