@@ -1,0 +1,5 @@
+# Use only where cert-manager has a Ready ClusterIssuer named letsencrypt-prod.
+# The portal and WSS DNS hosts must reach this cluster's nginx IngressClass.
+certificates:
+  enabled: true
+  clusterIssuer: letsencrypt-prod

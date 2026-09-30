@@ -8,6 +8,8 @@ This chart is installation scaffolding for one ephemeral Relay Network Slot. It 
 
 To request portal and WSS certificates from an existing cert-manager `ClusterIssuer`, set `certificates.enabled=true` and `certificates.clusterIssuer` to its exact name. The chart renders one `Certificate` for each enabled HTTPS host, with `spec.secretName` matching the corresponding Ingress TLS reference. cert-manager creates or renews those Secrets after installation. The chart does not install cert-manager, create an issuer, or verify DNS control and ACME reachability. Its preflight checks that the named `ClusterIssuer` exists and reports TLS Secrets as pending until issuance; trusted TLS still requires a live check. With certificates disabled, the named TLS Secrets must exist before installation.
 
+The `examples/letsencrypt-values.yaml` overlay enables this path for clusters with a Ready `letsencrypt-prod` ClusterIssuer and the matching HTTP-01 ingress route. The Argo example includes the overlay. Replace the example hosts and Secret names before use, and confirm the issuer, DNS, and certificate status in the actual namespace. To render locally, pass both `-f examples/external-values.yaml -f examples/letsencrypt-values.yaml` to Helm.
+
 The StatefulSet is one replica in `serving`, zero in `stopped` or `migrating`; its `OnDelete` strategy prevents an unreviewed replacement. The network-slot Services, exact-host F5 Ingresses, watch Role, and NetworkPolicy remain across maintenance. WSS has its own backend and process listener, which has no portal routes. Its F5 proxy read/send interval is 3600s, longer than the 30m reservation and 15m Relay Session lifetimes; each timeout measures silence between I/O operations. The operator must confirm the installed F5 version honors these annotations and prove under live pressure that valid sessions are not evicted by ingress idle handling. Local render cannot prove that behavior. TCP and UDP have separate OCI NLB Services, direct Pod selector and no NodePorts. Both use `/readyz` on the private listener as their HTTP health check and explicitly disable instant failover. The private operations port has no public Service or Ingress. The chart creates no PVC, HPA, PDB, Secret, cert-manager issuer, namespace, or cluster role.
 
 The `migrating` phase intentionally renders zero serving replicas and no migration Job. The safe migration orchestration and old-Pod absence verifier belong to ticket 24. An operator must prove the previous Pod has terminated or fence an uncertain node before running the existing `clipp-relay -command migrate` binary with the distinct migration Secret. The command uses the same `config.json` file and exact image digest. A completed migration against the intended target and schema is required before `serving`; a stale Argo Healthy state is insufficient. No automatic schema changes occur on chart sync.
@@ -18,7 +20,7 @@ The NetworkPolicy denies other ingress and egress. It permits public data ports,
 
 ```sh
 bash scripts/test-chart.sh
-bash scripts/preflight-external.sh charts/clipp-relay/examples/external-values.yaml isolated clipp-isolated
+bash scripts/preflight-external.sh charts/clipp-relay/examples/external-values.yaml isolated clipp-isolated "" charts/clipp-relay/examples/letsencrypt-values.yaml
 GOPROXY=off GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...
 ```
 
