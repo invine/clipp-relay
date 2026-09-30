@@ -35,8 +35,8 @@ done
 echo "PASS rendered chart/schema for release $release in namespace $namespace: external database, serving/stopped/migrating phases"
 echo 'PENDING operator render review: inspect exact hosts, separated public/private surfaces and mounted Secret names'
 echo 'PENDING operator: confirm pinned linux/arm64 or linux/amd64 Go-only image and process soft nofile >=16384 on eligible node'
-echo 'PENDING operator: confirm PostgreSQL 17/18, expected schema 8, SCRAM and verify-full TLS, serving role without DDL, and distinct migration role'
-echo 'PENDING operator: confirm F5 WSS proxy read/send timeout honors 3600s and does not evict valid sessions; verify existing class/TLS Secrets/DNS, VCN-native Pod backends, subnet/NSG rules, NLB health and disabled instant failover'
+echo 'PENDING operator: confirm PostgreSQL 17/18, expected schema 10, SCRAM and verify-full TLS, serving role without DDL, and distinct migration role'
+echo 'PENDING operator: confirm F5 WSS proxy read/send timeout honors 3600s and does not evict valid sessions; verify ingress class, TLS issuance/DNS, VCN-native Pod backends, subnet/NSG rules, NLB health and disabled instant failover'
 echo 'PENDING operator: confirm actual NetworkPolicy engine enforcement and CIDR/NAT/host-network behavior, ingress metadata trust, egress DNS/API/DB/HTTPS only'
 echo 'PENDING operator: execute isolated HTTPS discovery, TCP/WSS/UDP connection, readiness under pressure, and wrong CA/hostname rejection before serving'
 if [[ -z $context ]]; then
