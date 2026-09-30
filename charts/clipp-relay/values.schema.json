@@ -263,7 +263,7 @@
           "properties": {
             "host": {
               "type": "string",
-              "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
               "maxLength": 253
             },
             "port": {
@@ -296,6 +296,93 @@
           "type": "string",
           "pattern": "^[A-Za-z0-9._-]+$",
           "maxLength": 253
+        },
+        "bundled": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "image": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "repository": {
+                  "type": "string"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^$|^sha256:[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "repository",
+                "digest"
+              ]
+            },
+            "clusterDomain": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+              "maxLength": 253
+            },
+            "initialize": {
+              "type": "boolean"
+            },
+            "adminSecret": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+              "maxLength": 253
+            },
+            "tlsSecret": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+              "maxLength": 253
+            },
+            "storage": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "existingClaim": {
+                  "type": "string",
+                  "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+                  "maxLength": 253
+                },
+                "newClaim": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "storageClassName": {
+                      "type": "string",
+                      "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+                      "maxLength": 253
+                    },
+                    "size": {
+                      "type": "string",
+                      "pattern": "^$|^[1-9][0-9]*Gi$"
+                    }
+                  },
+                  "required": [
+                    "enabled",
+                    "storageClassName",
+                    "size"
+                  ]
+                }
+              },
+              "required": [
+                "existingClaim",
+                "newClaim"
+              ]
+            }
+          },
+          "required": [
+            "image",
+            "clusterDomain",
+            "initialize",
+            "adminSecret",
+            "tlsSecret",
+            "storage"
+          ]
         }
       },
       "required": [
@@ -305,7 +392,8 @@
         "servingSecret",
         "migrationSecret",
         "caSecret",
-        "caKey"
+        "caKey",
+        "bundled"
       ]
     },
     "credentials": {

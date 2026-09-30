@@ -1,0 +1,78 @@
+deployment:
+  phase: stopped
+  expectedSchema: 10
+image:
+  repository: registry.example.test/clipp-relay
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+public:
+  portalOrigin: https://portal.example.test
+  wssHostname: wss.example.test
+  portalTLSSecret: portal-tls-v1
+  wssTLSSecret: wss-tls-v1
+  ingressClass: nginx
+certificates:
+  enabled: false
+  clusterIssuer: ""
+clients:
+  androidRedirect: clipp-relay://oauth/callback
+  extensionRedirect: https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay
+transports:
+  wss:
+    addresses:
+      - /dns4/wss.example.test/tcp/443/tls/ws
+database:
+  mode: bundled
+  name: clipp_relay
+  external:
+    host: ""
+    port: 5432
+  servingSecret: clipp-db-serving-v1
+  migrationSecret: clipp-db-migration-v1
+  caSecret: clipp-db-ca-v1
+  bundled:
+    image:
+      repository: postgres
+      digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    clusterDomain: cluster.local
+    initialize: true
+    adminSecret: pg-admin-v1
+    tlsSecret: pg-server-tls-v1
+    storage:
+      existingClaim: ""
+      newClaim:
+        enabled: true
+        storageClassName: longhorn-retain
+        size: 10Gi
+credentials:
+  googleSecret: clipp-google-v1
+  adminSecret: clipp-admin-v1
+  pepperSecret: clipp-peppers-v1
+  journalSecret: clipp-journal-v1
+journal:
+  region: us-ashburn-1
+  namespace: operator-namespace
+  bucket: isolated-journal
+  repositoryId: operator-attested-repository
+  coverageFloor: 0
+  coverageHash: "0000000000000000000000000000000000000000000000000000000000000000"
+  tenancyOcid: ocid1.tenancy.oc1..example
+  userOcid: ocid1.user.oc1..example
+  fingerprint: aa:bb:cc:dd
+oci:
+  subnetOcid: ocid1.subnet.oc1..example
+  frontendNsgOcid: ocid1.networksecuritygroup.oc1..frontend
+  backendNsgOcid: ocid1.networksecuritygroup.oc1..backend
+networkPolicy:
+  publicCidrs: ["0.0.0.0/0"]
+  ingressNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx
+  ingressPodSelector:
+    app.kubernetes.io/name: nginx-ingress
+  operationsCidrs: ["10.0.0.0/24"]
+  databaseCidrs: []
+  apiCidrs: ["10.0.2.0/24"]
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns
+  httpsCidrs: ["0.0.0.0/0"]

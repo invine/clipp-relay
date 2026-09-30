@@ -1,8 +1,29 @@
 {{- $v := .Values -}}
 {{- $name := include "clipp.name" . -}}
-{{- if ne $v.database.mode "external" }}{{ fail "this isolated chart requires explicit external database mode" }}{{ end -}}
-{{- if or (eq $v.database.external.host "") (eq $v.database.name "") (eq $v.database.servingSecret "") (eq $v.database.migrationSecret "") (eq $v.database.caSecret "") }}{{ fail "external database endpoint, name and distinct credential/trust Secret references are required" }}{{ end -}}
+{{- if not (has $v.database.mode (list "external" "bundled")) }}{{ fail "explicit external or bundled database mode required" }}{{ end -}}
+{{- if or (eq $v.database.name "") (eq $v.database.servingSecret "") (eq $v.database.migrationSecret "") (eq $v.database.caSecret "") }}{{ fail "database name and distinct credential/trust Secret references are required" }}{{ end -}}
 {{- if eq $v.database.servingSecret $v.database.migrationSecret }}{{ fail "serving and migration Secrets must differ" }}{{ end -}}
+{{- $b := $v.database.bundled -}}
+{{- if eq $v.database.mode "external" -}}
+  {{- if eq $v.database.external.host "" }}{{ fail "external database endpoint required" }}{{ end -}}
+  {{- if or $b.initialize $b.storage.newClaim.enabled (ne $b.storage.existingClaim "") (ne $b.image.repository "") (ne $b.image.digest "") (ne $b.adminSecret "") (ne $b.tlsSecret "") (ne $b.clusterDomain "") (ne $b.storage.newClaim.storageClassName "") (ne $b.storage.newClaim.size "") }}{{ fail "external mode cannot configure bundled PostgreSQL" }}{{ end -}}
+{{- else -}}
+  {{- if ne .Release.Namespace "relay-portal-test" }}{{ fail "bundled PostgreSQL is restricted to relay-portal-test" }}{{ end -}}
+  {{- if gt (len (include "clipp.name" .)) 31 }}{{ fail "bundled mode release name is too long for database and run-specific resources" }}{{ end -}}
+  {{- if not (regexMatch "^[a-z][a-z0-9_]{0,62}$" $v.database.name) }}{{ fail "bundled database name must be a safe PostgreSQL identifier" }}{{ end -}}
+  {{- if and (eq $v.deployment.phase "migrating") (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,10}[a-z0-9])?$" $v.deployment.runId)) }}{{ fail "bundled bootstrap run ID must be a short DNS label" }}{{ end -}}
+  {{- if or (ne $v.database.external.host "") (ne (int $v.database.external.port) 5432) (gt (len $v.networkPolicy.databaseCidrs) 0) }}{{ fail "bundled mode cannot configure an external endpoint or CIDRs" }}{{ end -}}
+  {{- if or (eq $b.image.repository "") (not (regexMatch "^sha256:[0-9a-f]{64}$" $b.image.digest)) (eq $b.clusterDomain "") (eq $b.adminSecret "") (eq $b.tlsSecret "") }}{{ fail "bundled PostgreSQL requires pinned image, cluster domain, and existing admin/TLS Secrets" }}{{ end -}}
+  {{- $secrets := list $b.adminSecret $b.tlsSecret $v.database.servingSecret $v.database.migrationSecret $v.database.caSecret $v.credentials.googleSecret $v.credentials.adminSecret $v.credentials.pepperSecret $v.credentials.journalSecret $v.public.portalTLSSecret $v.public.wssTLSSecret -}}
+  {{- if ne (len $secrets) (len (uniq $secrets)) }}{{ fail "bundled PostgreSQL and application Secrets must have distinct roles" }}{{ end -}}
+  {{- if eq $b.storage.newClaim.enabled (ne $b.storage.existingClaim "") }}{{ fail "choose exactly one bundled PostgreSQL claim source" }}{{ end -}}
+  {{- if $b.storage.newClaim.enabled -}}
+    {{- if or (eq $b.storage.newClaim.storageClassName "") (eq $b.storage.newClaim.size "") }}{{ fail "new PostgreSQL claim requires explicit StorageClass and size" }}{{ end -}}
+  {{- else -}}
+    {{- if or (ne $b.storage.newClaim.storageClassName "") (ne $b.storage.newClaim.size "") }}{{ fail "existing PostgreSQL claim conflicts with new-claim settings" }}{{ end -}}
+  {{- end -}}
+  {{- if and $b.initialize (ne $v.deployment.phase "stopped") }}{{ fail "first initialization is allowed only while relay is stopped" }}{{ end -}}
+{{- end -}}
 {{- if or (eq $v.image.repository "") (not (regexMatch "^sha256:[0-9a-f]{64}$" $v.image.digest)) }}{{ fail "immutable relay image repository and sha256 digest required" }}{{ end -}}
 {{- if ne (int $v.deployment.expectedSchema) 10 }}{{ fail "chart requires application schema revision 10" }}{{ end -}}
 {{- if and (eq $v.deployment.phase "migrating") (eq $v.deployment.runId "") }}{{ fail "migration phase requires a run ID" }}{{ end -}}
@@ -29,7 +50,7 @@
 {{- if or
   (and (or $v.transports.tcp.enabled $v.transports.udp.enabled) (eq (len $v.networkPolicy.publicCidrs) 0))
   (eq (len $v.networkPolicy.operationsCidrs) 0)
-  (eq (len $v.networkPolicy.databaseCidrs) 0)
+  (and (eq $v.database.mode "external") (eq (len $v.networkPolicy.databaseCidrs) 0))
   (and $watch (eq (len $v.networkPolicy.apiCidrs) 0))
   (eq (len $v.networkPolicy.httpsCidrs) 0)
   (eq (len $v.networkPolicy.ingressNamespaceSelector) 0)

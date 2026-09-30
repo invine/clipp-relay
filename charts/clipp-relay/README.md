@@ -1,4 +1,6 @@
-# Isolated external PostgreSQL relay
+# Isolated relay deployment
+
+For the opt-in chart-managed PostgreSQL test path in `relay-portal-test`, see [README-bundled-test.md](README-bundled-test.md). The external mode described below remains the default example.
 
 This chart is installation scaffolding for one ephemeral Relay Network Slot. It consumes an existing namespace, Secrets, F5 NGINX Ingress Controller, DNS/TLS, OCI VCN/NSG/subnet inputs, and PostgreSQL 17 or 18. The example uses placeholder names and OCIDs; it is not a deployable environment. No Secret data is stored in chart values or rendered resources.
 

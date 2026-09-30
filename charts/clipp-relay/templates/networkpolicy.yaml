@@ -43,8 +43,13 @@ spec:
         - {protocol: TCP, port: {{ $v.listeners.privatePort }}}
   egress:
     - to:
+        {{- if eq $v.database.mode "bundled" }}
+        - podSelector:
+            matchLabels: {{ dict "app.kubernetes.io/name" "clipp-relay-postgres" "app.kubernetes.io/instance" .Release.Name | toJson }}
+        {{- else }}
         {{- range $v.networkPolicy.databaseCidrs }}
         - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
         {{- end }}
       ports:
         - {protocol: TCP, port: {{ $v.database.external.port }}}
