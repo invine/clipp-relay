@@ -90,6 +90,23 @@
         "ingressClass"
       ]
     },
+    "certificates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "clusterIssuer": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        }
+      },
+      "required": [
+        "enabled",
+        "clusterIssuer"
+      ]
+    },
     "clients": {
       "type": "object",
       "additionalProperties": false,

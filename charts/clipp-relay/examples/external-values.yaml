@@ -10,6 +10,9 @@ public:
   portalTLSSecret: portal-tls-v1
   wssTLSSecret: wss-tls-v1
   ingressClass: nginx
+certificates:
+  enabled: false
+  clusterIssuer: ""
 clients:
   androidRedirect: clipp-relay://oauth/callback
   extensionRedirect: https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay

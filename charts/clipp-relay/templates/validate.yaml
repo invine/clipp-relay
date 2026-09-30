@@ -9,7 +9,8 @@
 {{- if and (ne $v.deployment.phase "migrating") (ne $v.deployment.runId "") }}{{ fail "run ID only valid in migrating phase" }}{{ end -}}
 {{- $portalHost := trimPrefix "https://" $v.public.portalOrigin -}}
 {{- if or (eq $portalHost $v.public.wssHostname) (contains ":" $portalHost) (eq $v.public.wssHostname "") }}{{ fail "portal and WSS require distinct exact DNS hostnames" }}{{ end -}}
-{{- if or (eq $v.public.portalTLSSecret "") (eq $v.public.wssTLSSecret "") (eq $v.public.ingressClass "") }}{{ fail "existing TLS Secrets and F5 ingress class required" }}{{ end -}}
+{{- if or (eq $v.public.portalTLSSecret "") (eq $v.public.wssTLSSecret "") (eq $v.public.ingressClass "") }}{{ fail "distinct TLS Secret names and F5 ingress class required" }}{{ end -}}
+{{- if and $v.certificates.enabled (eq $v.certificates.clusterIssuer "") }}{{ fail "certificates.clusterIssuer required when certificates are enabled" }}{{ end -}}
 {{- $ports := list $v.listeners.portalPort $v.listeners.privatePort $v.listeners.tcpPort $v.listeners.wssPort $v.listeners.udpPort -}}
 {{- $seen := dict -}}
 {{- range $ports }}{{ $key := printf "%d" (int .) }}{{ if hasKey $seen $key }}{{ fail "listener ports must be distinct" }}{{ end }}{{ $_ := set $seen $key true }}{{ end -}}

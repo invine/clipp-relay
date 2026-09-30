@@ -1,0 +1,29 @@
+{{- $v := .Values -}}
+{{- if $v.certificates.enabled -}}
+{{- $name := include "clipp.name" . -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "%s-portal" $name | quote }}
+spec:
+  secretName: {{ $v.public.portalTLSSecret | quote }}
+  dnsNames:
+    - {{ trimPrefix "https://" $v.public.portalOrigin | quote }}
+  issuerRef:
+    name: {{ $v.certificates.clusterIssuer | quote }}
+    kind: ClusterIssuer
+{{- if $v.transports.wss.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "%s-wss" $name | quote }}
+spec:
+  secretName: {{ $v.public.wssTLSSecret | quote }}
+  dnsNames:
+    - {{ $v.public.wssHostname | quote }}
+  issuerRef:
+    name: {{ $v.certificates.clusterIssuer | quote }}
+    kind: ClusterIssuer
+{{- end -}}
+{{- end -}}
