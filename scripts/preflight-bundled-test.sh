@@ -17,7 +17,7 @@ fi
 chart=charts/clipp-relay
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-helm lint "$chart" -n "$namespace" "${flags[@]}" --strict > "$work/lint.log" || { cat "$work/lint.log" >&2; exit 1; }
+helm lint "$chart" -n "$namespace" "${flags[@]}" --strict > "$work/lint.log" 2>&1 || { cat "$work/lint.log" >&2; exit 1; }
 for phase in stopped migrating serving; do
   extra=(--set deployment.phase="$phase" --set deployment.runId= --set database.bundled.initialize=false)
   if [[ $phase == migrating ]]; then extra=(--set deployment.phase=migrating --set deployment.runId=preflight --set database.bundled.initialize=false); fi
@@ -45,7 +45,7 @@ kubectl --context "$context" get namespace "$namespace" -o name >/dev/null
 ingress_class=$(awk '$1 == "ingressClassName:" {gsub(/\"/, "", $2); print $2; exit}' "$work/serving.yaml")
 kubectl --context "$context" get ingressclass "$ingress_class" -o name >/dev/null
 echo "PASS existing IngressClass name: $ingress_class"
-for issuer in $(awk '/^kind: Certificate$/ {cert=1} cert && /^  issuerRef:$/ {ref=1; next} ref && /^    name:/ {print $2; ref=0} /^---$/ {cert=0; ref=0}' "$work/serving.yaml" | sort -u); do
+for issuer in $(awk '/^kind: Certificate$/ {cert=1} cert && /^  issuerRef:$/ {ref=1; next} ref && /^    name:/ {gsub(/"/, "", $2); print $2; ref=0} /^---$/ {cert=0; ref=0}' "$work/serving.yaml" | sort -u); do
   kubectl --context "$context" get clusterissuer "$issuer" -o name >/dev/null
   echo "PASS existing ClusterIssuer name: $issuer"
   echo "PENDING ClusterIssuer readiness, DNS and HTTP-01 reachability: $issuer"

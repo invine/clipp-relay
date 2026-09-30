@@ -73,6 +73,7 @@ KUBECTL_TEST_LOG="$work/kubectl.log" PATH="$work:$PATH" \
   bash scripts/preflight-bundled-test.sh "$values" isolated relay-portal-test fake-context > "$work/preflight-context.log"
 grep -q 'PASS existing StorageClass name' "$work/preflight-context.log"
 grep -q 'PASS existing Secret name' "$work/preflight-context.log"
+grep -q 'get clusterissuer letsencrypt-prod -o name' "$work/kubectl.log"
 if KUBECTL_MOCK_PVC=present KUBECTL_TEST_LOG="$work/kubectl-collision.log" PATH="$work:$PATH" \
   bash scripts/preflight-bundled-test.sh "$values" isolated relay-portal-test fake-context > "$work/collision.log" 2>&1; then
   echo 'first initialization accepted an existing same-name PVC' >&2
