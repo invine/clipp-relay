@@ -134,6 +134,11 @@ jobs:
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Log out of OCI Container Registry
+        if: always()
+        shell: bash
+        run: docker logout "${IMAGE_REPOSITORY%%/*}" || true
+
       - name: Upload exact Helm image values
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -141,8 +146,3 @@ jobs:
           path: ${{ runner.temp }}/relay-image-values.yaml
           if-no-files-found: error
           retention-days: 30
-
-      - name: Log out of OCI Container Registry
-        if: always()
-        shell: bash
-        run: docker logout "${IMAGE_REPOSITORY%%/*}" || true
