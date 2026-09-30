@@ -20,7 +20,7 @@ grep -q 'kind: Role' "$work/serving.yaml"
 ! grep -q 'kind: PodDisruptionBudget' "$work/serving.yaml"
 
 helm template isolated "$chart" -n clipp-isolated -f "$example" \
-  --set certificates.enabled=true --set certificates.clusterIssuer=letsencrypt-prod > "$work/certificates.yaml"
+  -f "$chart/examples/letsencrypt-values.yaml" > "$work/certificates.yaml"
 ruby -ryaml -e '
   docs = YAML.load_stream(File.read(ARGV.fetch(0))).compact
   certificates = docs.select { |doc| doc["kind"] == "Certificate" }
@@ -73,6 +73,13 @@ for override in \
   fi
 done
 
+if helm template isolated "$chart" -n clipp-isolated -f "$example" \
+  --set certificates.enabled=true --set certificates.clusterIssuer=letsencrypt-prod \
+  --set public.wssTLSSecret=portal-tls-v1 > "$work/conflicting-certificates.yaml" 2>&1; then
+  echo 'two Certificates can target one TLS Secret' >&2
+  exit 1
+fi
+
 helm template isolated "$chart" -n clipp-isolated -f "$example" \
   --set public.ingressClass=f5.nginx > "$work/dotted-class.yaml"
 grep -q 'ingressClassName: "f5.nginx"' "$work/dotted-class.yaml"
@@ -109,13 +116,21 @@ YAML
 cat > "$work/kubectl" <<'SH'
 #!/bin/sh
 case " $* " in
-  *" portal-tls-v1 "*|*" wss-tls-v1 "*) exit 1 ;;
+  *" portal-tls-v1 "*|*" wss-tls-v1 "*)
+    case " $* " in
+      *" --ignore-not-found "*) exit 0 ;;
+      *) exit 1 ;;
+    esac ;;
   *) exit 0 ;;
 esac
 SH
 chmod +x "$work/kubectl"
 PATH="$work:$PATH" bash scripts/preflight-external.sh "$work/managed-cert-values.yaml" isolated clipp-isolated fake-context > "$work/managed-cert-preflight.log"
 grep -q 'PENDING cert-manager TLS Secret' "$work/managed-cert-preflight.log"
+grep -q 'PENDING ClusterIssuer readiness and ACME solver' "$work/managed-cert-preflight.log"
+PATH="$work:$PATH" bash scripts/preflight-external.sh "$example" isolated clipp-isolated fake-context \
+  "$chart/examples/letsencrypt-values.yaml" > "$work/overlay-preflight.log"
+grep -q 'PASS existing ClusterIssuer: letsencrypt-prod' "$work/overlay-preflight.log"
 cat > "$work/kubectl" <<'SH'
 #!/bin/sh
 case " $* " in
@@ -126,6 +141,18 @@ SH
 chmod +x "$work/kubectl"
 if PATH="$work:$PATH" bash scripts/preflight-external.sh "$work/managed-cert-values.yaml" isolated clipp-isolated fake-context > "$work/missing-issuer.log" 2>&1; then
   echo 'missing ClusterIssuer accepted by preflight' >&2
+  exit 1
+fi
+cat > "$work/kubectl" <<'SH'
+#!/bin/sh
+case " $* " in
+  *" portal-tls-v1 "*) echo 'Error from server (Forbidden): TLS Secret read denied' >&2; exit 1 ;;
+  *) exit 0 ;;
+esac
+SH
+chmod +x "$work/kubectl"
+if PATH="$work:$PATH" bash scripts/preflight-external.sh "$work/managed-cert-values.yaml" isolated clipp-isolated fake-context > "$work/forbidden-tls.log" 2>&1; then
+  echo 'TLS Secret read error accepted as pending issuance' >&2
   exit 1
 fi
 echo 'chart render and rejection checks passed'
