@@ -156,3 +156,4 @@ if PATH="$work:$PATH" bash scripts/preflight-external.sh "$work/managed-cert-val
   exit 1
 fi
 echo 'chart render and rejection checks passed'
+bash scripts/test-chart-bundled.sh

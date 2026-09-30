@@ -46,6 +46,20 @@ database:
   migrationSecret: ""
   caSecret: ""
   caKey: ca.crt
+  bundled:
+    image:
+      repository: ""
+      digest: ""
+    clusterDomain: ""
+    initialize: false
+    adminSecret: ""
+    tlsSecret: ""
+    storage:
+      existingClaim: ""
+      newClaim:
+        enabled: false
+        storageClassName: ""
+        size: ""
 credentials:
   googleSecret: ""
   adminSecret: ""

@@ -1,0 +1,326 @@
+{{- if eq .Values.database.mode "bundled" -}}
+{{- $v := .Values -}}
+{{- $b := $v.database.bundled -}}
+{{- $name := printf "%s-postgres" (include "clipp.name" .) -}}
+{{- $claim := ternary $name $b.storage.existingClaim $b.storage.newClaim.enabled -}}
+{{- $host := printf "%s.%s.svc.%s" $name .Release.Namespace $b.clusterDomain -}}
+{{- $selector := dict "app.kubernetes.io/name" "clipp-relay-postgres" "app.kubernetes.io/instance" .Release.Name -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-scripts
+data:
+  initialize.sh: |
+{{ $.Files.Get "files/postgres/initialize.sh" | indent 4 }}
+  bootstrap.sh: |
+{{ $.Files.Get "files/postgres/bootstrap.sh" | indent 4 }}
+  bootstrap-server.sql: |
+{{ $.Files.Get "files/postgres/bootstrap-server.sql" | indent 4 }}
+  bootstrap-schema.sql: |
+{{ $.Files.Get "files/postgres/bootstrap-schema.sql" | indent 4 }}
+  pg_hba.conf: |
+{{ $.Files.Get "files/postgres/pg_hba.conf" | indent 4 }}
+{{- if $b.storage.newClaim.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claim }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ $b.storage.newClaim.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ $b.storage.newClaim.size | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-headless
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {{ $selector | toJson }}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres, protocol: TCP}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  selector: {{ $selector | toJson }}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres, protocol: TCP}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+spec:
+  serviceName: {{ $name }}-headless
+  replicas: 1
+  updateStrategy: {type: OnDelete}
+  selector:
+    matchLabels: {{ $selector | toJson }}
+  template:
+    metadata:
+      labels: {{ $selector | toJson }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      nodeSelector:
+        {{- toYaml $v.scheduling.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml $v.scheduling.tolerations | nindent 8 }}
+      initContainers:
+        - name: initialize
+          image: {{ printf "%s@%s" $b.image.repository $b.image.digest | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/etc/postgres/initialize.sh"]
+          env:
+            - {name: CLIPP_INITIALIZE, value: {{ $b.initialize | quote }}}
+            - {name: CLIPP_NAMESPACE, value: {{ .Release.Namespace | quote }}}
+            - {name: CLIPP_RELEASE, value: {{ .Release.Name | quote }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 32Mi}
+            limits: {cpu: 300m, memory: 256Mi, ephemeral-storage: 64Mi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql}
+            - {name: scripts, mountPath: /etc/postgres, readOnly: true}
+            - {name: admin-secret, mountPath: /run/secrets/admin, readOnly: true}
+            - {name: scratch, mountPath: /tmp}
+      containers:
+        - name: postgres
+          image: {{ printf "%s@%s" $b.image.repository $b.image.digest | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["postgres"]
+          args:
+            - "-D"
+            - "/var/lib/postgresql/18/docker"
+            - "-c"
+            - "listen_addresses=*"
+            - "-c"
+            - "hba_file=/etc/postgres/pg_hba.conf"
+            - "-c"
+            - "ssl=on"
+            - "-c"
+            - "ssl_min_protocol_version=TLSv1.2"
+            - "-c"
+            - "ssl_cert_file=/run/secrets/tls/tls.crt"
+            - "-c"
+            - "ssl_key_file=/run/secrets/tls/tls.key"
+            - "-c"
+            - "password_encryption=scram-sha-256"
+            - "-c"
+            - "unix_socket_directories=/var/run/postgresql"
+            - "-c"
+            - "max_connections=32"
+            - "-c"
+            - "superuser_reserved_connections=3"
+            - "-c"
+            - "shared_buffers=128MB"
+            - "-c"
+            - "work_mem=2MB"
+            - "-c"
+            - "hash_mem_multiplier=2"
+            - "-c"
+            - "maintenance_work_mem=32MB"
+            - "-c"
+            - "autovacuum_work_mem=16MB"
+            - "-c"
+            - "autovacuum_max_workers=2"
+            - "-c"
+            - "max_parallel_workers_per_gather=0"
+            - "-c"
+            - "max_parallel_maintenance_workers=0"
+            - "-c"
+            - "max_parallel_workers=0"
+            - "-c"
+            - "temp_file_limit=64MB"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 400m, memory: 384Mi, ephemeral-storage: 128Mi}
+            limits: {cpu: 750m, memory: 768Mi, ephemeral-storage: 256Mi}
+          ports:
+            - {name: postgres, containerPort: 5432, protocol: TCP}
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "PGPASSWORD=$(cat /run/secrets/probe/password) PGHOST={{ $host }} PGHOSTADDR=127.0.0.1 PGPORT=5432 PGSSLMODE=verify-full PGSSLROOTCERT=/run/secrets/ca/ca.crt PGCONNECT_TIMEOUT=2 psql -X -qAt -U \"$(cat /run/secrets/probe/username)\" -d {{ $v.database.name }} -c 'SELECT 1' >/dev/null"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 360
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-ec", "PGPASSWORD=$(cat /run/secrets/probe/password) PGHOST={{ $host }} PGHOSTADDR=127.0.0.1 PGPORT=5432 PGSSLMODE=verify-full PGSSLROOTCERT=/run/secrets/ca/ca.crt PGCONNECT_TIMEOUT=2 psql -X -qAt -U \"$(cat /run/secrets/probe/username)\" -d {{ $v.database.name }} -c 'SELECT 1' >/dev/null"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+            successThreshold: 1
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql}
+            - {name: scripts, mountPath: /etc/postgres, readOnly: true}
+            - {name: tls, mountPath: /run/secrets/tls, readOnly: true}
+            - {name: ca, mountPath: /run/secrets/ca, readOnly: true}
+            - {name: probe, mountPath: /run/secrets/probe, readOnly: true}
+            - {name: socket, mountPath: /var/run/postgresql}
+            - {name: scratch, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{ $claim | quote }}}
+        - name: scripts
+          configMap: {name: {{ printf "%s-scripts" $name }}}
+        - name: admin-secret
+          secret:
+            secretName: {{ $b.adminSecret | quote }}
+            items: [{key: username, path: username}, {key: password, path: password}]
+        - name: tls
+          secret:
+            secretName: {{ $b.tlsSecret | quote }}
+            defaultMode: 0440
+            items: [{key: tls.crt, path: tls.crt}, {key: tls.key, path: tls.key}]
+        - name: ca
+          secret:
+            secretName: {{ $v.database.caSecret | quote }}
+            items: [{key: {{ $v.database.caKey | quote }}, path: ca.crt}]
+        - name: probe
+          secret:
+            secretName: {{ $v.database.servingSecret | quote }}
+            items: [{key: username, path: username}, {key: password, path: password}]
+        - name: socket
+          emptyDir: {medium: Memory, sizeLimit: 8Mi}
+        - name: scratch
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+spec:
+  podSelector:
+    matchLabels: {{ $selector | toJson }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ dict "app.kubernetes.io/name" "clipp-relay" "app.kubernetes.io/instance" .Release.Name | toJson }}
+        - podSelector:
+            matchLabels: {{ dict "app.kubernetes.io/name" "clipp-relay-postgres-bootstrap" "app.kubernetes.io/instance" .Release.Name | toJson }}
+      ports:
+        - {protocol: TCP, port: 5432}
+  egress: []
+{{- if eq $v.deployment.phase "migrating" }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-bootstrap-{{ $v.deployment.runId }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels: {{ dict "app.kubernetes.io/name" "clipp-relay-postgres-bootstrap" "app.kubernetes.io/instance" .Release.Name | toJson }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      nodeSelector:
+        {{- toYaml $v.scheduling.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml $v.scheduling.tolerations | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ printf "%s@%s" $b.image.repository $b.image.digest | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/etc/postgres/bootstrap.sh"]
+          env:
+            - {name: CLIPP_DB_HOST, value: {{ $host | quote }}}
+            - {name: CLIPP_DB_NAME, value: {{ $v.database.name | quote }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi, ephemeral-storage: 32Mi}
+            limits: {cpu: 300m, memory: 256Mi, ephemeral-storage: 64Mi}
+          volumeMounts:
+            - {name: scripts, mountPath: /etc/postgres, readOnly: true}
+            - {name: admin-secret, mountPath: /run/secrets/admin, readOnly: true}
+            - {name: serving, mountPath: /run/secrets/serving, readOnly: true}
+            - {name: migration, mountPath: /run/secrets/migration, readOnly: true}
+            - {name: ca, mountPath: /run/secrets/ca, readOnly: true}
+            - {name: scratch, mountPath: /tmp}
+      volumes:
+        - name: scripts
+          configMap: {name: {{ printf "%s-scripts" $name }}}
+        - name: admin-secret
+          secret:
+            secretName: {{ $b.adminSecret | quote }}
+            items: [{key: username, path: username}, {key: password, path: password}]
+        - name: serving
+          secret:
+            secretName: {{ $v.database.servingSecret | quote }}
+            items: [{key: username, path: username}, {key: password, path: password}]
+        - name: migration
+          secret:
+            secretName: {{ $v.database.migrationSecret | quote }}
+            items: [{key: username, path: username}, {key: password, path: password}]
+        - name: ca
+          secret:
+            secretName: {{ $v.database.caSecret | quote }}
+            items: [{key: {{ $v.database.caKey | quote }}, path: ca.crt}]
+        - name: scratch
+          emptyDir: {sizeLimit: 32Mi}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}-bootstrap
+spec:
+  podSelector:
+    matchLabels: {{ dict "app.kubernetes.io/name" "clipp-relay-postgres-bootstrap" "app.kubernetes.io/instance" .Release.Name | toJson }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {{ $selector | toJson }}
+      ports:
+        - {protocol: TCP, port: 5432}
+    - to:
+        - namespaceSelector:
+            matchLabels: {{ $v.networkPolicy.dnsNamespaceSelector | toJson }}
+          podSelector:
+            matchLabels: {{ $v.networkPolicy.dnsPodSelector | toJson }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+{{- end }}
+{{- end }}
