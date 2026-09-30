@@ -1,0 +1,148 @@
+name: Publish relay image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_BUILDER_IMAGE: ${{ vars.RELAY_GO_BUILDER_IMAGE }}
+
+jobs:
+  verify:
+    if: github.ref_protected
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Validate pinned Go builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.1-bookworm@sha256:[0-9a-f]{64}$ ]]
+
+      - name: Check image build and digest contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/test-image-build.sh
+          bash scripts/test-image-smoke.sh
+          bash scripts/test-image-index.sh
+          bash scripts/test-image-values.sh
+
+      - name: Run Go dependency, unit, and vet checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --mount "type=bind,source=$PWD,target=/src,readonly" \
+            -w /src -e GOTOOLCHAIN=local -e GOFLAGS=-mod=readonly \
+            "$GO_BUILDER_IMAGE" \
+            sh -ec 'go mod verify && go test ./... && go vet ./...'
+
+  image-smoke:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build and smoke-test native image
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch='${{ matrix.arch }}'
+          image="local/clipp-relay:smoke-$arch"
+          bash scripts/build-relay-image.sh --local "$arch" "$image"
+          bash scripts/smoke-relay-image.sh "$arch" "$image"
+
+  publish:
+    # Registry credentials are exposed only after verification and both native
+    # image smokes pass. Protect this environment with required reviewers.
+    needs: [verify, image-smoke]
+    if: github.ref_protected
+    runs-on: ubuntu-24.04
+    environment: relay-image-publish
+    outputs:
+      image_repository: ${{ steps.record.outputs.repository }}
+      image_digest: ${{ steps.record.outputs.digest }}
+    env:
+      IMAGE_REPOSITORY: ${{ vars.RELAY_IMAGE_REPOSITORY }}
+    steps:
+      - name: Check publication settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9-]+\.ocir\.io/[a-z0-9._/-]+$ ]]
+          [[ "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.1-bookworm@sha256:[0-9a-f]{64}$ ]]
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to OCI Container Registry
+        shell: bash
+        env:
+          OCIR_USERNAME: ${{ secrets.OCIR_USERNAME }}
+          OCIR_AUTH_TOKEN: ${{ secrets.OCIR_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$OCIR_USERNAME"
+          test -n "$OCIR_AUTH_TOKEN"
+          registry=${IMAGE_REPOSITORY%%/*}
+          printf '%s' "$OCIR_AUTH_TOKEN" | docker login "$registry" --username "$OCIR_USERNAME" --password-stdin
+
+      - name: Build and publish Linux AMD64 and ARM64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="git-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash scripts/build-relay-image.sh --push "$IMAGE_REPOSITORY:$tag" "$RUNNER_TEMP/relay-image.json"
+
+      - name: Verify registry index and record Helm values
+        id: record
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="git-${GITHUB_SHA}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          bash scripts/helm-image-values.sh "$IMAGE_REPOSITORY" "$RUNNER_TEMP/relay-image.json" > "$RUNNER_TEMP/relay-image-values.yaml"
+          digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/relay-image.json")
+          bash scripts/verify-image-index.sh "$IMAGE_REPOSITORY@$digest"
+          printf 'repository=%s\ndigest=%s\n' "$IMAGE_REPOSITORY" "$digest" >> "$GITHUB_OUTPUT"
+          {
+            printf 'Source commit: `%s`\n\n' "$GITHUB_SHA"
+            printf 'Pinned builder: `%s`\n\n' "$GO_BUILDER_IMAGE"
+            printf 'Pushed tag: `%s`\n\n' "$tag"
+            printf 'Go checks and native AMD64/ARM64 startup smokes passed. Dependency and image vulnerability scans and full integration remain separate release gates.\n\n'
+            printf 'Use these Helm values after the separate release gates:\n\n```yaml\n'
+            cat "$RUNNER_TEMP/relay-image-values.yaml"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload exact Helm image values
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: relay-image-values-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/relay-image-values.yaml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Log out of OCI Container Registry
+        if: always()
+        shell: bash
+        run: docker logout "${IMAGE_REPOSITORY%%/*}" || true

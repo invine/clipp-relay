@@ -191,3 +191,6 @@ script and all temporary Secret files on exit. It does not use any existing
 database or Docker volume.
 
 Other checks: `gofmt -l cmd internal`, `go vet ./...`, `go test ./...`.
+
+For local Linux ARM64/AMD64 image builds and the manual OCIR publication workflow,
+see [Relay image build](docs/image-build.md).
