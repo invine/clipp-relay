@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --local amd64|arm64 IMAGE:TAG | --push OCIR_IMAGE:TAG METADATA_FILE" >&2
+  echo "usage: $0 --local amd64|arm64 IMAGE:TAG | --push REGISTRY_IMAGE:TAG METADATA_FILE" >&2
   exit 2
 }
 
@@ -38,8 +38,8 @@ if [[ -n "${GO_BUILDER_IMAGE:-}" ]]; then
 fi
 
 if [[ "$mode" == --push ]]; then
-  if [[ ! "$image" =~ ^[a-z0-9-]+\.ocir\.io/[a-z0-9._/-]+:[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
-    echo 'push target must be a tagged OCI Container Registry repository' >&2
+  if [[ ! "$image" =~ ^(ghcr\.io/[a-z0-9._-]+/[a-z0-9._/-]+|[a-z0-9-]+\.ocir\.io/[a-z0-9._/-]+):[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+    echo 'push target must be a tagged GHCR or OCIR repository' >&2
     exit 2
   fi
   if [[ -z "${GO_BUILDER_IMAGE:-}" ]]; then

@@ -45,7 +45,12 @@
 {{- range $v.transports.wss.addresses }}{{ if not (hasPrefix (printf "/dns4/%s/" $v.public.wssHostname) .) }}{{ fail "WSS public address must use exact configured host" }}{{ end }}{{ end -}}
 {{- if or (eq $v.credentials.googleSecret "") (eq $v.credentials.adminSecret "") (eq $v.credentials.pepperSecret "") (eq $v.credentials.journalSecret "") }}{{ fail "versioned serving Secret references required" }}{{ end -}}
 {{- if or (eq $v.journal.region "") (eq $v.journal.namespace "") (eq $v.journal.bucket "") (eq $v.journal.repositoryId "") (eq $v.journal.coverageHash "") (eq $v.journal.tenancyOcid "") (eq $v.journal.userOcid "") (eq $v.journal.fingerprint "") }}{{ fail "attested journal configuration required" }}{{ end -}}
-{{- if and (or $v.transports.tcp.enabled $v.transports.udp.enabled) (or (eq $v.oci.subnetOcid "") (eq $v.oci.frontendNsgOcid "") (eq $v.oci.backendNsgOcid "")) }}{{ fail "existing OCI subnet and frontend/backend NSG inputs required" }}{{ end -}}
+{{- if or $v.transports.tcp.enabled $v.transports.udp.enabled -}}
+  {{- if eq $v.oci.subnetOcid "" }}{{ fail "existing OCI subnet input required" }}{{ end -}}
+  {{- if and (eq $v.oci.securityRuleManagementMode "NSG") (or (eq $v.oci.frontendNsgOcid "") (eq $v.oci.backendNsgOcid "")) }}{{ fail "NSG mode requires frontend/backend NSG inputs" }}{{ end -}}
+  {{- if and (eq $v.oci.securityRuleManagementMode "None") (or (ne $v.oci.frontendNsgOcid "") (ne $v.oci.backendNsgOcid "")) }}{{ fail "None mode requires empty NSG inputs; existing security lists remain operator-managed" }}{{ end -}}
+  {{- if and $v.oci.internal (or (ne $v.oci.tcpReservedIp "") (ne $v.oci.udpReservedIp "")) }}{{ fail "internal NLBs cannot use reserved public IPs" }}{{ end -}}
+{{- end -}}
 {{- $watch := or (eq (include "clipp.watchTCP" .) "true") (eq (include "clipp.watchUDP" .) "true") -}}
 {{- if or
   (and (or $v.transports.tcp.enabled $v.transports.udp.enabled) (eq (len $v.networkPolicy.publicCidrs) 0))

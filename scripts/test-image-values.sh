@@ -10,6 +10,8 @@ printf '{"containerimage.digest":"%s","containerimage.config.digest":"sha256:%s"
 
 bash "$root/scripts/helm-image-values.sh" iad.ocir.io/ns/clipp-relay "$tmp/metadata.json" > "$tmp/values.yaml"
 grep -Fxq '  repository: "iad.ocir.io/ns/clipp-relay"' "$tmp/values.yaml"
+bash "$root/scripts/helm-image-values.sh" ghcr.io/invine/clipp-relay "$tmp/metadata.json" > "$tmp/ghcr-values.yaml"
+grep -Fxq '  repository: "ghcr.io/invine/clipp-relay"' "$tmp/ghcr-values.yaml"
 grep -Fxq "  digest: \"$digest\"" "$tmp/values.yaml"
 if grep -Fq "$(printf 'a%.0s' {1..64})" "$tmp/values.yaml"; then
   echo 'config digest was reported instead of registry manifest digest' >&2

@@ -43,12 +43,15 @@ metadata:
   name: {{ $name }}-{{ $kind }}
   annotations:
     oci.oraclecloud.com/load-balancer-type: "nlb"
-    oci-network-load-balancer.oraclecloud.com/external-ip-only: "true"
+    oci-network-load-balancer.oraclecloud.com/internal: {{ $v.oci.internal | quote }}
+    oci-network-load-balancer.oraclecloud.com/external-ip-only: {{ not $v.oci.internal | quote }}
     oci-network-load-balancer.oraclecloud.com/is-instant-failover-enabled: "false"
     oci-network-load-balancer.oraclecloud.com/health-check: {{ dict "protocol" "HTTP" "port" (int $v.listeners.privatePort) "urlPath" "/readyz" "returnCode" 200 | toJson | quote }}
-    oci.oraclecloud.com/security-rule-management-mode: "NSG"
+    oci.oraclecloud.com/security-rule-management-mode: {{ $v.oci.securityRuleManagementMode | quote }}
+    {{- if eq $v.oci.securityRuleManagementMode "NSG" }}
     oci.oraclecloud.com/oci-backend-network-security-group: {{ $v.oci.backendNsgOcid | quote }}
     oci-network-load-balancer.oraclecloud.com/oci-network-security-groups: {{ $v.oci.frontendNsgOcid | quote }}
+    {{- end }}
     oci-network-load-balancer.oraclecloud.com/subnet: {{ $v.oci.subnetOcid | quote }}
     {{- if eq $kind "tcp" }}{{- with $v.oci.tcpReservedIp }}
     oci.oraclecloud.com/reserved-ips: {{ . | quote }}

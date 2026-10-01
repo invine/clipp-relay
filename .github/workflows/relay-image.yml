@@ -76,17 +76,20 @@ jobs:
     if: github.ref_protected
     runs-on: ubuntu-24.04
     environment: relay-image-publish
+    permissions:
+      contents: read
+      packages: write
     outputs:
       image_repository: ${{ steps.record.outputs.repository }}
       image_digest: ${{ steps.record.outputs.digest }}
     env:
-      IMAGE_REPOSITORY: ${{ vars.RELAY_IMAGE_REPOSITORY }}
+      IMAGE_REPOSITORY: ${{ vars.RELAY_IMAGE_REPOSITORY || format('ghcr.io/{0}/clipp-relay', github.repository_owner) }}
     steps:
       - name: Check publication settings
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$IMAGE_REPOSITORY" =~ ^[a-z0-9-]+\.ocir\.io/[a-z0-9._/-]+$ ]]
+          [[ "$IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._/-]+$ ]]
           [[ "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.1-bookworm@sha256:[0-9a-f]{64}$ ]]
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -95,17 +98,16 @@ jobs:
 
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-      - name: Log in to OCI Container Registry
+      - name: Log in to GitHub Container Registry
         shell: bash
         env:
-          OCIR_USERNAME: ${{ secrets.OCIR_USERNAME }}
-          OCIR_AUTH_TOKEN: ${{ secrets.OCIR_AUTH_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$OCIR_USERNAME"
-          test -n "$OCIR_AUTH_TOKEN"
-          registry=${IMAGE_REPOSITORY%%/*}
-          printf '%s' "$OCIR_AUTH_TOKEN" | docker login "$registry" --username "$OCIR_USERNAME" --password-stdin
+          test -n "$GHCR_USERNAME"
+          test -n "$GHCR_TOKEN"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
 
       - name: Build and publish Linux AMD64 and ARM64 image
         shell: bash
@@ -134,7 +136,7 @@ jobs:
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Log out of OCI Container Registry
+      - name: Log out of GitHub Container Registry
         if: always()
         shell: bash
         run: docker logout "${IMAGE_REPOSITORY%%/*}" || true

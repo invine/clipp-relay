@@ -20,6 +20,7 @@ cat > "$FAKE_INDEX" <<'JSON'
 {"manifests":[{"platform":{"os":"linux","architecture":"amd64"}},{"platform":{"os":"linux","architecture":"arm64"}}]}
 JSON
 bash "$root/scripts/verify-image-index.sh" "$ref"
+bash "$root/scripts/verify-image-index.sh" "ghcr.io/invine/clipp-relay@sha256:$(printf 'a%.0s' {1..64})"
 
 cat > "$FAKE_INDEX" <<'JSON'
 {"manifests":[{"platform":{"os":"linux","architecture":"amd64"}}]}

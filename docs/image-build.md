@@ -28,11 +28,11 @@ local command defaults to the `golang:1.27.1-bookworm` build stage; set
 `GO_BUILDER_IMAGE` to a verified
 `golang:1.27.1-bookworm@sha256:...` reference to reproduce a specific builder.
 
-## Manual OCI Container Registry publication
+## Manual GitHub Container Registry publication
 
-Assumption: this source will be hosted in GitHub and the image will be stored in
-OCI Container Registry (OCIR). The relay repository currently has no Git remote
-or existing CI. `.github/workflows/relay-image.yml` is `workflow_dispatch`
+The source repository is `https://github.com/invine/clipp-relay`, configured as
+the local checkout's `origin`, and the image target is
+`ghcr.io/invine/clipp-relay`. `.github/workflows/relay-image.yml` is `workflow_dispatch`
 only, accepts a manually selected protected ref, and uses the
 `relay-image-publish` GitHub Environment. Configure required reviewers on that
 Environment before adding credentials. Before registry login, a separate job
@@ -42,16 +42,20 @@ smoke their respective images. A failure prevents the publish job. The publish
 job builds one Linux AMD64/ARM64 image index. It never changes Helm values in
 Git, deploys, runs migrations, or changes OCI infrastructure.
 
-Provision the target OCIR repository and publisher identity separately. Set:
+The publish job uses GitHub's job-scoped token with `contents: read` and
+`packages: write`; no OCI registry credentials are used. Configure:
 
 | GitHub setting | Value |
 | --- | --- |
-| Repository or Environment variable `RELAY_IMAGE_REPOSITORY` | Full lower-case OCIR repository path, such as `iad.ocir.io/namespace/clipp-relay`; no tag or digest. |
+| Optional Repository or Environment variable `RELAY_IMAGE_REPOSITORY` | Full lower-case GHCR path; defaults to `ghcr.io/<github.repository_owner>/clipp-relay`. The local test target is `ghcr.io/invine/clipp-relay`. No tag or digest. |
 | Repository variable `RELAY_GO_BUILDER_IMAGE` | Verified digest-pinned `golang:1.27.1-bookworm@sha256:...` builder reference, available to every verification job. |
-| Environment secret `OCIR_USERNAME` | OCIR login name for the publisher identity, including tenancy namespace and identity-domain component if required. |
-| Environment secret `OCIR_AUTH_TOKEN` | OCI auth token for that identity. |
 
-Use a publisher identity with only the repository permissions needed to push.
+Registry inspection on 2026-10-01 resolved the Go builder to
+`golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195`.
+Its multi-platform index contains Linux AMD64 and ARM64 manifests. This is the
+builder pin, not the relay image digest that the workflow produces.
+
+The publishing job authenticates as `github.actor` using `secrets.GITHUB_TOKEN`.
 The chart's `image.pullSecrets` references an independently provisioned pull
 Secret when the repository is private. No registry credentials enter the image
 or Helm values.

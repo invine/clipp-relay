@@ -11,9 +11,37 @@ namespace=$3
 context=${4:-}
 [[ $namespace == relay-portal-test && $release =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || { echo 'bundled test preflight requires relay-portal-test and a DNS-label release' >&2; exit 2; }
 flags=(-f "$values")
+value_files=("$values")
 if (( $# > 4 )); then
-  for overlay in "${@:5}"; do flags+=(-f "$overlay"); done
+  for overlay in "${@:5}"; do flags+=(-f "$overlay"); value_files+=("$overlay"); done
 fi
+# Helm lint may log template fail() messages and still return success. Check the
+# image prerequisite before Helm, honoring the same values-file precedence.
+ruby -ryaml -e '
+  image = {}
+  ARGV.each do |path|
+    begin
+      values = YAML.safe_load(File.read(path)) || {}
+    rescue Psych::Exception
+      abort "FAIL invalid values YAML: #{path}"
+    end
+    abort "FAIL values must be a mapping: #{path}" unless values.is_a?(Hash)
+    next unless values.key?("image")
+    section = values["image"]
+    if section.nil?
+      image = {}
+      next
+    end
+    abort "FAIL image must be a mapping: #{path}" unless section.is_a?(Hash)
+    image.merge!(section)
+  end
+  unless image["repository"].is_a?(String) && !image["repository"].strip.empty?
+    abort "FAIL relay image.repository: set the repository from the successful Publish relay image workflow artifact."
+  end
+  unless image["digest"].is_a?(String) && image["digest"].match?(/\Asha256:[0-9a-f]{64}\z/)
+    abort "FAIL relay image.digest: missing or invalid. Publish the relay image with .github/workflows/relay-image.yml, then copy image.repository and image.digest from its relay-image-values artifact into the private values file. The PostgreSQL digest is separate. No cluster checks were run."
+  end
+' "${value_files[@]}"
 chart=charts/clipp-relay
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -30,9 +58,9 @@ ruby -ryaml -e '
   abort "not bundled mode" unless docs.any? { |d| d["kind"] == "StatefulSet" && d.dig("metadata", "name").end_with?("-postgres") }
 ' "$work/stopped.yaml"
 echo "PASS bundled test chart/schema rendered for $release in $namespace: initial/stopped/migrating/serving"
-echo 'PENDING operator: replace illustrative relay image digest with a verified immutable image for the node architecture'
-echo 'PENDING operator: replace illustrative PostgreSQL digest with verified PostgreSQL 18 Debian image digest for the node architecture; inspect signed image provenance'
-echo 'PENDING operator: verify explicit Longhorn StorageClass and reclaim Retain, suitable capacity/permissions, and claim identity; PVC keep/prune annotations do not protect direct deletion'
+echo 'PENDING operator: verify relay image digest against the published workflow artifact and node architecture'
+echo 'PENDING operator: verify PostgreSQL 18 Debian image digest, node architecture, and provenance against registry evidence'
+echo 'PENDING operator: verify explicit Longhorn StorageClass, capacity/permissions, and claim identity; Retain recommended, explicit operator-approved Delete allowed for disposable tests'
 echo 'PENDING operator: verify existing PostgreSQL admin, serving, migration, server TLS, and trust CA Secrets; validate certificate SAN for the internal Service FQDN and CA chain'
 echo 'PENDING operator: prove empty authorized claim before first init; observe bootstrap completion and manually migrate schema before serving; clear initialize permission'
 echo 'PENDING operator: verify CNI NetworkPolicy enforcement, TLS/SCRAM rejection, role/PUBLIC privileges, restart with retained data, and recovery procedure'

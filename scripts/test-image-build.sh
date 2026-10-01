@@ -63,4 +63,11 @@ assert_arg "--metadata-file=$tmp/result.json"
 assert_arg '--build-arg=GO_BUILDER_IMAGE=golang:1.27.1-bookworm@sha256:'"$(printf 'a%.0s' {1..64})"
 reject_arg '--load'
 
+GO_BUILDER_IMAGE="golang:1.27.1-bookworm@sha256:$(printf 'a%.0s' {1..64})" \
+  bash "$root/scripts/build-relay-image.sh" --push ghcr.io/invine/clipp-relay:run "$tmp/result.json"
+assert_arg 'ghcr.io/invine/clipp-relay:run'
+assert_arg '--platform=linux/amd64,linux/arm64'
+assert_arg '--push'
+assert_arg "--metadata-file=$tmp/result.json"
+
 echo 'image build command checks passed'

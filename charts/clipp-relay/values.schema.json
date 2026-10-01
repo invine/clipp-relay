@@ -478,6 +478,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "securityRuleManagementMode": {
+          "type": "string",
+          "enum": ["NSG", "None"]
+        },
+        "internal": {
+          "type": "boolean"
+        },
         "subnetOcid": {
           "type": "string"
         },

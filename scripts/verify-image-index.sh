@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# != 1 || ! "$1" =~ ^[a-z0-9-]+\.ocir\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]; then
-  echo "usage: $0 OCIR_REPOSITORY@sha256:DIGEST" >&2
+if [[ $# != 1 || ! "$1" =~ ^(ghcr\.io/[a-z0-9._-]+/[a-z0-9._/-]+|[a-z0-9-]+\.ocir\.io/[a-z0-9._/-]+)@sha256:[0-9a-f]{64}$ ]]; then
+  echo "usage: $0 REGISTRY_REPOSITORY@sha256:DIGEST" >&2
   exit 2
 fi
 

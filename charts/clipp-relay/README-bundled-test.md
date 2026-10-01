@@ -12,6 +12,24 @@
 
 ## Deliberate first initialization and migration
 
+### Approved disposable-test infrastructure override
+
+The 2026-10-01 operator request accepts the existing `longhorn` StorageClass
+with its `Delete` reclaim policy for this disposable test. Preserve the selected
+claim's identity and size; no StorageClass or existing PVC is changed by editing
+values. This explicit test choice supersedes the Retain recommendation above.
+
+For the existing private OCI subnet, set `oci.internal: true`. To use existing
+operator-managed security lists without NSGs, set
+`oci.securityRuleManagementMode: None` and leave both NSG OCIDs empty. The chart
+then omits NSG annotations and requests no automatic security-rule changes.
+TCP/UDP NLBs are private; portal/WSS retain their public F5 ingress path. The
+default chart networking remains public NLBs with explicit NSGs. Internal NLBs
+do not make TCP/UDP reachable from external clients without private routing.
+This choice does not establish Kubernetes NetworkPolicy enforcement.
+
+### Initialization steps
+
 1. Inspect the empty claim and all prerequisites, render `stopped` with `database.bundled.initialize=true`, and confirm the relay is stopped. Read-only preflight rejects a same-name existing PVC when first initialization would create a claim. The init container writes a release marker before `initdb`. Interrupted initialization, a missing marker, an empty replacement claim after initialization, or a wrong major fails closed for manual recovery. No chart operation erases or reinitializes data.
 2. Set `initialize=false` and render `migrating` with a fresh `deployment.runId`. Inspect the ordinary named bootstrap Job and its result. It creates or verifies the database and distinct roles without resetting an existing password; mismatched credentials, serving DDL grants/ownership, or serving role membership fail. Do not reuse a failed Job name without inspecting the cause. Bootstrap does not run on serving restarts.
    The Job has Argo prune protection so its status remains available for inspection; remove old Jobs only after an explicit review.
@@ -25,7 +43,16 @@ Both a new and an existing claim require a deliberate data handoff for a mode or
 ```sh
 bash scripts/test-chart.sh
 bash scripts/test-chart-bundled.sh
+bash scripts/test-chart-test-network.sh
+bash scripts/test-preflight-image-inputs.sh
 bash scripts/preflight-bundled-test.sh charts/clipp-relay/examples/bundled-test-values.yaml isolated relay-portal-test
 ```
 
 The preflight only renders locally unless an explicit context is passed. With a context it reads resource names and metadata; it never reads Secret contents or modifies the cluster. It leaves certificate authority, StorageClass retention, data contents, privileges, image provenance, network enforcement, and live startup as pending gates. The example values are deliberately not a deployable environment.
+
+Preflight checks the relay image repository and digest before invoking Helm.
+Use the exact pair from a successful `Publish relay image` workflow's
+`relay-image-values-<run>-<attempt>` artifact. Configuring a GHCR repository path
+does not publish an image or supply its digest. The PostgreSQL image digest is a
+separate field. The wizard delegates linting to this preflight so every Helm call
+uses the required `relay-portal-test` namespace.

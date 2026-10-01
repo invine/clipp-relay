@@ -76,6 +76,8 @@ journal:
   userOcid: ""
   fingerprint: ""
 oci:
+  securityRuleManagementMode: NSG
+  internal: false
   subnetOcid: ""
   frontendNsgOcid: ""
   backendNsgOcid: ""

@@ -192,5 +192,5 @@ database or Docker volume.
 
 Other checks: `gofmt -l cmd internal`, `go vet ./...`, `go test ./...`.
 
-For local Linux ARM64/AMD64 image builds and the manual OCIR publication workflow,
+For local Linux ARM64/AMD64 image builds and the manual GHCR publication workflow,
 see [Relay image build](docs/image-build.md).
