@@ -49,7 +49,8 @@ if bash "$root/scripts/build-relay-image.sh" --local arm64 'bad image'; then
 fi
 test ! -e "$FAKE_DOCKER_ARGS"
 
-if bash "$root/scripts/build-relay-image.sh" --push iad.ocir.io/ns/clipp-relay:run "$tmp/result.json"; then
+# CI supplies a real builder pin; this negative case must clear it explicitly.
+if GO_BUILDER_IMAGE='' bash "$root/scripts/build-relay-image.sh" --push iad.ocir.io/ns/clipp-relay:run "$tmp/result.json"; then
   echo 'push without pinned builder was accepted' >&2
   exit 1
 fi
