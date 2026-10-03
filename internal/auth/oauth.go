@@ -190,6 +190,12 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	// callback was validated against its registered redirect before this flow.
 	// URI delimiters must not become CSP directive or policy-list separators.
 	callbackSource := strings.NewReplacer(";", "%3B", ",", "%2C").Replace(intent.redirect)
+	if intent.client == "android" {
+		// Chromium does not match private application URIs as host sources.
+		// Permit the registered scheme in CSP; the OAuth redirect itself stays exact.
+		callback, _ := url.Parse(intent.redirect)
+		callbackSource = callback.Scheme + ":"
+	}
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self' "+callbackSource+"; base-uri 'none'")
 	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize Clipp Relay</title><h1>Authorize Clipp Relay</h1><p>Allow the %s app to use this relay account?</p><form method="post" action="/oauth/authorize"><input type="hidden" name="flow" value="%s"><input type="hidden" name="csrf" value="%s"><button type="submit">Authorize</button></form></html>`, intent.client, id, s.csrf(version, credential))
 }
