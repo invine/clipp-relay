@@ -186,7 +186,11 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self'; base-uri 'none'")
+	// Browsers also apply form-action to the post-consent redirect. The app
+	// callback was validated against its registered redirect before this flow.
+	// URI delimiters must not become CSP directive or policy-list separators.
+	callbackSource := strings.NewReplacer(";", "%3B", ",", "%2C").Replace(intent.redirect)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self' "+callbackSource+"; base-uri 'none'")
 	_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize Clipp Relay</title><h1>Authorize Clipp Relay</h1><p>Allow the %s app to use this relay account?</p><form method="post" action="/oauth/authorize"><input type="hidden" name="flow" value="%s"><input type="hidden" name="csrf" value="%s"><button type="submit">Authorize</button></form></html>`, intent.client, id, s.csrf(version, credential))
 }
 func (s *Server) dropConsent(id string) { s.mu.Lock(); delete(s.consents, id); s.mu.Unlock() }
