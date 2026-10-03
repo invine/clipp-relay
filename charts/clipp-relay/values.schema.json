@@ -499,6 +499,11 @@
         },
         "udpReservedIp": {
           "type": "string"
+        },
+        "nlbNameSuffix": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "maxLength": 32
         }
       },
       "required": [

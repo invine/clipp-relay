@@ -1,0 +1,13 @@
+# Overlay the approved installed values, preserving the release and database.
+# Supply an existing PUBLIC subnet OCID after this overlay. Empty is deliberate:
+# reusing the old private subnet must not silently pass local validation.
+oci:
+  internal: false
+  nlbNameSuffix: public
+  subnetOcid: ""
+# Publish the replacements from Kubernetes Service status, not old overrides.
+transports:
+  tcp:
+    addresses: []
+  udp:
+    addresses: []

@@ -78,6 +78,8 @@ journal:
 oci:
   securityRuleManagementMode: NSG
   internal: false
+  # Change only for a deliberate replacement of immutable OCI NLBs.
+  nlbNameSuffix: ""
   subnetOcid: ""
   frontendNsgOcid: ""
   backendNsgOcid: ""

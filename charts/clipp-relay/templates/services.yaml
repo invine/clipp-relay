@@ -40,7 +40,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $name }}-{{ $kind }}
+  name: {{ include "clipp.nlbServiceName" (dict "root" $ "transport" $kind) }}
   annotations:
     oci.oraclecloud.com/load-balancer-type: "nlb"
     oci-network-load-balancer.oraclecloud.com/internal: {{ $v.oci.internal | quote }}

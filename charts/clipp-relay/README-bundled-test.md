@@ -28,6 +28,11 @@ default chart networking remains public NLBs with explicit NSGs. Internal NLBs
 do not make TCP/UDP reachable from external clients without private routing.
 This choice does not establish Kubernetes NetworkPolicy enforcement.
 
+To replace these internal NLBs with public TCP/UDP endpoints, use the
+[public NLB migration overlay and procedure](README.md#replace-internal-tcpudp-nlbs-with-public-nlbs).
+The replacement requires new Service identities, a public subnet and reviewed
+security rules; changing `oci.internal` alone cannot convert the existing NLBs.
+
 ### Initialization steps
 
 1. Inspect the empty claim and all prerequisites, render `stopped` with `database.bundled.initialize=true`, and confirm the relay is stopped. Read-only preflight rejects a same-name existing PVC when first initialization would create a claim. The init container writes a release marker before `initdb`. Interrupted initialization, a missing marker, an empty replacement claim after initialization, or a wrong major fails closed for manual recovery. No chart operation erases or reinitializes data.

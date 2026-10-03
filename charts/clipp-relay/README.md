@@ -18,6 +18,57 @@ The `migrating` phase intentionally renders zero serving replicas and no migrati
 
 The NetworkPolicy denies other ingress and egress. It permits public data ports, portal/WSS only from the selected ingress Pods, operations from approved CIDRs, and egress to PostgreSQL, API, selected DNS Pods and public HTTPS. The broad HTTPS CIDR is necessary for Google/OCI endpoints but is not a domain firewall; application clients enforce endpoint/redirect restrictions. Operators must verify that their CNI actually enforces these policies, including NAT and host-network paths. Configure the selected ingress controller to overwrite and sanitize proxy metadata, permit only intended methods/routes, and keep F5 access logs from collecting credentials or tokens. The chart does not install controllers or alter controller-wide logging.
 
+## Replace internal TCP/UDP NLBs with public NLBs
+
+OCI fixes NLB visibility at creation time. Changing `oci.internal` on an existing
+Service does not convert its internal NLB to a public one. The opt-in
+`oci.nlbNameSuffix` creates different TCP/UDP Service names while preserving the
+relay StatefulSet, database, portal and WSS resource identities. Its default is
+empty; retain the chosen suffix after migration so later upgrades keep those
+routing resources stable. The same names feed discovery and the Service-watch
+Role.
+
+Apply `examples/public-nlb-values.yaml` after the existing approved values, then
+supply an existing public subnet OCID. The overlay clears old address overrides
+so discovery watches the new Services; it intentionally leaves `oci.subnetOcid`
+empty to prevent reuse of the old private subnet. Retain the installed image
+digest, database credentials, claim identity and initialization state. Use the
+same release and namespace. For example, a local render is:
+
+```sh
+helm template clipp-relay-test charts/clipp-relay -n relay-portal-test \
+  -f /path/to/approved-installed-values.yaml \
+  -f charts/clipp-relay/examples/public-nlb-values.yaml \
+  --set-string oci.subnetOcid=ocid1.subnet.oc1.REGION.PUBLIC_SUBNET
+```
+
+For the existing test network, `prod-public-subnet` has an Internet Gateway route,
+but its security list needs TCP 4001 and UDP 4003 ingress. Keep the selected
+`oci.securityRuleManagementMode`: `None` uses operator-managed security lists;
+`NSG` requires existing frontend/backend NSGs. Permit the NLB backend and health
+paths, including TCP 8081 `/readyz`, from the appropriate private sources. The
+operations port remains private. The chart creates neither subnet nor security
+rules in `None` mode. Public NLBs render `external-ip-only: "true"`, so Service
+status and discovery expose only their public addresses.
+
+A deployment is a separate operator-authorized migration. Inspect the rendered
+resource diff and OCI quota first. Stop and drain the old Relay Instance, prove
+it is absent, then update to the new Services and matching watch configuration
+using the existing maintenance procedure. With the relay StatefulSet's
+`OnDelete` strategy, merely editing the ConfigMap does not make a running process
+watch the new names; the relay must restart with the new configuration. Preserve
+PostgreSQL and its claim, keep initialization disabled, and do not run schema
+migration for this networking change. Helm/Argo may prune the old Service names;
+plan that retirement explicitly, including rollback, rather than applying only
+an annotation patch or relying on an in-place NLB conversion.
+
+Before accepting the migration, verify the new NLB health, external TCP/Noise
+and WebRTC Direct connectivity, and public-only addresses in authenticated
+`/v1/relay`. Recheck WSS. Local rendering proves the routing contract, not live
+provisioning, firewall reachability or transport acceptance. See Oracle's
+[annotation reference](https://github.com/oracle/oci-cloud-controller-manager/blob/93969b53c3a17ea558b98ed31605cf69de9f37a5/docs/load-balancer-annotations.md)
+and [public-only Service status guidance](https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengconfiguringloadbalancersnetworkloadbalancers-subtopic.htm).
+
 ## Local proof and preflight
 
 ```sh
