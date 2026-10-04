@@ -50,6 +50,8 @@ provisioning, publication or load generation against an unapproved target.
 
 ## Comments
 
+- Continuation claimed centrally on 2026-10-05 from approved consolidated client baseline `4dc53d7` in isolated worktree `/Users/invine/src/js/clipp/.local/managed-relay/worktrees/frontier-android-20261005`, branch `codex/managed-relay-14-frontier-20261005`. The operator connected the approved test phone; ADB reports an authorized OnePlus GM1917 device. Fresh-context agent will prepare and exercise native/runtime acceptance while preserving installed app data, Device Identity, credentials and other applications. Root owns status, review, integration and resolution; unavailable Google/paired-peer steps remain explicit. At most two implementation agents; shared Electron transport changes must be integrated before Android adopts them. No push, deployment, user-data clearing or destructive key tests against the operator profile.
+
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 12 resolved (`72a7dd4`) and ticket 10 remained resolved. Fresh-context implementation will use an isolated Clipp worktree based on integrated ticket 12 (`ab56937`); review, native/runtime evidence and integration checks are required before resolution.
