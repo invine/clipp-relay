@@ -41,6 +41,12 @@ func (a *observedAuthority) AuthenticateRelay(ctx context.Context, token string)
 
 func localTLSProxy(t *testing.T, internal ma.Multiaddr, name string) (ma.Multiaddr, *x509.CertPool) {
 	t.Helper()
+	address, roots, _ := localTLSProxyCertificate(t, internal, name)
+	return address, roots
+}
+
+func localTLSProxyCertificate(t *testing.T, internal ma.Multiaddr, name string) (ma.Multiaddr, *x509.CertPool, []byte) {
+	t.Helper()
 	port, err := internal.ValueForProtocol(ma.P_TCP)
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +82,7 @@ func localTLSProxy(t *testing.T, internal ma.Multiaddr, name string) (ma.Multiad
 		t.Fatal(err)
 	}
 	roots.AddCert(xcert)
-	return address, roots
+	return address, roots, certDER
 }
 
 func TestWSSCertificateAndNoiseIdentityBeforeToken(t *testing.T) {

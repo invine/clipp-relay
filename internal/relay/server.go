@@ -77,7 +77,7 @@ type Server struct {
 	webSocketHostname string
 	mu                sync.Mutex
 	byConn            map[network.Conn]*session
-	byPeer            map[peer.ID]*session
+	byPeer            map[peer.ID]map[transportFamily]*session
 	byAccount         map[string]map[*session]struct{}
 	preauth           map[network.Conn]*time.Timer
 	peerGuards        [256]sync.Mutex
@@ -212,7 +212,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]map[transportFamily]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -314,8 +314,13 @@ func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 		s.removeRendezvousLocked(v)
 	}
 	delete(s.byConn, v.conn)
-	if s.byPeer[v.conn.RemotePeer()] == v {
-		delete(s.byPeer, v.conn.RemotePeer())
+	id := v.conn.RemotePeer()
+	family := connectionFamily(v.conn)
+	if s.byPeer[id][family] == v {
+		delete(s.byPeer[id], family)
+		if len(s.byPeer[id]) == 0 {
+			delete(s.byPeer, id)
+		}
 	}
 	delete(s.byAccount[v.account], v)
 	if len(s.byAccount[v.account]) == 0 {
@@ -371,10 +376,43 @@ func (s *Server) Drain(ctx context.Context) error {
 	}
 }
 
+type transportFamily string
+
+func connectionFamily(c network.Conn) transportFamily {
+	a := c.LocalMultiaddr()
+	switch {
+	case hasProtocol(a, ma.P_WEBRTC_DIRECT):
+		return "webrtc-direct"
+	case hasProtocol(a, ma.P_WS), hasProtocol(a, ma.P_WSS):
+		return "websocket"
+	case hasProtocol(a, ma.P_TCP):
+		return "tcp"
+	default:
+		return ""
+	}
+}
+
+// Stock byte reporting identifies a peer, not a physical connection. All live
+// families for a peer share one account, so any valid session supplies authority.
+// Prefer the reservation owner when choosing the connection for stock STOP.
+func (s *Server) peerSessionLocked(id peer.ID) *session {
+	if r := s.reservations[id]; r.conn != nil {
+		if v := s.byConn[r.conn]; v != nil && time.Now().Before(v.deadline) && !v.conn.IsClosed() {
+			return v
+		}
+	}
+	for _, v := range s.byPeer[id] {
+		if time.Now().Before(v.deadline) && !v.conn.IsClosed() {
+			return v
+		}
+	}
+	return nil
+}
+
 func (s *Server) authoritativeConn(id peer.ID) network.Conn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v := s.byPeer[id]
+	v := s.peerSessionLocked(id)
 	if s.closing || v == nil || !time.Now().Before(v.deadline) || v.conn.IsClosed() {
 		return nil
 	}
@@ -410,7 +448,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	var deadline time.Time
 	var renew time.Duration
 	var code string
-	var oldToClose network.Conn
+	var oldToClose []network.Conn
 	var installed *session
 	admit := func(unitCtx context.Context) {
 		deadline, renew, code, oldToClose, installed = s.authenticateSerial(unitCtx, c, raw)
@@ -434,8 +472,8 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 			_ = c.Close()
 		}
 	}
-	if oldToClose != nil {
-		_ = oldToClose.Close()
+	for _, old := range oldToClose {
+		_ = old.Close()
 	}
 	if !unitOK {
 		return time.Time{}, 0, "temporarily_unavailable"
@@ -443,7 +481,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	return deadline, renew, code
 }
 
-func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, network.Conn, *session) {
+func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, []network.Conn, *session) {
 	guard := &s.peerGuards[peerGuardIndex(c.RemotePeer())]
 	for !guard.TryLock() {
 		select {
@@ -456,7 +494,7 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 		guard.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable", nil, nil
 	}
-	var oldToClose network.Conn
+	var oldToClose []network.Conn
 	defer guard.Unlock()
 	credential, err := s.authority.AuthenticateRelay(ctx, raw)
 	if err != nil {
@@ -471,8 +509,11 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 	var installed *session
 	accounts := []string{credential.AccountID}
 	s.mu.Lock()
-	if old := s.byPeer[c.RemotePeer()]; old != nil && old.account != credential.AccountID {
-		accounts = append(accounts, old.account)
+	for _, old := range s.byPeer[c.RemotePeer()] {
+		if old.account != credential.AccountID {
+			accounts = append(accounts, old.account)
+			break // Every admitted family for this peer belongs to one account.
+		}
 	}
 	s.mu.Unlock()
 	admit := func(unitCtx context.Context) {
@@ -507,14 +548,23 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 // The account guard remains held from the authoritative recheck through local
 // credit funding and registry installation. A committed policy change therefore
 // cannot be followed by installation of an older observed credential.
-func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn) (time.Time, time.Duration, string) {
+func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *[]network.Conn) (time.Time, time.Duration, string) {
 	if ctx.Err() != nil {
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
 	s.mu.Lock()
 	current := s.byConn[c]
-	replaced := s.byPeer[c.RemotePeer()]
+	family := connectionFamily(c)
+	var replaced []*session
+	for oldFamily, old := range s.byPeer[c.RemotePeer()] {
+		if oldFamily == family || old.account != credential.AccountID {
+			replaced = append(replaced, old)
+		}
+	}
 	s.mu.Unlock()
+	if family == "" {
+		return time.Time{}, 0, "authentication_failed"
+	}
 	if current != nil && current.account != credential.AccountID {
 		return time.Time{}, 0, "account_change_requires_new_connection"
 	}
@@ -542,20 +592,28 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		s.mu.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
-	if current != nil && s.byConn[c] != current || replaced != nil && s.byPeer[c.RemotePeer()] != replaced {
+	if current != nil && s.byConn[c] != current {
 		s.mu.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
+	for _, old := range replaced {
+		if s.byConn[old.conn] != old {
+			s.mu.Unlock()
+			return time.Time{}, 0, "temporarily_unavailable"
+		}
+	}
 	if current == nil {
 		count := len(s.byAccount[credential.AccountID])
-		if replaced != nil && replaced.account == credential.AccountID {
-			count--
+		for _, old := range replaced {
+			if old.account == credential.AccountID {
+				count--
+			}
 		}
 		if count >= credential.SessionLimit {
 			s.mu.Unlock()
 			return time.Time{}, 0, "session_limit_exceeded"
 		}
-		if len(s.byConn) >= s.maxSessions && replaced == nil {
+		if len(s.byConn)-len(replaced) >= s.maxSessions {
 			s.mu.Unlock()
 			return time.Time{}, 0, "session_limit_exceeded"
 		}
@@ -563,12 +621,18 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 	if current != nil {
 		s.removeSessionLocked(current, true)
 	}
-	if replaced != nil && replaced != current {
-		s.removeLocked(replaced)
+	for _, old := range replaced {
+		if old != current {
+			s.removeLocked(old)
+			*oldToClose = append(*oldToClose, old.conn)
+		}
 	}
 	v := &session{conn: c, account: credential.AccountID, generation: credential.Generation, deadline: deadline}
 	s.byConn[c] = v
-	s.byPeer[c.RemotePeer()] = v
+	if s.byPeer[c.RemotePeer()] == nil {
+		s.byPeer[c.RemotePeer()] = map[transportFamily]*session{}
+	}
+	s.byPeer[c.RemotePeer()][family] = v
 	if current != nil {
 		if lease := s.leases[c.RemotePeer()]; lease != nil && lease.owner == current {
 			lease.owner = v
@@ -584,9 +648,6 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 	}
 	v.timer = time.AfterFunc(time.Until(deadline), func() { s.expire(v) })
 	s.mu.Unlock()
-	if replaced != nil && replaced != current {
-		*oldToClose = replaced.conn
-	}
 	lifetime := time.Until(deadline)
 	return deadline, time.Duration(float64(lifetime) * renewFraction), ""
 }
