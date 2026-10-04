@@ -159,3 +159,12 @@ first.
 - Local ticket/source links and required contract/acceptance/demo fields checked.
 - Specification and decision map preserved byte-for-byte during publication.
 - No production implementation or acceptance test was performed by publishing this backlog.
+
+## User-directed transport follow-ups — 2026-10-05
+
+The user replaced the first-transport winner requirement with simultaneous connections through every supported available transport. These follow-ups amend I4/I7 replacement and client selection only; existing physical-session limits remain authoritative.
+
+- [34: Connect every available relay transport](issues/34-connect-every-relay-transport.md) — claimed, Clipp; predecessor 12 resolved.
+- [35: Admit concurrent relay transport connections](issues/35-admit-concurrent-relay-transports.md) — claimed, clipp-relay; predecessor 10 resolved.
+
+Runtime tickets 13–15 remain claimed and must include these integrated follow-ups before final transport acceptance.
