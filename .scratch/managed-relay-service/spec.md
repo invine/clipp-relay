@@ -91,7 +91,7 @@ correctness and recovery gates are.
 44. As an administrator, I want restored accounts held for review, so that an old backup cannot silently restore unsafe access.
 45. As an operator, I want cross-account circuits, so that Relay Account ownership does not redefine Device Network membership.
 46. As an operator, I want exact live admission counts, so that concurrent authentication cannot bypass session limits.
-47. As an operator, I want a newly authenticated same-Peer-ID connection to replace the old session, so that stale authority cannot survive.
+47. As an operator, I want a newly authenticated same-Peer-ID connection to replace stale authority within its transport family while independently authenticated transport families can coexist.
 48. As an operator, I want both circuit endpoints charged, so that sending and receiving each consume allowance.
 49. As an operator, I want finite prepaid local credit, so that forwarding needs no SQL per buffer or unconfirmed credit.
 50. As an operator, I want no restart/disconnect refunds, so that reconnecting cannot reset committed usage.
@@ -323,11 +323,16 @@ Initial auth failure returns one error where framing permits and closes whole
 connection. Same-account reauth can renew; failed renewal retains old deadline.
 Same-connection account change returns account_change_requires_new_connection,
 unchanged. Deadline is min(token expiry, session maximum), then whole-connection
-closure. New authenticated same-Peer-ID connection replaces the authoritative
-session atomically, including cross-account/full global capacity, only after all
-checks. Failed admission leaves old session intact; renewal uses no new slot.
-Close only captured old connection; timers/close/lease callbacks compare ownership
-generation so stale cleanup never removes replacement.
+closure. The user amendment of 2026-10-05 permits independently authenticated
+same-account, same-Peer-ID connections on distinct TCP, WSS and WebRTC Direct
+transport families. Each physical connection counts toward the existing account
+and global session limits. Replacement within a family, or replacement across
+accounts, is atomic only after admission checks; accounts must never share peer
+authority. Failed admission leaves old sessions intact; renewal uses no new slot.
+Close only captured replaced connections; timers/close/lease callbacks compare
+ownership generation so stale cleanup never removes replacement or healthy
+transport authority. Stock per-peer reservation and Rendezvous ownership remains
+coherent across connections and can be re-established through a healthy transport.
 
 Rendezvous register requires active session/live reservation, valid signature and
 subject matching remote Peer ID, bounded envelope/address parsing and at least
@@ -515,10 +520,16 @@ revocation; abandoned grants persist until expiry or explicit account revocation
 Keep one host/existing Device Identity per runtime. Shared core owns independent
 discovery→dial/verify→auth→reservation→Rendezvous, renewal and retry; runtime adapters
 own browser/HTTP/lifecycle/storage. No automatic circuit-relay listeners bypassing
-barrier. Dynamic config does not restart host/direct peers/other relays. One
-effective connection/config, bounded staggered races, first verified winner and
-close losers. Electron prefers TCP/WSS/WebRTC Direct; Android/extension WSS/WebRTC
-Direct. Try all supported addresses. Direct networking starts even without relays.
+barrier. Dynamic config does not restart host/direct peers/other relays. The user
+amendment of 2026-10-05 requires one effective connection per supported available
+transport family/config: Electron TCP/WSS/WebRTC Direct; Android/extension
+WSS/WebRTC Direct. Use bounded dialing of address alternatives within each family;
+keep successful families connected and retry failed families independently. Verify
+the expected Peer ID before sending credentials on every physical connection.
+One coherent stock reservation/Rendezvous owner serves the configured peer, with
+promotion to a healthy authenticated transport when needed. Single-transport
+acceptance selection remains opt-in to prove the specific transfer path. Direct
+networking starts even without relays.
 
 - Electron main owns auth/renewal/browser and OS-backed safeStorage. No usable
   OS provider (including insecure basic_text) means memory-only. Renderer gets
@@ -860,7 +871,7 @@ or fairness under attack. No auto-tuning/hidden host-scaled defaults.
 | Transient retry | Ceilings 1,2,4,8,16,30s with uniform half-to-full jitter; reset only after complete Ready |
 | Retry hints | Minimum wait, may exceed cap; default overload 5s, manual cannot bypass |
 | Known quota/session refusal | 5m ±20% or longer hint; preserve credentials, no browser launch |
-| Client setup concurrency | 4 configurations, 2 address races/config; waiting backoff uses no active setup slot |
+| Client setup concurrency | 4 configurations, 2 active address dials/config across transport families; waiting backoff uses no active setup slot |
 | Drain / termination grace | 30s /45s |
 | Public backend HTTP connections / idle | 512 /60s; excludes WSS and shared ingress front sockets |
 | Active public HTTP requests | 128 including multiplexed work; no unbounded queue |
