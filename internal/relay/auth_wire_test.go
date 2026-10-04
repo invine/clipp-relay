@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -43,26 +42,11 @@ func (c failingCredit) Take(context.Context, string, int64, int64) (quota.Result
 
 func authResponse(t *testing.T, ctx context.Context, h host.Host, id peer.ID, token string) string {
 	t.Helper()
-	st, err := h.NewStream(ctx, id, AuthProtocol)
+	response, err := transportAuthResponse(ctx, h, id, token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
-	if _, err = st.Write(frame(fmt.Sprintf(`{"accessToken":%q}`, token))); err != nil {
-		t.Fatal(err)
-	}
-	if err = st.CloseWrite(); err != nil {
-		t.Fatal(err)
-	}
-	n, err := readSize(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := make([]byte, n)
-	if _, err = io.ReadFull(st, data); err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
+	return response
 }
 func readSize(r io.Reader) (uint64, error) { return binary.ReadUvarint(byteReader{r}) }
 

@@ -101,7 +101,7 @@ func TestRealJSConcurrentRelayTransports(t *testing.T) {
 		}
 	}
 	credit := &recordingCredit{counts: map[string]int64{}}
-	s, err := New(twoAuthority{}, credit, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", WebSocketHostname: "relay.example.test", MaxSessions: 10})
+	s, err := New(twoAuthority{}, credit, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", WebSocketHostname: "localhost", MaxSessions: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,12 @@ func TestRealJSConcurrentRelayTransports(t *testing.T) {
 			t.Fatal(err)
 		}
 		if family == "websocket" {
-			address, _, proxyCertificate = localTLSProxyCertificate(t, address, "relay.example.test")
+			address, _, proxyCertificate = localTLSProxyCertificate(t, address, "localhost")
+			port, err := address.ValueForProtocol(ma.P_TCP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			address = ma.StringCast("/dns4/localhost/tcp/" + port + "/tls/ws")
 		}
 		addresses = append(addresses, address)
 	}
