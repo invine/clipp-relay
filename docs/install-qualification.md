@@ -37,13 +37,17 @@ inspector. Record independent runtime evidence separately. In particular, a
 configured non-root/read-only Pod is not proof of its effective runtime controls;
 an image digest reference is not image provenance; a Ready condition is not
 public transport reachability or the private operations pressure test. The
-inspector compares Pod image, resources and security settings with the workload
+inspector compares Pod image, resources, security, host access, container count,
+ports, command/arguments, probes, volumes and mounts with the workload
 template, verifies the Pod controller UID and intended StatefulSet revision when
 available, and reports both template and Pod CPU requests so stale/mismatched Pods
 cannot inherit a rendered resource claim. Snapshots without StatefulSet UID or
 intended revision report ownership/revision as `NOT RUN`; a mismatched owner or
 revision is a failure. Invalid metadata types and CPU quantities fail with a
-generic error without echoing private input.
+generic error without echoing private input. Boolean values are not accepted as
+integer fields. Kubernetes probe defaults, Secret/ConfigMap volume defaults and
+the exact ordinary service-account token projection are normalized for comparison;
+other projection or mount changes remain visible.
 
 ## Observed test installation, 2026-10-04
 
@@ -61,7 +65,7 @@ The inspector returned exit 1 with these facts:
 | CPU request, StatefulSet and Pod | `300m` | Approved disposable test profile; canonical `1` CPU request is not demonstrated. |
 | Memory/CPU limits and other resources | Declarative test settings only | Actual envelope and process nofile still require live evidence. |
 | StatefulSet | One serving replica, OnDelete | Declared singleton behavior matches. |
-| Pod | Ready; image/resources/security match template; owner UID and intended revision match | Momentary metadata observation. |
+| Pod | Ready; reviewed runtime declarations match template; owner UID and intended revision match | Momentary metadata observation. |
 | Security | Non-root, read-only root, no escalation, dropped capabilities, RuntimeDefault seccomp; no host mounts/network/ports | Declared controls match; effective runtime controls remain unverified. |
 | Probes | Private readyz startup/readiness and livez liveness use the specified timings | Probe declarations match. |
 | Image | Immutable digest reference | Current image identity captured; multiarch provenance is a separate gate. |
@@ -95,7 +99,7 @@ is authorized by the metadata inspection command.
 
 On Go 1.27.1 darwin/arm64, Helm 4.3.0, kubectl client 1.36.1 and Python 3.14.7:
 
-- `python3 scripts/test-install-metadata.py`: PASS, eight tests at the render/CLI
+- `python3 scripts/test-install-metadata.py`: PASS, eleven tests at the render/CLI
   seam, including resource mismatch and private-input rejection. Failure cases
   were observed before their implementation fixes.
 - `GOPROXY=off GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...`: PASS.

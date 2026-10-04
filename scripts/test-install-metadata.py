@@ -23,7 +23,7 @@ class InstallMetadataTests(unittest.TestCase):
         sts["status"] = {"updateRevision": "isolated-clipp-relay-abcdef"}
         pod["metadata"]["ownerReferences"] = [{"apiVersion": "apps/v1", "kind": "StatefulSet", "name": "isolated-clipp-relay", "uid": sts["metadata"]["uid"], "controller": True}]
         pod["metadata"]["labels"] = {"controller-revision-hash": "isolated-clipp-relay-abcdef"}
-        return {"statefulset": sts, "configmap": cm, "pod": pod}
+        return json.loads(json.dumps({"statefulset": sts, "configmap": cm, "pod": pod}))
 
     def inspect(self, objects):
         with tempfile.TemporaryDirectory() as work:
@@ -127,6 +127,73 @@ class InstallMetadataTests(unittest.TestCase):
         result = self.inspect(objects)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)["checks"]["pod_owner_and_intended_revision"], "NOT RUN")
+
+    def test_actual_pod_access_and_runtime_drift_cannot_match_declarations(self):
+        for field in ("hostNetwork", "hostPID", "hostIPC", "hostPath", "hostPort", "container", "probe", "config_volume", "config_mount", "args"):
+            with self.subTest(field=field):
+                objects = self.snapshot(bundled=False)
+                spec = objects["pod"]["spec"]
+                container = spec["containers"][0]
+                if field in ("hostNetwork", "hostPID", "hostIPC"):
+                    spec[field] = True
+                elif field == "hostPath":
+                    spec["volumes"].append({"name": "host", "hostPath": {"path": "/"}})
+                elif field == "hostPort":
+                    container["ports"][0]["hostPort"] = 8080
+                elif field == "container":
+                    spec["containers"].append({"name": "extra", "image": "example:latest"})
+                elif field == "probe":
+                    container["readinessProbe"]["httpGet"]["path"] = "/wrong"
+                elif field == "config_volume":
+                    next(v for v in spec["volumes"] if v["name"] == "config")["configMap"]["name"] = "foreign-config"
+                elif field == "config_mount":
+                    next(v for v in container["volumeMounts"] if v["name"] == "config")["mountPath"] = "/wrong"
+                else:
+                    container["args"] = ["-command", "migrate"]
+                result = self.inspect(objects)
+                self.assertEqual(result.returncode, 1)
+                report = json.loads(result.stdout)
+                self.assertIn("FAIL", report["checks"].values())
+                self.assertFalse(report["acceptance_complete"])
+                self.assertTrue(all(v == "NOT RUN" for v in report["runtime_gates"].values()))
+
+    def test_expected_kubernetes_defaults_preserve_declared_pod_match(self):
+        objects = self.snapshot(bundled=False)
+        actual = objects["pod"]["spec"]
+        container = actual["containers"][0]
+        for key in ("startupProbe", "readinessProbe", "livenessProbe"):
+            container[key]["successThreshold"] = 1
+            container[key]["httpGet"]["scheme"] = "HTTP"
+        for volume in actual["volumes"]:
+            for source in ("configMap", "secret"):
+                if source in volume:
+                    volume[source]["defaultMode"] = 420
+        actual["volumes"].append({"name": "kube-api-access-abcde", "projected": {"defaultMode": 420, "sources": [{"serviceAccountToken": {"expirationSeconds": 3607, "path": "token"}}, {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}}, {"downwardAPI": {"items": [{"path": "namespace", "fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}}]}}]}})
+        container["volumeMounts"].append({"name": "kube-api-access-abcde", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": True})
+        result = self.inspect(objects)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(value == "PASS metadata" for value in json.loads(result.stdout)["checks"].values()))
+
+    def test_invalid_api_scalar_types_fail_privately(self):
+        for field in ("replicas", "user", "drop", "probe", "hostNetwork"):
+            with self.subTest(field=field):
+                objects = self.snapshot(bundled=False)
+                spec = objects["statefulset"]["spec"]["template"]["spec"]
+                container = spec["containers"][0]
+                if field == "replicas":
+                    objects["statefulset"]["spec"]["replicas"] = True
+                elif field == "user":
+                    container["securityContext"]["runAsUser"] = True
+                elif field == "drop":
+                    container["securityContext"]["capabilities"]["drop"] = "ALL"
+                elif field == "probe":
+                    container["readinessProbe"]["successThreshold"] = True
+                else:
+                    objects["pod"]["spec"]["hostNetwork"] = 1
+                result = self.inspect(objects)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn("Traceback", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()
