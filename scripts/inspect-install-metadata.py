@@ -86,7 +86,10 @@ def validate_pod_fields(spec):
         typed_fields(volume, {'name': str, 'secret': dict, 'configMap': dict, 'projected': dict, 'hostPath': dict})
         for source in ('secret', 'configMap'):
             if source in volume:
-                typed_fields(volume[source], {'defaultMode': int, 'optional': bool, 'items': list})
+                typed_fields(volume[source], {'name': str, 'secretName': str,
+                                             'defaultMode': int, 'optional': bool, 'items': list})
+                for item in volume[source].get('items', []):
+                    typed_fields(item, {'key': str, 'path': str, 'mode': int})
 
 
 def probe_with_defaults(probe):
@@ -208,6 +211,16 @@ except (OSError, ValueError, TypeError, KeyError, StopIteration, subprocess.Subp
     private_failure()
 
 try:
+    for kind in names:
+        metadata = objects[kind]['metadata']
+        typed_fields(metadata, {'uid': str, 'labels': dict, 'ownerReferences': list})
+        labels = metadata.get('labels', {})
+        typed_fields(labels, {key: str for key in labels})
+        for owner in metadata.get('ownerReferences', []):
+            typed_fields(owner, {'apiVersion': str, 'kind': str, 'name': str,
+                                 'uid': str, 'controller': bool})
+    typed_fields(objects['statefulset'], {'status': dict})
+    typed_fields(objects['statefulset'].get('status', {}), {'updateRevision': str})
     typed_fields(sts, {'replicas': int})
     validate_pod_fields(template)
     validate_pod_fields(pod['spec'])
@@ -298,6 +311,8 @@ try:
         check('configured_' + key, (
             probe.get('httpGet', {}).get('path') == path
             and probe.get('httpGet', {}).get('port') == 'private'
+            and probe.get('httpGet', {}).get('scheme', 'HTTP') == 'HTTP'
+            and probe.get('httpGet', {}).get('host', '') == ''
             and probe.get('periodSeconds') == period
             and probe.get('timeoutSeconds') == timeout
             and probe.get('failureThreshold') == failures

@@ -269,5 +269,57 @@ class InstallMetadataTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertNotIn("Traceback", result.stderr)
 
+    def test_private_probes_reject_matching_destination_overrides(self):
+        for key in ("startupProbe", "readinessProbe", "livenessProbe"):
+            for override in ({"host": "198.51.100.1"}, {"scheme": "HTTPS"}):
+                with self.subTest(probe=key, override=override):
+                    objects = self.snapshot(bundled=False)
+                    for spec in (objects["statefulset"]["spec"]["template"]["spec"], objects["pod"]["spec"]):
+                        spec["containers"][0][key]["httpGet"].update(override)
+                    result = self.inspect(objects)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    report = json.loads(result.stdout)
+                    self.assertEqual(report["checks"]["configured_" + key], "FAIL")
+                    self.assertFalse(report["acceptance_complete"])
+
+    def test_malformed_identity_types_fail_privately_even_when_matching(self):
+        canary = "DO-NOT-PRINT-private-identity-canary"
+        for field in ("uid", "revision", "owner_uid", "controller", "labels"):
+            with self.subTest(field=field):
+                objects = self.snapshot(bundled=False)
+                owner = objects["pod"]["metadata"]["ownerReferences"][0]
+                if field == "uid":
+                    objects["statefulset"]["metadata"]["uid"] = True
+                    owner["uid"] = 1
+                elif field == "revision":
+                    objects["statefulset"]["status"]["updateRevision"] = [canary]
+                    objects["pod"]["metadata"]["labels"]["controller-revision-hash"] = [canary]
+                elif field == "owner_uid":
+                    owner["uid"] = [canary]
+                elif field == "controller":
+                    owner["controller"] = 1
+                else:
+                    objects["pod"]["metadata"]["labels"]["private"] = [canary]
+                result = self.inspect(objects)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertNotIn(canary, result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_projected_file_item_types_fail_privately(self):
+        canary = "DO-NOT-PRINT-private-projected-file-canary"
+        for source in ("configMap", "secret"):
+            for field, invalid in (("key", [canary]), ("path", [canary]), ("mode", True)):
+                with self.subTest(source=source, field=field):
+                    objects = self.snapshot(bundled=False)
+                    for spec in (objects["statefulset"]["spec"]["template"]["spec"], objects["pod"]["spec"]):
+                        volume = next(v for v in spec["volumes"] if source in v)
+                        volume[source]["items"][0][field] = invalid
+                    result = self.inspect(objects)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn(canary, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+
 if __name__ == "__main__":
     unittest.main()
