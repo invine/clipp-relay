@@ -174,6 +174,80 @@ class InstallMetadataTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(all(value == "PASS metadata" for value in json.loads(result.stdout)["checks"].values()))
 
+    def test_pod_environment_and_service_account_drift_fail_privately(self):
+        canary = "DO-NOT-PRINT-private-environment-canary"
+        for field in ("env", "envFrom", "serviceAccountName", "automountServiceAccountToken"):
+            with self.subTest(field=field):
+                objects = self.snapshot(bundled=False)
+                actual = objects["pod"]["spec"]
+                container = actual["containers"][0]
+                if field == "env":
+                    container[field] = [{"name": "MIGRATION_PASSWORD", "value": canary}]
+                elif field == "envFrom":
+                    container[field] = [{"secretRef": {"name": canary}}]
+                elif field == "serviceAccountName":
+                    actual[field] = canary
+                else:
+                    actual[field] = not actual[field]
+                result = self.inspect(objects)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["checks"]["pod_runtime_declarations_match_template"], "FAIL")
+                self.assertNotIn(canary, result.stdout + result.stderr)
+                self.assertFalse(report["acceptance_complete"])
+                self.assertTrue(all(v == "NOT RUN" for v in report["runtime_gates"].values()))
+
+    def test_environment_and_service_account_types_fail_privately(self):
+        canary = "DO-NOT-PRINT-private-environment-type-canary"
+        invalid = ({"env": canary}, {"env": [canary]},
+                   {"env": [{"name": True}]}, {"env": [{"name": "X", "value": [canary]}]},
+                   {"env": [{"name": "X", "valueFrom": {"secretKeyRef": {"name": [canary], "key": "password"}}}]},
+                   {"env": [{"name": "X", "valueFrom": {"fieldRef": {"fieldPath": True}}}]},
+                   {"envFrom": canary}, {"envFrom": [canary]},
+                   {"envFrom": [{"prefix": [canary]}]},
+                   {"envFrom": [{"secretRef": {"name": canary, "optional": 1}}]})
+        for target in ("statefulset", "pod"):
+            for override in invalid + ({"serviceAccountName": [canary]}, {"automountServiceAccountToken": 1}):
+                with self.subTest(target=target, override=override):
+                    objects = self.snapshot(bundled=False)
+                    spec = objects[target]["spec"]
+                    if target == "statefulset":
+                        spec = spec["template"]["spec"]
+                    if "serviceAccountName" in override or "automountServiceAccountToken" in override:
+                        spec.update(override)
+                    else:
+                        spec["containers"][0].update(override)
+                    result = self.inspect(objects)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn(canary, result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_environment_api_defaults_preserve_declared_pod_match(self):
+        objects = self.snapshot(bundled=False)
+        template = objects["statefulset"]["spec"]["template"]["spec"]
+        actual = objects["pod"]["spec"]
+        # Empty serviceAccountName is defaulted by the API server to "default".
+        template["serviceAccountName"] = ""
+        actual["serviceAccountName"] = "default"
+        template["containers"][0]["env"] = [
+            {"name": "EMPTY"},
+            {"name": "NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
+            {"name": "CPU", "valueFrom": {"resourceFieldRef": {"resource": "requests.cpu"}}},
+            {"name": "SETTING", "valueFrom": {"configMapKeyRef": {"name": "settings", "key": "setting"}}},
+        ]
+        actual["containers"][0]["env"] = [
+            {"name": "EMPTY", "value": ""},
+            {"name": "NAMESPACE", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}}},
+            {"name": "CPU", "valueFrom": {"resourceFieldRef": {"divisor": "1", "resource": "requests.cpu"}}},
+            {"name": "SETTING", "valueFrom": {"configMapKeyRef": {"name": "settings", "key": "setting", "optional": False}}},
+        ]
+        template["containers"][0]["envFrom"] = [{"configMapRef": {"name": "settings"}}]
+        actual["containers"][0]["envFrom"] = [{"prefix": "", "configMapRef": {"name": "settings", "optional": False}}]
+        result = self.inspect(objects)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["checks"]["pod_runtime_declarations_match_template"], "PASS metadata")
+
     def test_invalid_api_scalar_types_fail_privately(self):
         for field in ("replicas", "user", "drop", "probe", "hostNetwork"):
             with self.subTest(field=field):

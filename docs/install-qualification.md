@@ -39,15 +39,20 @@ an image digest reference is not image provenance; a Ready condition is not
 public transport reachability or the private operations pressure test. The
 inspector compares Pod image, resources, security, host access, container count,
 ports, command/arguments, probes, volumes and mounts with the workload
-template, verifies the Pod controller UID and intended StatefulSet revision when
-available, and reports both template and Pod CPU requests so stale/mismatched Pods
+template, including container environment variables/sources, service-account
+identity and token automount declarations. It verifies the Pod controller UID and
+intended StatefulSet revision when available, and reports both template and Pod
+CPU requests so stale/mismatched Pods
 cannot inherit a rendered resource claim. Snapshots without StatefulSet UID or
 intended revision report ownership/revision as `NOT RUN`; a mismatched owner or
 revision is a failure. Invalid metadata types and CPU quantities fail with a
 generic error without echoing private input. Boolean values are not accepted as
-integer fields. Kubernetes probe defaults, Secret/ConfigMap volume defaults and
-the exact ordinary service-account token projection are normalized for comparison;
-other projection or mount changes remain visible.
+integer fields. Kubernetes probe defaults, Secret/ConfigMap volume defaults,
+environment selector defaults (including false optional references), empty/default
+service-account names, and empty environment values/prefixes are normalized.
+Environment declaration order is preserved because it can change expansion and
+precedence. The exact ordinary service-account token projection is normalized for
+comparison; other projection or mount changes remain visible.
 
 ## Observed test installation, 2026-10-04
 
@@ -99,9 +104,13 @@ is authorized by the metadata inspection command.
 
 On Go 1.27.1 darwin/arm64, Helm 4.3.0, kubectl client 1.36.1 and Python 3.14.7:
 
-- `python3 scripts/test-install-metadata.py`: PASS, eleven tests at the render/CLI
-  seam, including resource mismatch and private-input rejection. Failure cases
-  were observed before their implementation fixes.
+- `python3 scripts/test-install-metadata.py`: PASS, fourteen tests at the render/CLI
+  seam, including resource mismatch, environment/service-account drift, ordinary
+  API defaults and private-input rejection. The four environment/service-account
+  drift cases incorrectly returned exit 0 before the fix; twenty-two malformed
+  environment/service-account inputs also failed their expected private-error
+  assertions before strict validation was added. Failure cases were observed
+  before their implementation fixes.
 - `GOPROXY=off GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...`: PASS.
   Local loopback was enabled. This run supplied no real database fixture
   configuration, so optional database integrations were skipped; it does not

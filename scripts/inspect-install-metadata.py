@@ -39,14 +39,32 @@ def validate_security(security):
 
 def validate_pod_fields(spec):
     typed_fields(spec, {'hostNetwork': bool, 'hostPID': bool, 'hostIPC': bool,
-                        'automountServiceAccountToken': bool, 'containers': list,
+                        'serviceAccountName': str, 'automountServiceAccountToken': bool, 'containers': list,
                         'initContainers': list, 'ephemeralContainers': list,
                         'volumes': list, 'securityContext': dict})
     validate_security(spec.get('securityContext', {}))
     for container in spec['containers']:
         typed_fields(container, {'name': str, 'image': str, 'securityContext': dict,
-                                 'resources': dict, 'ports': list, 'volumeMounts': list})
+                                 'resources': dict, 'ports': list, 'volumeMounts': list,
+                                 'env': list, 'envFrom': list})
         validate_security(container.get('securityContext', {}))
+        for variable in container.get('env', []):
+            typed_fields(variable, {'name': str, 'value': str, 'valueFrom': dict})
+            sources = variable.get('valueFrom', {})
+            typed_fields(sources, {'fieldRef': dict, 'resourceFieldRef': dict,
+                                  'configMapKeyRef': dict, 'secretKeyRef': dict})
+            if 'fieldRef' in sources:
+                typed_fields(sources['fieldRef'], {'apiVersion': str, 'fieldPath': str})
+            if 'resourceFieldRef' in sources:
+                typed_fields(sources['resourceFieldRef'], {'containerName': str, 'resource': str, 'divisor': str})
+            for source in ('configMapKeyRef', 'secretKeyRef'):
+                if source in sources:
+                    typed_fields(sources[source], {'name': str, 'key': str, 'optional': bool})
+        for source in container.get('envFrom', []):
+            typed_fields(source, {'prefix': str, 'configMapRef': dict, 'secretRef': dict})
+            for reference in ('configMapRef', 'secretRef'):
+                if reference in source:
+                    typed_fields(source[reference], {'name': str, 'optional': bool})
         for field in ('args', 'command'):
             typed_strings(container.get(field, []))
         resources = container.get('resources', {})
@@ -83,6 +101,28 @@ def probe_with_defaults(probe):
         for field, default in {'scheme': 'HTTP', 'host': '', 'httpHeaders': []}.items():
             result['httpGet'].setdefault(field, default)
     return result
+
+
+def environment_with_defaults(container):
+    variables = copy.deepcopy(container.get('env', []))
+    sources = copy.deepcopy(container.get('envFrom', []))
+    for variable in variables:
+        variable.setdefault('value', '')
+        selectors = variable.get('valueFrom', {})
+        if 'fieldRef' in selectors:
+            selectors['fieldRef'].setdefault('apiVersion', 'v1')
+        if 'resourceFieldRef' in selectors:
+            selectors['resourceFieldRef'].setdefault('divisor', '1')
+        for selector in ('configMapKeyRef', 'secretKeyRef'):
+            if selector in selectors:
+                selectors[selector].setdefault('optional', False)
+    for source in sources:
+        source.setdefault('prefix', '')
+        for reference in ('configMapRef', 'secretRef'):
+            if reference in source:
+                source[reference].setdefault('optional', False)
+    # Preserve order: later declarations and variable expansion can depend on it.
+    return variables, sources
 
 
 def default_service_account_volume(volume):
@@ -230,6 +270,9 @@ try:
         and running.get('ports', []) == relay.get('ports', [])
         and running.get('args', []) == relay.get('args', [])
         and running.get('command', []) == relay.get('command', [])
+        and environment_with_defaults(running) == environment_with_defaults(relay)
+        and (actual.get('serviceAccountName') or 'default') == (template.get('serviceAccountName') or 'default')
+        and actual.get('automountServiceAccountToken') == template.get('automountServiceAccountToken')
         and reviewed_volumes_and_mounts(actual, allow_default_token) == reviewed_volumes_and_mounts(template, False)
         and all(probe_with_defaults(running.get(key)) == probe_with_defaults(relay.get(key))
                 for key in ('startupProbe', 'readinessProbe', 'livenessProbe'))
