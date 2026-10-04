@@ -50,6 +50,8 @@ provisioning, publication or load generation against an unapproved target.
 
 ## Comments
 
+- Continuation claimed centrally on 2026-10-05 in isolated client worktree `/Users/invine/src/js/clipp/.local/managed-relay/worktrees/frontier-chrome-20261005`, branch `codex/managed-relay-15-frontier-20261005`, from reviewed/integrated client main `ec87a19`. Fresh-context implementation follows the shared relay-isolation seam after Electron WSS receipt passed. Prepare safe development acceptance and lifecycle checks while preserving the operator's installed extension, profile, Device Identity and credentials. Browser policy blocks automation of installed extension-internal pages; manual registered-ID browser flow remains separate from synthetic fixture tests. Root owns canonical claims, integration and resolution; status stays claimed until full runtime acceptance. No push, publication, deployment or cluster mutation; capacity remains deferred.
+
 - Approved breakdown published on 2026-09-27. Implementation not started.
 
 - Claimed centrally on 2026-09-27 after ticket 12 resolved (`72a7dd4`) and ticket 10 remained resolved. Fresh-context implementation starts from integrated Clipp ticket 12 (`ab56937`) in an isolated worktree; the shared host seam from ticket 13 will be integrated only after its review fixes. Chrome runtime evidence, review and integration checks are required before resolution.
