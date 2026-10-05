@@ -4,7 +4,7 @@
 
 **Blocked by:** [12: Manage independent relays in Clipp](12-manage-independent-relays-in-clipp.md).
 
-**Status:** claimed
+**Status:** resolved
 
 Repository scope: Clipp.
 Source: user instruction and clarification on 2026-10-05: try all transports before failing; persistent concurrency was not requested. [Accepted specification](../../managed-relay-service/spec.md), I4/I7, retains the single-session baseline. Architecture decision: accepted Clipp `docs/adr/0012-relay-transport-fallback-and-concurrent-sessions.md`.
@@ -15,10 +15,10 @@ Try supported advertised TCP, WSS and WebRTC Direct alternatives through the usa
 
 ## Acceptance criteria
 
-- [ ] Demonstrate fallback across supported families, including transport-local failure after verified dial and exhaustion of all families.
-- [ ] Preserve identity, credentials, admission limits and unrelated connections; retain one effective session under the baseline policy.
-- [ ] Pass focused TDD checks, repository verification and independent Standards/Spec reviews.
-- [ ] Accept the architectural decision, reconcile candidate code and verify integration before central resolution.
+- [x] Demonstrate fallback across supported families, including transport-local failure after verified dial and exhaustion of all families.
+- [x] Preserve identity, credentials, admission limits and unrelated connections; retain one effective session under the baseline policy.
+- [x] Pass focused TDD checks, repository verification and independent Standards/Spec reviews.
+- [x] Accept the architectural decision, reconcile candidate code and verify integration before central resolution.
 
 ## Comments
 
@@ -27,3 +27,17 @@ Try supported advertised TCP, WSS and WebRTC Direct alternatives through the usa
 - User clarification 2026-10-05 supersedes the earlier concurrency interpretation and checklist. Concurrent candidate is preserved, not accepted as ticket completion. Claim remains centrally owned; further implementation/integration is paused for ADR-0012. No result is resolved.
 
 - User accepted ADR-0012 on 2026-10-05 and requested lower overhead first. Fresh-context isolated implementation resumes from clean canonical main at Clipp `2727ad9` / relay `15a59a3`, with the accepted ADR recorded before code changes. Coordinator owns integration and resolution. Candidate branches and uncommitted work remain preserved.
+
+
+## Answer
+
+Implemented the accepted one-session fallback policy and integrated both repositories
+before resolution. [Verification and review evidence](../34-single-session-fallback-evidence.md)
+records canonical client `c514e9e`, relay `a29f581`, 627 client tests, all three builds,
+full Go race/vet gates and real TCP/WSS/WebRTC Direct transfers with one connection
+per device. All review findings were fixed and independently rechecked. Candidate
+branches and existing uncommitted work remain preserved. No newly eligible unclaimed
+work follows this ticket; original runtime/install gates remain open, capacity deferred.
+
+- Resolved centrally on 2026-10-05 only after canonical integration and verification.
+  Ticket 35 remains superseded (`wontfix`); no push, publication or deployment.

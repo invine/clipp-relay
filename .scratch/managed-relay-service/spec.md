@@ -1,6 +1,6 @@
 # Managed Clipp relay — single-process v1 specification
 
-2026-10-05 decision: the user accepted Clipp ADR-0012. Keep one effective Relay Session per configuration and try eligible transports through usable setup before declaring transport failure, with lower overhead preferred. I4 retains atomic same-Peer-ID replacement; I7 below records the accepted fallback policy. Persistent concurrency was an overbroad interpretation and is superseded. Local candidate code is being reconciled through isolated, reviewed implementation.
+2026-10-05 decision: the user accepted Clipp ADR-0012. Keep one effective Relay Session per configuration and try eligible transports through usable setup before declaring transport failure, with lower overhead preferred. I4 retains atomic same-Peer-ID replacement; I7 below records the accepted fallback policy. Persistent concurrency was an overbroad interpretation and is superseded. Local main was reconciled through isolated, reviewed implementation and canonical verification; see ticket 34 evidence.
 
 Status: ready-for-agent
 Consolidated: 2026-09-27

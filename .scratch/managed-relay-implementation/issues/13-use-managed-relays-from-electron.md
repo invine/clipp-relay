@@ -65,3 +65,9 @@ provisioning, publication or load generation against an unapproved target.
 - 2026-10-04 operator acceptance report: Android, Electron and the Chrome extension each connected and transferred a clip. The operator observed direct connections establishing quickly and did not isolate or verify transfer through the relay. Record real runtime connection/transfer as passed by operator report; forced relay transport transfer remains **not run**. This report does not resolve the ticket or its remaining transport/lifecycle acceptance gates.
 
 - Continuation claimed centrally on 2026-10-04 after the user requested `/implement` on the next frontier, with at most two parallel implementation agents. Fresh-context client subagent in `/Users/invine/src/js/clipp/.local/managed-relay/worktrees/frontier-electron-20261004`, branch `codex/managed-relay-13-frontier-20261004`, starts from approved consolidated client main `4dc53d7`. Own Electron acceptance tooling and any shared-core defect exposed by forced relay transfer; actual browser/transport/storage evidence is required. Android/Chrome follow after integration; do not treat the existing direct-transfer report as relay-only acceptance. Coordinator owns all canonical status/claim changes, integration and resolution; subagents must not resolve tickets. Keep capacity deferred; no push, publication or deployment.
+
+
+- 2026-10-05: accepted single-session shared fallback integrated as Clipp `c514e9e`
+  and relay `a29f581`. [Ticket 34 evidence](../34-single-session-fallback-evidence.md)
+  covers core/adapter checks and real synthetic wire transfers. This does not
+  replace this runtime's outstanding live/native acceptance; status remains claimed.

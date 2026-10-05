@@ -164,11 +164,21 @@ first.
 
 The user clarified that every supported transport must be tried before declaring connection failure. Persistent concurrency was the coordinator's overbroad interpretation, not an accepted requirement. Accepted Clipp ADR-0012 (`docs/adr/0012-relay-transport-fallback-and-concurrent-sessions.md`) retains one effective session and requires full setup fallback. I4 keeps original replacement; I7 records the accepted preference and fallback policy.
 
-- [34: Try supported relay transports before failing](issues/34-connect-every-relay-transport.md) — centrally claimed; predecessor 12 resolved; fresh implementation follows the accepted ADR.
+- [34: Try supported relay transports before failing](issues/34-connect-every-relay-transport.md) — resolved after reviewed integration and [canonical verification](34-single-session-fallback-evidence.md).
 - [35: Admit concurrent relay transport connections](issues/35-admit-concurrent-relay-transports.md) — `wontfix`; concurrency candidate superseded by the accepted ADR.
 
-Candidate code is preserved on `codex/managed-relay-concurrency-candidate-20261005` in both repositories and in isolated worktrees. It already exists in local main and is being reconciled to the accepted decision. It was not deployed. Runtime tickets 13–15 remain claimed; no candidate happy-path proof resolves their live acceptance. Capacity ticket 33 remains deferred.
+Candidate code is preserved on `codex/managed-relay-concurrency-candidate-20261005` in both repositories and in isolated worktrees. Local main is reconciled to the accepted one-session fallback policy. It was not deployed. Runtime tickets 13–15 remain claimed; no candidate happy-path proof resolves their live acceptance. Capacity ticket 33 remains deferred.
 
 ### Accepted on 2026-10-05
 
 The user accepted ADR-0012 and lower overhead transport preference. Ticket 34 resumes single-session fallback implementation. Ticket 35 is `wontfix` as a superseded concurrency candidate, not an acceptance success. Client and server reconciliation run in fresh isolated worktrees; candidate branches remain preserved. Capacity ticket 33 remains deferred.
+
+
+### Integrated and verified on 2026-10-05
+
+Ticket 34 is resolved after canonical client `c514e9e` / relay `a29f581` passed
+627 tests, all runtime builds, full Go race/vet and real one-connection fallback
+transfers. [Evidence](34-single-session-fallback-evidence.md) records review fixes,
+versions, preserved work and unrun external gates. Tickets 13–15/18 stay claimed,
+35 stays `wontfix`, and 33 stays deferred. No newly unblocked unclaimed ticket was
+found; no push, publication or deployment.

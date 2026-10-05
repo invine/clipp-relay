@@ -61,3 +61,9 @@ provisioning, publication or load generation against an unapproved target.
 - 2026-10-04 operator acceptance report: Android, Electron and the Chrome extension each connected and transferred a clip. The operator observed direct connections establishing quickly and did not isolate or verify transfer through the relay. Record real runtime connection/transfer as passed by operator report; forced relay transport transfer remains **not run**. This report does not resolve the ticket or its remaining transport/lifecycle acceptance gates.
 
 - 2026-10-05 central integration evidence: Integrated reviewed forced-transport acceptance as client `33fee35`; owned disposable Chrome143 fixture passed with synthetic provider, identity preservation and direct-dial denial. Combined client check passed 74 suites/602 tests. Registered-ID Google auth and actual forced Chrome relay transfer remain not run; ticket stays claimed.
+
+
+- 2026-10-05: accepted single-session shared fallback integrated as Clipp `c514e9e`
+  and relay `a29f581`. [Ticket 34 evidence](../34-single-session-fallback-evidence.md)
+  covers core/adapter checks and real synthetic wire transfers. This does not
+  replace this runtime's outstanding live/native acceptance; status remains claimed.
