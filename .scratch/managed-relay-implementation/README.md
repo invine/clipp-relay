@@ -160,14 +160,14 @@ first.
 - Specification and decision map preserved byte-for-byte during publication.
 - No production implementation or acceptance test was performed by publishing this backlog.
 
-## Transport follow-ups and architecture gate — 2026-10-05
+## Accepted transport fallback — 2026-10-05
 
-The user clarified that every supported transport must be tried before declaring connection failure. Persistent concurrency was the coordinator's overbroad interpretation, not an accepted requirement. Original I4/I7 are restored as the baseline. Proposed Clipp ADR-0012 (`docs/adr/0012-relay-transport-fallback-and-concurrent-sessions.md`) compares the policies before further integration.
+The user clarified that every supported transport must be tried before declaring connection failure. Persistent concurrency was the coordinator's overbroad interpretation, not an accepted requirement. Accepted Clipp ADR-0012 (`docs/adr/0012-relay-transport-fallback-and-concurrent-sessions.md`) retains one effective session and requires full setup fallback. I4 keeps original replacement; I7 records the accepted preference and fallback policy.
 
-- [34: Try supported relay transports before failing](issues/34-connect-every-relay-transport.md) — centrally claimed; predecessor 12 resolved; implementation must follow the ADR decision.
-- [35: Admit concurrent relay transport connections](issues/35-admit-concurrent-relay-transports.md) — centrally claimed conditional candidate, paused; not required unless the ADR accepts concurrency.
+- [34: Try supported relay transports before failing](issues/34-connect-every-relay-transport.md) — centrally claimed; predecessor 12 resolved; fresh implementation follows the accepted ADR.
+- [35: Admit concurrent relay transport connections](issues/35-admit-concurrent-relay-transports.md) — `wontfix`; concurrency candidate superseded by the accepted ADR.
 
-Candidate code is preserved on `codex/managed-relay-concurrency-candidate-20261005` in both repositories and in isolated worktrees. It already exists in local main and requires reconciliation after the decision. It was not deployed. Runtime tickets 13–15 remain claimed; no candidate happy-path proof resolves their live acceptance. Capacity ticket 33 remains deferred.
+Candidate code is preserved on `codex/managed-relay-concurrency-candidate-20261005` in both repositories and in isolated worktrees. It already exists in local main and is being reconciled to the accepted decision. It was not deployed. Runtime tickets 13–15 remain claimed; no candidate happy-path proof resolves their live acceptance. Capacity ticket 33 remains deferred.
 
 ### Accepted on 2026-10-05
 

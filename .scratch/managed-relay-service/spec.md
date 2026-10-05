@@ -1,6 +1,6 @@
 # Managed Clipp relay — single-process v1 specification
 
-2026-10-05 clarification: the user requires trying all eligible transports before declaring transport failure. Persistent concurrent Relay Sessions were an overbroad interpretation and are not an accepted amendment. Original I4/I7 remain the baseline while proposed Clipp ADR-0012 evaluates fallback and persistent concurrency. Local candidate implementation is paused pending that decision.
+2026-10-05 decision: the user accepted Clipp ADR-0012. Keep one effective Relay Session per configuration and try eligible transports through usable setup before declaring transport failure, with lower overhead preferred. I4 retains atomic same-Peer-ID replacement; I7 below records the accepted fallback policy. Persistent concurrency was an overbroad interpretation and is superseded. Local candidate code is being reconciled through isolated, reviewed implementation.
 
 Status: ready-for-agent
 Consolidated: 2026-09-27
@@ -518,9 +518,18 @@ Keep one host/existing Device Identity per runtime. Shared core owns independent
 discovery→dial/verify→auth→reservation→Rendezvous, renewal and retry; runtime adapters
 own browser/HTTP/lifecycle/storage. No automatic circuit-relay listeners bypassing
 barrier. Dynamic config does not restart host/direct peers/other relays. One
-effective connection/config, bounded staggered races, first verified winner and
-close losers. Electron prefers TCP/WSS/WebRTC Direct; Android/extension WSS/WebRTC
-Direct. Try all supported addresses. Direct networking starts even without relays.
+effective connection/config. Accepted ADR-0012 (2026-10-05) requires bounded
+attempts through every eligible transport before declaring transport failure,
+including transport-local failure after verified dial. Select the usable relay,
+not merely the first socket; close unsuccessful or superseded owned candidates.
+Electron prefers TCP, then WSS, then WebRTC Direct; Android/extension prefer WSS,
+then WebRTC Direct. This order favors lower framing/setup overhead among supported
+transports rather than claiming measured speed or battery superiority. Keep a
+healthy selected connection. Policy refusals, login requirements and retry hints
+are not transport failures and cannot be bypassed by fallback. Failed renewal
+retains its original expiry; Rendezvous degradation keeps its repair semantics.
+Try supported address alternatives without starving later transport families.
+Direct networking starts even without relays.
 
 - Electron main owns auth/renewal/browser and OS-backed safeStorage. No usable
   OS provider (including insecure basic_text) means memory-only. Renderer gets

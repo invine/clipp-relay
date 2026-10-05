@@ -7,7 +7,7 @@
 **Status:** wontfix
 
 Repository scope: clipp-relay.
-Source: coordinator interpretation of the 2026-10-05 instruction, superseded by the user clarification that persistent concurrency was not requested. This is now a conditional candidate gated by proposed Clipp ADR-0012; [accepted specification](../../managed-relay-service/spec.md), I4/I7, retains its original replacement contract.
+Source: coordinator interpretation of the 2026-10-05 instruction, superseded by the user clarification that persistent concurrency was not requested. This historical candidate is superseded by accepted Clipp ADR-0012; [accepted specification](../../managed-relay-service/spec.md), I4/I7, retains its original replacement contract.
 
 **Decision:** ADR-0012 accepted single-session fallback. This concurrency candidate is superseded and is not required delivery.
 
