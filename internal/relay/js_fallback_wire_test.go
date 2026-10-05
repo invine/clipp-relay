@@ -27,7 +27,7 @@ import (
 )
 
 // The optional harness uses Clipp's public controller and host adapter. It must
-// report the selected family after a relayed round trip, clean up both clients,
+// report the selected family after a relayed transfer, clean up both clients,
 // and exit normally. Source and dependency checkouts remain read-only.
 func TestRealJSRelayTransportFallback(t *testing.T) {
 	harness := os.Getenv("CLIPP_JS_TRANSPORT_HARNESS")
