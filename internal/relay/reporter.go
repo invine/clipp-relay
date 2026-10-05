@@ -36,7 +36,7 @@ func (r *endpointReporter) report(n int64, proto protocol.ID, p peer.ID) {
 	}
 	s := r.server
 	s.mu.Lock()
-	active := s.peerSessionLocked(p)
+	active := s.byPeer[p]
 	s.mu.Unlock()
 	if active == nil || !time.Now().Before(active.deadline) {
 		r.unattributed.Add(n)

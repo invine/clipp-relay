@@ -63,7 +63,7 @@ func (st *reservationStream) Write(p []byte) (int, error) {
 	if proto.Unmarshal(st.response[header:], &msg) == nil && msg.GetStatus() == pbv2.Status_OK && msg.GetReservation() != nil {
 		deadline := time.Unix(int64(msg.GetReservation().GetExpire()), 0)
 		st.server.mu.Lock()
-		if owner := st.server.byConn[st.Conn()]; owner != nil {
+		if owner := st.server.byConn[st.Conn()]; owner != nil && st.server.byPeer[st.Conn().RemotePeer()] == owner {
 			st.server.reservations[st.Conn().RemotePeer()] = reservationOwner{conn: st.Conn(), deadline: deadline}
 		}
 		st.server.mu.Unlock()
@@ -95,7 +95,7 @@ func (s *Server) currentLeaseLocked(id peer.ID, now time.Time) *rendezvousLease 
 		return nil
 	}
 	r := s.reservations[id]
-	if !now.Before(lease.deadline) || s.byConn[lease.owner.conn] != lease.owner || r.conn != lease.owner.conn || !now.Before(r.deadline) {
+	if !now.Before(lease.deadline) || s.byConn[lease.owner.conn] != lease.owner || s.byPeer[id] != lease.owner || r.conn != lease.owner.conn || !now.Before(r.deadline) {
 		s.deleteLeaseLocked(id, lease)
 		return nil
 	}
@@ -123,7 +123,7 @@ func (s *Server) handleRendezvous(st network.Stream) {
 	now := time.Now()
 	s.mu.Lock()
 	owner := s.byConn[st.Conn()]
-	authenticated := owner != nil && now.Before(owner.deadline)
+	authenticated := owner != nil && s.byPeer[st.Conn().RemotePeer()] == owner && now.Before(owner.deadline)
 	allowed := s.rvGlobalRate.allow(now, 500, 1000)
 	if authenticated {
 		b := s.rvConnRate[st.Conn()]
@@ -403,7 +403,7 @@ func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
 		s.mu.Unlock()
 		return map[string]any{"ok": false, "code": "temporarily_unavailable", "retryAfterMillis": 5000}
 	}
-	if s.byConn[st.Conn()] != owner || !now.Before(owner.deadline) {
+	if s.byConn[st.Conn()] != owner || s.byPeer[id] != owner || !now.Before(owner.deadline) {
 		s.mu.Unlock()
 		return map[string]any{"ok": false, "code": "authentication_failed"}
 	}
@@ -446,7 +446,7 @@ func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
 			s.mu.Unlock()
 			return map[string]any{"ok": false, "code": "temporarily_unavailable", "retryAfterMillis": 5000}
 		}
-		if s.byConn[st.Conn()] != owner || !now.Before(owner.deadline) {
+		if s.byConn[st.Conn()] != owner || s.byPeer[id] != owner || !now.Before(owner.deadline) {
 			s.mu.Unlock()
 			return map[string]any{"ok": false, "code": "authentication_failed"}
 		}
