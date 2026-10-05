@@ -168,3 +168,7 @@ The user clarified that every supported transport must be tried before declaring
 - [35: Admit concurrent relay transport connections](issues/35-admit-concurrent-relay-transports.md) — centrally claimed conditional candidate, paused; not required unless the ADR accepts concurrency.
 
 Candidate code is preserved on `codex/managed-relay-concurrency-candidate-20261005` in both repositories and in isolated worktrees. It already exists in local main and requires reconciliation after the decision. It was not deployed. Runtime tickets 13–15 remain claimed; no candidate happy-path proof resolves their live acceptance. Capacity ticket 33 remains deferred.
+
+### Accepted on 2026-10-05
+
+The user accepted ADR-0012 and lower overhead transport preference. Ticket 34 resumes single-session fallback implementation. Ticket 35 is `wontfix` as a superseded concurrency candidate, not an acceptance success. Client and server reconciliation run in fresh isolated worktrees; candidate branches remain preserved. Capacity ticket 33 remains deferred.

@@ -4,12 +4,12 @@
 
 **Blocked by:** [10: Relay over WSS and WebRTC Direct](10-relay-over-wss-and-webrtc-direct.md).
 
-**Status:** claimed
+**Status:** wontfix
 
 Repository scope: clipp-relay.
 Source: coordinator interpretation of the 2026-10-05 instruction, superseded by the user clarification that persistent concurrency was not requested. This is now a conditional candidate gated by proposed Clipp ADR-0012; [accepted specification](../../managed-relay-service/spec.md), I4/I7, retains its original replacement contract.
 
-**Decision gate:** Paused; concurrent admission is not an accepted requirement. Claim remains centrally owned pending ADR-0012.
+**Decision:** ADR-0012 accepted single-session fallback. This concurrency candidate is superseded and is not required delivery.
 
 ## Candidate contract and scope
 
@@ -27,3 +27,5 @@ Allow the same Peer ID and account to authenticate simultaneously through distin
 - Centrally claimed 2026-10-05 after the listed predecessor was verified resolved. Fresh context and isolated worktree required. Coordinator owns canonical claims, integration and resolution. No push, publication, deployment or shared-cluster mutation; capacity ticket 33 remains deferred.
 
 - User clarification 2026-10-05: candidate admission code is preserved on `codex/managed-relay-concurrency-candidate-20261005` and in its implementation worktree. No further integration or resolution until ADR-0012 decides persistent concurrency. If fallback is selected, this candidate is unnecessary and must not be represented as required delivery.
+
+- Superseded on 2026-10-05 by the user's acceptance of ADR-0012: retain one connection and try alternatives before failure. Status `wontfix` records a rejected architecture candidate, not passed implementation acceptance. Preserve experimental branches; restore original same-Peer-ID replacement in local main through reviewed reconciliation.
