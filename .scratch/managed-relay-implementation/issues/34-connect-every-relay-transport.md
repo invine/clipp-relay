@@ -1,25 +1,27 @@
-# 34: Connect every available relay transport
+# 34: Try supported relay transports before failing
 
-**What to build:** Connect every available relay transport.
+**What to build:** Try every eligible relay transport before declaring transport failure, retaining one effective session unless an accepted ADR changes that policy.
 
 **Blocked by:** [12: Manage independent relays in Clipp](12-manage-independent-relays-in-clipp.md).
 
 **Status:** claimed
 
 Repository scope: Clipp.
-Source: user instruction on 2026-10-05, "application should connect to every available relay transport, not just to the first one"; [accepted specification](../../managed-relay-service/spec.md), I4/I7, amended by this instruction.
+Source: user instruction and clarification on 2026-10-05: try all transports before failing; persistent concurrency was not requested. [Accepted specification](../../managed-relay-service/spec.md), I4/I7, retains the single-session baseline. Architecture gate: proposed Clipp `docs/adr/0012-relay-transport-fallback-and-concurrent-sessions.md`.
 
 ## Contract and scope
 
-Maintain an authenticated physical connection for each supported, advertised relay transport family: TCP, WSS and WebRTC Direct. Runtime support determines eligibility; acceptance-only forced selection still isolates one family. Try address alternatives within a family with bounded concurrency; a failed family retries independently and never closes healthy families. Keep one host and Device Identity, endpoint-scoped single-flight credential refresh, expected-peer verification before tokens, and owned-resource cleanup. Stock per-peer Circuit Relay reservation and Rendezvous ownership must remain coherent: healthy connections remain available and owner loss can promote another authenticated transport. Preserve aggregate ready/degraded semantics and expose safe per-transport state. Config removal, replacement, revocation and stop release every owned connection without affecting direct peers or other relays.
+Try supported advertised TCP, WSS and WebRTC Direct alternatives through the usable relay setup boundary; do not repeatedly select a route that connects but cannot complete transport-local setup while starving others. Preserve per-runtime eligibility, one host/Device Identity, expected-peer verification before credentials, policy refusal/backoff semantics and owned-resource cleanup. Different configurations remain independent. Exact selection policy is gated by proposed ADR-0012; persistent concurrency is not accepted.
 
 ## Acceptance criteria
 
-- [ ] Demonstrate simultaneous supported transport connections and independent failure recovery at the approved public seams.
-- [ ] Preserve identity, credentials, admission limits and unrelated connections.
+- [ ] Demonstrate fallback across supported families, including transport-local failure after verified dial and exhaustion of all families.
+- [ ] Preserve identity, credentials, admission limits and unrelated connections; retain one effective session under the baseline policy.
 - [ ] Pass focused TDD checks, repository verification and independent Standards/Spec reviews.
-- [ ] Integrate and verify locally before central resolution; distinguish local protocol evidence from external deployment acceptance.
+- [ ] Accept the architectural decision, reconcile candidate code and verify integration before central resolution.
 
 ## Comments
 
 - Centrally claimed 2026-10-05 after the listed predecessor was verified resolved. Fresh context and isolated worktree required. Coordinator owns canonical claims, integration and resolution. No push, publication, deployment or shared-cluster mutation; capacity ticket 33 remains deferred.
+
+- User clarification 2026-10-05 supersedes the earlier concurrency interpretation and checklist. Concurrent candidate is preserved, not accepted as ticket completion. Claim remains centrally owned; further implementation/integration is paused for ADR-0012. No result is resolved.
