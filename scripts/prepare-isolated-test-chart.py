@@ -25,7 +25,8 @@ text = path.read_text()
 anchor = '  exit 0\nfi\nif [ -e "$data/PG_VERSION" ]'
 if text.count(anchor) != 1:
     raise SystemExit('PostgreSQL restart guard changed; review the permission repair')
-text = text.replace(anchor, '  chmod 0700 "$data"\n' + anchor, 1)
+# Five digits explicitly clear setuid/setgid directory bits with GNU chmod too.
+text = text.replace(anchor, '  chmod 00700 "$data"\n' + anchor, 1)
 path.write_text(text)
 path = target / 'templates/postgres.yaml'
 text = path.read_text()
