@@ -456,8 +456,15 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 		return nil
 	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
 		if s.diagnostics != nil {
-			s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.deletion", Outcome: "failed", Reason: "database_unavailable"})
+			reason := "database_unavailable"
+			if errors.Is(err, context.DeadlineExceeded) {
+				reason = "deadline"
+			}
+			s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.deletion", Outcome: "failed", Reason: reason})
 		}
 		return err
 	}
@@ -470,6 +477,8 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 		if s.diagnostics != nil {
 			outcome, reason := "", ""
 			switch {
+			case errors.Is(ctx.Err(), context.Canceled):
+				// Ordinary worker shutdown leaves the durable operation pending.
 			case errors.Is(err, errDeletionFinalizationUnconfirmed):
 				outcome, reason = "uncertain", "commit_unconfirmed"
 			case errors.Is(err, context.DeadlineExceeded):

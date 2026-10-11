@@ -199,3 +199,23 @@ func TestOwnerDeletionLogsAcceptanceAndProvenCompletion(t *testing.T) {
 		t.Fatalf("missing started/retry/proven completion: %s", logs)
 	}
 }
+
+func TestCanceledDeletionWorkerDoesNotClaimDependencyFailure(t *testing.T) {
+	c, m, db := fixture(t)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s := auth.New(db.Pool, c, m, auth.Provider{})
+	s.SetDiagnostics(logger)
+	zero := strings.Repeat("0", 64)
+	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
+	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.ReconcileOneDeletion(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled worker error %v", err)
+	}
+	logger.Close()
+	if output.Len() != 0 {
+		t.Fatalf("shutdown claimed dependency failure: %s", output.String())
+	}
+}
