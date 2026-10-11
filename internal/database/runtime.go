@@ -78,24 +78,30 @@ func (r *Runtime) StartUnit(parent context.Context) (context.Context, func(), er
 	started := time.Now()
 	l, err := r.admit(parent)
 	if err != nil {
-		r.observe(parent, started, err)
+		if errors.Is(err, ErrWorkUnavailable) {
+			r.observe(parent, started, err)
+		}
 		return nil, nil, err
 	}
 	return l.ctx, l.close, nil
 }
 
 // WithUnit scopes admission to work and reports a deadline reached in work.
-func (r *Runtime) WithUnit(parent context.Context, work func(context.Context) error) (result error) {
+func (r *Runtime) WithUnit(parent context.Context, work func(context.Context) error) error {
 	started := time.Now()
-	defer func() { r.observe(parent, started, result) }()
 	ctx, release, err := r.StartUnit(parent)
 	if err != nil {
 		return err
 	}
 	defer release()
 	err = work(ctx)
-	if err == nil {
-		return ctx.Err()
+	if deadlineErr := ctx.Err(); deadlineErr != nil {
+		if errors.Is(deadlineErr, context.DeadlineExceeded) && parent.Err() == nil {
+			r.observe(parent, started, deadlineErr)
+		}
+		if err == nil {
+			return deadlineErr
+		}
 	}
 	return err
 }
@@ -111,14 +117,23 @@ func (r *Runtime) acquire(l *lease) (*pgxpool.Conn, error) {
 }
 
 func (r *Runtime) Unit(parent context.Context, work func(context.Context, *pgxpool.Conn) error) error {
+	started := time.Now()
 	return r.WithUnit(parent, func(ctx context.Context) error {
 		l := &lease{ctx: ctx}
 		conn, err := r.acquire(l)
 		if err != nil {
+			r.observe(parent, started, err)
 			return err
 		}
 		defer conn.Release()
-		return work(ctx, conn)
+		err = work(ctx, conn)
+		// Callbacks can return policy errors after SQL work. Only a driver error,
+		// broken connection, or clean completion establishes database state.
+		var sqlErr *pgconn.PgError
+		if err == nil || errors.Is(err, pgx.ErrNoRows) || errors.As(err, &sqlErr) || conn.Conn().PgConn().IsClosed() {
+			r.observe(parent, started, err)
+		}
+		return err
 	})
 }
 
