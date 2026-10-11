@@ -17,6 +17,7 @@ import (
 	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // DeletionJournal is the serving identity's complete storage authority. Its
@@ -62,6 +63,22 @@ type uncertainDeletion struct{ operationID string }
 var errJournalTargetUncommitted = errors.New("journal target event not committed")
 var errDeletionJournalDiagnostic = errors.New("deletion journal failed")
 var errDeletionFinalizationUnconfirmed = errors.New("deletion finalization uncertain")
+var errDeletionPreparationUnconfirmed = errors.New("deletion preparation uncertain")
+var errDeletionDatabaseDiagnostic = errors.New("deletion database failed")
+
+func deletionDatabaseError(err error) error {
+	return fmt.Errorf("%w: %w", errDeletionDatabaseDiagnostic, err)
+}
+
+func deletionPrepareError(err error) error {
+	var rejected *pgconn.PgError
+	if errors.As(err, &rejected) {
+		// PostgreSQL rejected the statement before its implicit commit.
+		return deletionDatabaseError(err)
+	}
+	// A lost acknowledgement of an autocommit UPDATE cannot prove rollback.
+	return fmt.Errorf("%w: %w", errDeletionPreparationUnconfirmed, err)
+}
 
 // SetDeletionJournal requires an operator-supplied repository identity and
 // coverage floor. A nil/unqualified journal leaves deletion unavailable.
@@ -410,7 +427,10 @@ func (s *Server) eventFor(ctx context.Context, x pendingDeletion, h JournalHead)
 		return event, nil, errors.New("deletion event too large")
 	}
 	tag, err := s.db.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence IS NULL AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration)
-	if err != nil || tag.RowsAffected() != 1 {
+	if err != nil {
+		return event, nil, deletionPrepareError(err)
+	}
+	if tag.RowsAffected() != 1 {
 		return event, nil, errors.New("deletion event preparation uncertain")
 	}
 	return event, data, nil
@@ -437,7 +457,10 @@ func (s *Server) rebaseDeletionEvent(ctx context.Context, x pendingDeletion, h J
 		return deletionEvent{}, nil, errors.New("deletion event too large")
 	}
 	tag, err := s.db.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence=$6 AND event_hash=$7 AND journal_generation=$8 AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration, *x.Sequence, x.Hash, *x.Generation)
-	if err != nil || tag.RowsAffected() != 1 {
+	if err != nil {
+		return deletionEvent{}, nil, deletionPrepareError(err)
+	}
+	if tag.RowsAffected() != 1 {
 		return deletionEvent{}, nil, errors.New("deletion event rebase uncertain")
 	}
 	return event, data, nil
@@ -491,12 +514,14 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 			switch {
 			case errors.Is(ctx.Err(), context.Canceled):
 				// Ordinary worker shutdown leaves the durable operation pending.
-			case errors.Is(err, errDeletionFinalizationUnconfirmed):
+			case errors.Is(err, errDeletionFinalizationUnconfirmed), errors.Is(err, errDeletionPreparationUnconfirmed):
 				outcome, reason = "uncertain", "commit_unconfirmed"
 			case errors.Is(err, context.DeadlineExceeded):
 				outcome, reason = "failed", "deadline"
 			case errors.Is(err, errDeletionJournalDiagnostic):
 				outcome, reason = "failed", "journal_unavailable"
+			case errors.Is(err, errDeletionDatabaseDiagnostic):
+				outcome, reason = "failed", "database_unavailable"
 			}
 			if outcome != "" {
 				s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.deletion", Outcome: outcome, Reason: reason, Duration: time.Since(started)})
@@ -601,13 +626,16 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return err
+		return deletionDatabaseError(err)
 	}
 	defer tx.Rollback(ctx)
 	var subject *string
 	var deleted *time.Time
 	if err = tx.QueryRow(ctx, `SELECT subject,deleted_at FROM public.accounts WHERE id=$1 FOR UPDATE`, x.Account).Scan(&subject, &deleted); err != nil {
-		return err
+		if errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		return deletionDatabaseError(err)
 	}
 	if deleted != nil {
 		return errors.New("deletion operation/account state inconsistent")
@@ -616,39 +644,42 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 		return errors.New("deleting account identity missing")
 	}
 	var completed *time.Time
-	if err = tx.QueryRow(ctx, `SELECT completed_at FROM public.deletion_operations WHERE id=$1 AND account_id=$2 FOR UPDATE`, x.ID, x.Account).Scan(&completed); err != nil || completed != nil {
+	if err = tx.QueryRow(ctx, `SELECT completed_at FROM public.deletion_operations WHERE id=$1 AND account_id=$2 FOR UPDATE`, x.ID, x.Account).Scan(&completed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return deletionDatabaseError(err)
+	}
+	if err != nil || completed != nil {
 		return errors.New("deletion operation changed")
 	}
 	var week time.Time
 	var committed int64
 	if err = tx.QueryRow(ctx, `SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&week); err != nil {
-		return err
+		return deletionDatabaseError(err)
 	}
 	err = tx.QueryRow(ctx, `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, x.Account, week).Scan(&committed)
 	if err != nil && err != pgx.ErrNoRows {
-		return err
+		return deletionDatabaseError(err)
 	}
 	if err == nil {
 		digest := s.digest(s.CurrentPepper, "retained-quota", googleIssuer+"\x00"+*subject)
 		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes) VALUES($1,$2,$3,$4)`, s.CurrentPepper, digest, week, committed); err != nil {
-			return err
+			return deletionDatabaseError(err)
 		}
 	}
 	if _, err = tx.Exec(ctx, `UPDATE public.accounts SET issuer=NULL,subject=NULL,email=NULL,email_verified=NULL,hosted_domain=NULL,plan_id=NULL,weekly_bytes_override=NULL,sessions_override=NULL,status='Pending',deleted_at=clock_timestamp(),credential_generation=credential_generation+1 WHERE id=$1`, x.Account); err != nil {
-		return err
+		return deletionDatabaseError(err)
 	}
 	auditID, err := uuid()
 	if err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES($1,clock_timestamp(),'account_deleted',$2)`, auditID, x.Account); err != nil {
-		return err
+		return deletionDatabaseError(err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE public.deletion_operations SET completed_at=clock_timestamp() WHERE id=$1`, x.ID); err != nil {
-		return err
+		return deletionDatabaseError(err)
 	}
 	if _, err = tx.Exec(ctx, `UPDATE public.deletion_capacity SET pending=pending-1 WHERE singleton=true`); err != nil {
-		return err
+		return deletionDatabaseError(err)
 	}
 	if s.commitDeletion != nil {
 		err = s.commitDeletion(ctx, tx)

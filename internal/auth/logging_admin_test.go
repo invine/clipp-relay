@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -18,6 +19,9 @@ import (
 func assertActionLog(t *testing.T, data string, event, outcome, reason string) {
 	t.Helper()
 	for _, line := range strings.Split(strings.TrimSpace(data), "\n") {
+		if line == "" {
+			continue
+		}
 		var row map[string]any
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			t.Fatal(err)
@@ -27,6 +31,112 @@ func assertActionLog(t *testing.T, data string, event, outcome, reason string) {
 		}
 	}
 	t.Fatalf("missing %s/%s/%s in %s", event, outcome, reason, data)
+}
+
+func TestAdministratorAccountGuardRefusalsKeepFixedAction(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s.SetDiagnostics(logger)
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "revision": {"1"}}
+	path := "/admin/accounts/6dd09395-51a0-451c-96b3-716e6038e870"
+	for _, action := range []string{"approve", "deny", "assign", "suspend", "reactivate", "revoke", "override"} {
+		form.Set("action", action)
+		if out := internalRequest(s, http.MethodPost, path, cookie, form, "https://SECRET_ORIGIN_CANARY.test"); out.Code != http.StatusForbidden {
+			t.Fatalf("%s origin status %d", action, out.Code)
+		}
+	}
+	form.Set("action", "approve")
+	form.Set("csrf", "SECRET_CSRF_CANARY")
+	if out := internalRequest(s, http.MethodPost, path, cookie, form, origin); out.Code != http.StatusForbidden {
+		t.Fatalf("csrf status %d", out.Code)
+	}
+	form.Set("csrf", s.csrf(s.CurrentPepper, cookie.Value))
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.portal_sessions SET google_authenticated_at=clock_timestamp()-interval '11 minutes' WHERE credential_digest=$1`, s.digest(s.CurrentPepper, "portal-session", cookie.Value)); err != nil {
+		t.Fatal(err)
+	}
+	if out := internalRequest(s, http.MethodPost, path, cookie, form, origin); out.Code != http.StatusUnauthorized {
+		t.Fatalf("recent-auth status %d", out.Code)
+	}
+	if err := os.WriteFile(s.AdminAllowlistFile, []byte(`{"revision":2,"emails":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out := internalRequest(s, http.MethodPost, path, cookie, form, origin); out.Code != http.StatusForbidden {
+		t.Fatalf("allowlist status %d", out.Code)
+	}
+	logger.Close()
+	logs := output.String()
+	for _, event := range []string{"admin.approve", "admin.deny", "admin.assign_plan", "admin.suspend", "admin.reactivate", "admin.revoke_credentials", "admin.override_quota"} {
+		assertActionLog(t, logs, event, "refused", "origin_rejected")
+	}
+	assertActionLog(t, logs, "admin.approve", "refused", "csrf_rejected")
+	assertActionLog(t, logs, "admin.approve", "refused", "recent_auth_required")
+	assertActionLog(t, logs, "admin.approve", "refused", "not_authorized")
+	for _, secret := range []string{"SECRET_", path, cookie.Value, form.Get("csrf")} {
+		if strings.Contains(logs, secret) {
+			t.Fatalf("private administrator input leaked: %s", logs)
+		}
+	}
+}
+
+func TestAdministratorSessionInvalidationAfterFirstReadIsNotAuthorized(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s.SetDiagnostics(logger)
+	s.beforeAdminDetailsRead = func() {
+		if _, err := db.Pool.Exec(context.Background(), `DELETE FROM public.portal_sessions WHERE credential_digest=$1`, s.digest(s.CurrentPepper, "portal-session", cookie.Value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"approve"}, "revision": {"1"}}
+	if out := internalRequest(s, http.MethodPost, "/admin/accounts/6dd09395-51a0-451c-96b3-716e6038e870", cookie, form, origin); out.Code != http.StatusUnauthorized {
+		t.Fatalf("invalidated session status %d", out.Code)
+	}
+	logger.Close()
+	logs := output.String()
+	assertActionLog(t, logs, "admin.approve", "refused", "not_authorized")
+	if strings.Contains(logs, cookie.Value) || strings.Contains(logs, form.Get("csrf")) {
+		t.Fatalf("session material leaked: %s", logs)
+	}
+}
+
+func TestAdministratorRecheckUsesCatalogReason(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s.SetDiagnostics(logger)
+	target, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at) VALUES($1,'https://accounts.google.com',$2,'SECRET_RECHECK_EMAIL_CANARY@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp())`, target, target); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE account_id=$1`, target)
+		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.accounts WHERE id=$1`, target)
+	})
+	s.beforeAdminRecheck = func() {
+		if _, err := db.Pool.Exec(context.Background(), `UPDATE public.portal_sessions SET google_authenticated_at=clock_timestamp()-interval '11 minutes' WHERE credential_digest=$1`, s.digest(s.CurrentPepper, "portal-session", cookie.Value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
+	if out := internalRequest(s, http.MethodPost, "/admin/accounts/"+target, cookie, form, origin); out.Code != http.StatusUnauthorized {
+		t.Fatalf("stale recheck status %d", out.Code)
+	}
+	logger.Close()
+	logs := output.String()
+	assertActionLog(t, logs, "admin.approve", "refused", "recent_auth_required")
+	if strings.Contains(logs, "SECRET_") || strings.Contains(logs, target) || strings.Contains(logs, cookie.Value) {
+		t.Fatalf("administrator material leaked: %s", logs)
+	}
+	var status string
+	var audited bool
+	if err := db.Pool.QueryRow(context.Background(), `SELECT a.status, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_approved') FROM public.accounts a WHERE a.id=$1`, target).Scan(&status, &audited); err != nil || status != "Pending" || audited {
+		t.Fatalf("guard refusal changed account status=%s audited=%t err=%v", status, audited, err)
+	}
 }
 
 func TestAdministratorAccountDiagnosticsRespectRevisionAndCommit(t *testing.T) {

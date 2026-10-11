@@ -27,6 +27,22 @@ type adminIdentity struct {
 	version         uint64
 }
 
+type adminFormErrorKey struct{}
+
+func adminAccountDiagnosticEvent(action string) string {
+	switch action {
+	case "approve", "suspend", "deny", "reactivate":
+		return "admin." + action
+	case "assign":
+		return "admin.assign_plan"
+	case "override":
+		return "admin.override_quota"
+	case "revoke":
+		return "admin.revoke_credentials"
+	}
+	return ""
+}
+
 type accountActionSpec struct {
 	states       map[string]bool
 	event        string
@@ -83,6 +99,9 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 		return actor, false
 	}
 	w.Header().Set("X-Admin-Policy-Revision", strconv.FormatUint(policy.Revision, 10))
+	if s.beforeAdminDetailsRead != nil {
+		s.beforeAdminDetailsRead()
+	}
 	var email string
 	var verified bool
 	var hd *string
@@ -92,8 +111,13 @@ FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id
 WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation
 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, id, s.sessionDigest(r, version), version).Scan(&email, &verified, &hd, &authenticated)
 	if err != nil {
-		markDiagnostic(r, "failed", "database_unavailable")
-		fail(w, 503)
+		if errors.Is(err, pgx.ErrNoRows) {
+			markDiagnostic(r, "refused", "not_authorized")
+			fail(w, 401)
+		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
+			fail(w, 503)
+		}
 		return actor, false
 	}
 	if !policy.Allows(email, verified, deref(hd)) {
@@ -113,7 +137,11 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 			return actor, false
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-		if r.ParseForm() != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		parseErr := r.ParseForm()
+		if prior, ok := r.Context().Value(adminFormErrorKey{}).(error); ok {
+			parseErr = prior
+		}
+		if parseErr != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
 			markDiagnostic(r, "refused", "csrf_rejected")
 			fail(w, 403)
 			return actor, false
@@ -131,6 +159,9 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 // Called after ordered account locks, so wall time and metadata cannot be
 // evaluated before a competing administrator or session operation completes.
 func (s *Server) recheckAdministrator(w http.ResponseWriter, tx pgx.Tx, r *http.Request, actor *adminIdentity) int {
+	if s.beforeAdminRecheck != nil {
+		s.beforeAdminRecheck()
+	}
 	var email string
 	var verified, recent bool
 	var hd *string
@@ -142,21 +173,26 @@ WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
 AND ps.credential_generation=a.credential_generation
 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, actor.id, s.sessionDigest(r, actor.version), actor.version).Scan(&email, &verified, &hd, &recent)
 	if err == pgx.ErrNoRows {
+		markDiagnostic(r, "refused", "not_authorized")
 		return 401
 	}
 	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
 		return 503
 	}
 	if !recent {
+		markDiagnostic(r, "refused", "recent_auth_required")
 		return 401
 	}
 	policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile)
 	if err != nil {
+		markDiagnostic(r, "refused", "not_authorized")
 		w.Header().Set("X-Admin-Policy-Revision", "0")
 		return 403
 	}
 	w.Header().Set("X-Admin-Policy-Revision", strconv.FormatUint(policy.Revision, 10))
 	if !policy.Allows(email, verified, deref(hd)) {
+		markDiagnostic(r, "refused", "not_authorized")
 		return 403
 	}
 	actor.email = strings.ToLower(strings.TrimSpace(email))
@@ -168,9 +204,11 @@ func (s *Server) lockActor(w http.ResponseWriter, tx pgx.Tx, r *http.Request, ac
 	var id string
 	err := tx.QueryRow(r.Context(), `SELECT id FROM public.accounts WHERE id=$1 FOR UPDATE`, actor.id).Scan(&id)
 	if err == pgx.ErrNoRows {
+		markDiagnostic(r, "refused", "not_authorized")
 		return 401
 	}
 	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
 		return 503
 	}
 	return s.recheckAdministrator(w, tx, r, actor)
@@ -378,26 +416,26 @@ func revision(raw string) (int64, bool) {
 }
 
 func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
+	// Parse once under the same body limit before authorization so a known
+	// fixed action can retain its refusal outcome. Preserve a parsing error
+	// for administrator(), which still owns the actual CSRF decision.
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		r = r.WithContext(context.WithValue(r.Context(), adminFormErrorKey{}, err))
+	}
+	action := r.PostForm.Get("action")
+	if event := adminAccountDiagnosticEvent(action); event != "" {
+		markAction(r, event)
+	}
 	actor, ok := s.administrator(w, r, true)
 	if !ok {
 		return
 	}
 	target := r.PathValue("id")
 	expected, valid := revision(r.PostForm.Get("revision"))
-	action := r.PostForm.Get("action")
 	spec, known := accountActions[action]
-	switch action {
-	case "approve", "suspend", "deny", "reactivate":
-		markAction(r, "admin."+action)
-	case "assign":
-		markAction(r, "admin.assign_plan")
-	case "override":
-		markAction(r, "admin.override_quota")
-	case "revoke":
-		markAction(r, "admin.revoke_credentials")
-	case "review":
-		// The fixed catalog has no review action; successful review is quiet.
-	default:
+	if !known {
+		// Unknown action text never becomes an event name.
 		markAction(r, "http.request_refused")
 	}
 	if !idPattern.MatchString(target) || !valid || !known {

@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
+	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
 	"github.com/jackc/pgx/v5"
 )
@@ -197,6 +199,67 @@ func TestOwnerDeletionLogsAcceptanceAndProvenCompletion(t *testing.T) {
 	}
 	if !started || !retry || !completion {
 		t.Fatalf("missing started/retry/proven completion: %s", logs)
+	}
+}
+
+func TestDeletionPreparationSQLFailureLogsRetryWithoutCompletion(t *testing.T) {
+	c, m, db := fixture(t)
+	provider := newProvider(t)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s.SetDiagnostics(logger)
+	zero := strings.Repeat("0", 64)
+	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
+	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
+	owner := loginAs(t, s, provider, "SECRET_PREPARE_SUBJECT_CANARY_"+logger.NewID(), "SECRET_PREPARE_EMAIL_CANARY_"+logger.NewID()+"@example.test", "")
+	form := url.Values{"csrf": {csrfFrom(t, s, owner)}}
+	out := portalRequest(s, http.MethodPost, "/auth/delete", owner, form, c.PortalOrigin)
+	if out.Code != http.StatusAccepted {
+		t.Fatalf("deletion admission status %d", out.Code)
+	}
+	operation := strings.TrimPrefix(out.Header().Get("Location"), "/auth/deletion/")
+	migrationConfig, err := config.Load(os.Getenv("CLIPP_TEST_MIGRATION_CONFIG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrationMaterial, err := migrationConfig.ReadDatabaseMaterial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mp, err := database.NewPool(context.Background(), migrationConfig, migrationMaterial, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mp.Close()
+	if _, err := mp.Exec(context.Background(), `CREATE FUNCTION public.clipp_ticket07_fail_prepare() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'SECRET_PREPARE_DB_CANARY'; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = mp.Exec(context.Background(), `DROP TRIGGER IF EXISTS clipp_ticket07_fail_prepare ON public.deletion_operations`)
+		_, _ = mp.Exec(context.Background(), `DROP FUNCTION IF EXISTS public.clipp_ticket07_fail_prepare()`)
+		_, _ = db.Pool.Exec(context.Background(), `UPDATE public.deletion_operations SET next_attempt_at=clock_timestamp() WHERE id=$1 AND completed_at IS NULL`, operation)
+		_ = s.ReconcileOneDeletion(context.Background())
+	}()
+	if _, err := mp.Exec(context.Background(), `CREATE TRIGGER clipp_ticket07_fail_prepare BEFORE UPDATE ON public.deletion_operations FOR EACH ROW WHEN (NEW.event_sequence IS NOT NULL AND OLD.event_sequence IS NULL) EXECUTE FUNCTION public.clipp_ticket07_fail_prepare()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileOneDeletion(context.Background()); err == nil {
+		t.Fatal("injected SQL failure was accepted")
+	}
+	logger.Close()
+	s.SetDiagnostics(nil)
+	logs := output.String()
+	if strings.Contains(logs, "SECRET_") || strings.Contains(logs, owner.Value) {
+		t.Fatalf("private deletion material leaked: %s", logs)
+	}
+	rows := actionRows(t, logs)
+	requireActionRow(t, rows, "maintenance.deletion", "started", "none")
+	requireActionRow(t, rows, "maintenance.deletion", "failed", "database_unavailable")
+	for _, row := range rows {
+		if row["event"] == "maintenance.deletion" && row["outcome"] == "success" {
+			t.Fatal("failed preparation was logged as completed")
+		}
 	}
 }
 

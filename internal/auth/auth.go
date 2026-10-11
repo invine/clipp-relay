@@ -94,6 +94,8 @@ type Server struct {
 	globalRate                         rate
 	accountRates                       map[string]rate
 	beforeProfileRead                  func()
+	beforeAdminDetailsRead             func()
+	beforeAdminRecheck                 func()
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
 	commitCredential                   func(context.Context, pgx.Tx) error
