@@ -147,31 +147,40 @@
 <div class="section-heading">
 <div>
 <p class="eyebrow">QUOTA HISTORY</p>
-<h2>Weekly history</h2>
+<h2 id="history-title">Weekly history</h2>
 </div>
 <span class="muted fine-print">Current week + 12 completed weeks</span>
 </div>
-<div class="table-scroll">
-<table>
-<thead>
-<tr>
-<th scope="col">Week starting UTC</th>
-<th scope="col">Quota committed</th>
-</tr>
-</thead>
-<tbody>{{range .History}}
-<tr>
-<td>{{.Week}}
-</td>
-<td title="{{.Committed}} bytes">{{bytes .Committed}}
-</td>
-</tr>{{else}}
-<tr>
-<td colspan="2" class="muted">No quota history available.</td>
-</tr>{{end}}
-</tbody>
-</table>
-</div>
+{{if .History}}
+{{with histogram .History}}
+{{$chart := .}}
+<figure class="history-chart" aria-labelledby="history-title">
+  <div class="history-chart-heading">
+    <p class="muted fine-print">Quota committed · week starting UTC</p>
+    <span class="history-legend"><span aria-hidden="true"></span>Current week</span>
+  </div>
+  <p class="history-scroll-hint muted fine-print">Scroll horizontally to view all weeks.</p>
+  <div class="history-chart-scroll" tabindex="0" role="region" aria-label="Weekly quota histogram, oldest to newest">
+    <svg class="history-histogram" width="{{.Width}}" height="280" viewBox="0 0 {{.Width}} 280" style="min-width:{{.Width}}px" role="group" aria-label="Quota committed by week">
+      {{range .Ticks}}
+      <line class="history-gridline" x1="64" x2="{{$chart.Right}}" y1="{{.Y}}" y2="{{.Y}}"/>
+      <text class="history-axis" x="54" y="{{.Y}}" dy="4" text-anchor="end">{{.Label}}</text>
+      {{end}}
+      {{range .Bars}}
+      <g class="history-column{{if .Current}} current{{end}}" tabindex="0" role="img" aria-label="Week starting {{.Week}} UTC: {{.Value}}{{if .Current}}, current week{{end}}">
+        <title>Week starting {{.Week}} UTC: {{.Value}} ({{.Committed}} bytes){{if .Current}} · current week{{end}}</title>
+        <rect class="history-bar" x="{{.X}}" y="{{.Y}}" width="36" height="{{.Height}}" rx="4"/>
+        <text class="history-value" x="{{.CenterX}}" y="{{.ValueY}}" text-anchor="middle">{{.Value}}</text>
+        <text class="history-date" x="{{.CenterX}}" y="242" text-anchor="middle">{{.Label}}</text>
+        {{if .Current}}<text class="history-current-label" x="{{.CenterX}}" y="263" text-anchor="middle">This week</text>{{end}}
+      </g>
+      {{end}}
+    </svg>
+  </div>
+  {{if .AllZero}}<figcaption class="muted fine-print">No quota committed in these weeks.</figcaption>{{end}}
+</figure>
+{{end}}
+{{else}}<p class="muted">No quota history available.</p>{{end}}
 </section>
 {{end}}
 {{if .SignedIn}}

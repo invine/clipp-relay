@@ -100,6 +100,22 @@ th:first-child, td:first-child { padding-left: 0; }
 tbody th { font-weight: 500; }
 tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 .capacity-card .fine-print { margin-top: 18px; }
+.history-chart { margin: 0; }
+.history-chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.history-legend { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.history-legend span { width: 9px; height: 9px; border-radius: 3px; background: var(--green); }
+.history-chart-scroll { overflow-x: auto; padding: 4px 0; }
+.history-histogram { display: block; width: 100%; height: auto; }
+.history-gridline { stroke: var(--line); stroke-dasharray: 3 4; }
+.history-axis, .history-date { fill: var(--muted); font-size: 11px; }
+.history-bar { fill: #a8c8b2; }
+.history-column.current .history-bar { fill: var(--green); }
+.history-column:hover .history-bar, .history-column:focus .history-bar { fill: #408365; }
+.history-value { fill: var(--ink); font-size: 10px; font-weight: 600; }
+.history-current-label { fill: var(--green); font-size: 10px; font-weight: 650; }
+.history-column:focus { outline: 2px solid #4084c4; outline-offset: 4px; }
+.history-scroll-hint { display: none; margin-bottom: 12px; }
+.history-chart figcaption { margin-top: 8px; }
 .action-row { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 20px 0; border-bottom: 1px solid var(--line); }
 .action-row p { font-size: 13px; margin-top: 4px; }
 .action-row form { flex-shrink: 0; }
@@ -131,6 +147,7 @@ label input, label select, .quantity-input { margin-top: 6px; }
 .site-footer { max-width: 1104px; padding: 24px 28px 35px; margin: auto; font-size: 12px; color: #78877e; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (max-width: 900px) {
+  .history-scroll-hint { display: block; }
   .admin-grid { grid-template-columns: 1fr; }
   .plan-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .service-totals .card { flex-direction: column; align-items: flex-start; }
@@ -139,6 +156,7 @@ label input, label select, .quantity-input { margin-top: 6px; }
   .metric-value { font-size: 28px; }
 }
 @media (max-width: 640px) {
+  .history-chart-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
   .site-header { padding: 19px 20px; }
   .header-note { display: none; }
   .page, .page.narrow { padding: 26px 16px 8px; }
