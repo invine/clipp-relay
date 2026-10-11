@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"fmt"
 	"net"
@@ -10,10 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-)
 
-//go:embed portal/*
-var portal embed.FS
+	"clipp-relay/internal/portal"
+)
 
 type Service struct {
 	live              atomic.Bool
@@ -90,18 +88,13 @@ func (s *Service) PublicHandler() http.Handler {
 		})
 	}
 	mux := http.NewServeMux()
+	portal.RegisterAssets(mux)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		b, e := portal.ReadFile("portal/index.html")
-		if e != nil {
-			http.Error(w, "unavailable", 503)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(b)
+		portal.Render(w, http.StatusOK, "setup", nil)
 	})
 	return mux
 }

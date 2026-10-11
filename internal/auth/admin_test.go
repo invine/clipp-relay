@@ -193,7 +193,7 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 	}
 	set("2", "1000", "5", false, false)
 	selected := portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
-	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" value="1000"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) {
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="1000"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) {
 		t.Fatalf("selected policy does not show current overrides: %d %s", selected.Code, selected.Body.String())
 	}
 	onlyBytes := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {"3"}, "weekly_bytes_override": {"999"}}
@@ -400,7 +400,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 		t.Fatalf("stale revision = %d", out.Code)
 	}
 	profile := portalRequest(s, "GET", "/", admin, nil, "")
-	if !strings.Contains(profile.Body.String(), "1073741824 bytes") || !strings.Contains(profile.Body.String(), "Relay Sessions: 5") {
+	if !strings.Contains(profile.Body.String(), "1 GiB") || !strings.Contains(profile.Body.String(), "Relay Sessions: 5") {
 		t.Fatalf("owner allowance: %s", profile.Body.String())
 	}
 	create := url.Values{"csrf": {csrf}, "reason": {"routine_administration"}, "name": {"Replacement"}, "weekly_bytes": {"0"}, "sessions": {"0"}}
@@ -490,7 +490,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if accountChanges[len(accountChanges)-1].AccountID != userID || accountChanges[len(accountChanges)-1].CloseAll || accountChanges[len(accountChanges)-1].DiscardCredit || accountChanges[len(accountChanges)-1].WeeklyBytes != 1073741824 || accountChanges[len(accountChanges)-1].SessionLimit != 5 {
 		t.Fatal("plan assignment did not invalidate account")
 	}
-	if out := portalRequest(s, "GET", "/", user, nil, ""); !strings.Contains(out.Body.String(), "1073741824 bytes") {
+	if out := portalRequest(s, "GET", "/", user, nil, ""); !strings.Contains(out.Body.String(), "1 GiB") {
 		t.Fatalf("replacement allowance absent: %s", out.Body.String())
 	}
 	denied := loginAs(t, s, d, "denied-test", "denied@example.test", "")

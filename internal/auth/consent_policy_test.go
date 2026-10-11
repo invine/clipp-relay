@@ -23,12 +23,12 @@ func TestConsentPolicyAllowsRegisteredCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct{ client, redirect, policy string }{
-		{"electron", "http://127.0.0.1:34567/oauth/callback", "default-src 'none'; form-action 'self' http://127.0.0.1:34567/oauth/callback; base-uri 'none'"},
-		{"android", "clipp-relay-test://oauth/callback", "default-src 'none'; form-action 'self' clipp-relay-test:; base-uri 'none'"},
-		{"android", "clipp-relay://oauth/callback", "default-src 'none'; form-action 'self' clipp-relay:; base-uri 'none'"},
-		{"android", "clipp-relay://oauth/callback;sandbox", "default-src 'none'; form-action 'self' clipp-relay:; base-uri 'none'"},
-		{"android", "clipp-relay://oauth/callback,sandbox", "default-src 'none'; form-action 'self' clipp-relay:; base-uri 'none'"},
-		{"extension", c.PublicClients.ExtensionRedirect, "default-src 'none'; form-action 'self' https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay; base-uri 'none'"},
+		{"electron", "http://127.0.0.1:34567/oauth/callback", "default-src 'none'; style-src 'self'; form-action 'self' http://127.0.0.1:34567/oauth/callback; base-uri 'none'"},
+		{"android", "clipp-relay-test://oauth/callback", "default-src 'none'; style-src 'self'; form-action 'self' clipp-relay-test:; base-uri 'none'"},
+		{"android", "clipp-relay://oauth/callback", "default-src 'none'; style-src 'self'; form-action 'self' clipp-relay:; base-uri 'none'"},
+		{"android", "clipp-relay://oauth/callback;sandbox", "default-src 'none'; style-src 'self'; form-action 'self' clipp-relay:; base-uri 'none'"},
+		{"android", "clipp-relay://oauth/callback,sandbox", "default-src 'none'; style-src 'self'; form-action 'self' clipp-relay:; base-uri 'none'"},
+		{"extension", c.PublicClients.ExtensionRedirect, "default-src 'none'; style-src 'self'; form-action 'self' https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay; base-uri 'none'"},
 	}
 	challenge := sha256.Sum256([]byte(strings.Repeat("a", 43)))
 	for _, tc := range cases {

@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"math/big"
 	"net/http"
@@ -26,6 +25,7 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -345,7 +345,7 @@ func (s *Server) csrf(version uint64, credential string) string {
 func cookie(w http.ResponseWriter, name, value string, age int) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", MaxAge: age, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
-func fail(w http.ResponseWriter, status int) { http.Error(w, "Request could not be completed", status) }
+func fail(w http.ResponseWriter, status int) { portal.Error(w, status) }
 func (s *Server) bounded(w http.ResponseWriter, r *http.Request, next func(http.ResponseWriter, *http.Request)) {
 	if len(r.RequestURI) > 8192 || len(r.Header) > 128 || r.ContentLength > 16384 || (r.Method != http.MethodPost && r.ContentLength != 0) || r.Header.Get("Content-Encoding") != "" {
 		fail(w, 413)
@@ -385,6 +385,7 @@ func (s *Server) allowAccount(subject string) bool {
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	portal.RegisterAssets(mux)
 	mux.HandleFunc("GET /", s.home)
 	mux.HandleFunc("GET /auth/login", s.login)
 	mux.HandleFunc("GET /auth/callback", s.callback)
@@ -843,8 +844,6 @@ type quotaHistory struct {
 	Committed int64  `json:"committed"`
 }
 
-var page = template.Must(template.New("portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Clipp Relay</title><style>body{font:16px system-ui;background:#f8fafc;color:#172033;margin:0}.shell{max-width:720px;margin:8vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:18px;box-shadow:0 12px 36px #1720330d}.badge{display:inline-block;border-radius:999px;background:#fff4d6;color:#785500;padding:6px 12px;font-weight:650}button,.button{background:#183f75;color:white;border:0;border-radius:9px;padding:11px 17px;font:inherit;text-decoration:none;cursor:pointer}small{color:#64748b}.doughnut{width:130px;height:130px;border-radius:50%;background:conic-gradient(#183f75 var(--used),#dbeafe 0);display:grid;place-items:center}.doughnut::before{content:'';width:82px;height:82px;background:white;grid-area:1/1}.doughnut span{z-index:1;grid-area:1/1;font-weight:700}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px;border-bottom:1px solid #e2e8f0}</style><main class="shell"><small>Clipp Relay</small>{{if .SignedIn}}<h1>Your relay account</h1><p class="badge">{{.Status}}</p><p>{{.Description}}</p><p><small>{{.Email}}</small></p>{{if .Active}}<section><h2>Your allowance</h2><p>Weekly Quota Committed allowance: {{.WeeklyBytes}} bytes</p><p>Concurrent Relay Sessions: {{.Sessions}}</p><h3>Account capacity</h3><table><tr><th>Resource</th><th>Live count and limit</th></tr><tr><td>Relay Sessions</td><td>{{if .LiveSessionsKnown}}{{.LiveSessions}} of {{.Sessions}}{{else}}Unavailable · limit {{.Sessions}}{{end}}</td></tr><tr><td>Login Grants</td><td>{{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}</td></tr></table><small>Live counts are sampled separately from quota history.</small><div class="doughnut" style="--used:{{.Percent}}%" role="img" aria-label="Quota committed {{.Committed}} of {{.WeeklyBytes}} bytes"><span>{{.Percent}}%</span></div><p>Quota committed: {{.Committed}} bytes</p><p>{{.UsageState}}</p><small>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</small><h3>Weekly history</h3><table><tr><th>Week starting UTC</th><th>Quota committed</th></tr>{{range .History}}<tr><td>{{.Week}}</td><td>{{.Committed}} bytes</td></tr>{{end}}</table></section>{{end}}{{if .Admin}}<p><a href="/admin">Administration</a></p>{{end}}<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form><form method="post" action="/auth/revoke"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sign out everywhere</button></form><form method="post" action="/auth/delete"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Delete relay account</button><small>Deletion is permanent. Sign in with Google again if your last authentication was more than ten minutes ago.</small></form>{{else}}<h1>Relay account</h1><p>Sign in with Google to view your account status.</p><a class="button" href="/auth/login">Sign in with Google</a>{{end}}</main></html>`))
-
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -943,12 +942,13 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 		}
 	} else {
 		percent = int64(float64(committed) * 100 / float64(bytesValue))
-		usageState = "Remaining allowance: " + strconv.FormatInt(bytesValue-committed, 10) + " bytes."
+		usageState = "Remaining allowance: " + portal.FormatBytes(bytesValue-committed) + "."
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = page.Execute(w, struct {
+	portal.Render(w, http.StatusOK, "account", struct {
 		SignedIn                               bool
 		Status, Description, Email, CSRF       string
+		DiscoveryURL                           string
 		Active, Admin                          bool
 		WeeklyBytes                            int64
 		Sessions                               int
@@ -957,7 +957,7 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 		History                                []quotaHistory
 		LiveSessions, ActiveGrants, GrantLimit int
 		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{e == nil, status, description, email, csrf, status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
+	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
