@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"clipp-relay/internal/diagnostic"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
@@ -103,6 +104,11 @@ func (s *Server) currentLeaseLocked(id peer.ID, now time.Time) *rendezvousLease 
 }
 
 func (s *Server) handleRendezvous(st network.Stream) {
+	started := time.Now()
+	requestID := ""
+	if s.diagnostics != nil {
+		requestID = s.diagnostics.NewID()
+	}
 	version := st.Protocol()
 	if version == RendezvousV1Protocol {
 		s.rvCounts[0].Add(1)
@@ -154,12 +160,56 @@ func (s *Server) handleRendezvous(st network.Stream) {
 		return
 	}
 	response := s.applyRV(st, owner, request)
+	s.observeRendezvous(st, request.action, response, requestID, time.Since(started))
 	if err := writeRV(st, version, response, limit); err != nil {
 		_ = st.Reset()
 		return
 	}
 	_ = st.CloseWrite()
 	_ = st.Close()
+}
+
+// The event names mirror the request's actual wire version. A lookup miss keeps
+// the stock compatible ok:true response, but reports that no lease was found.
+func (s *Server) observeRendezvous(st network.Stream, action string, response any, requestID string, duration time.Duration) {
+	if s.diagnostics == nil {
+		return
+	}
+	version := "v1"
+	if st.Protocol() == RendezvousV2Protocol {
+		version = "v2"
+	}
+	name := action
+	if name == "lookup" {
+		name = "find"
+	}
+	event := "relay.rendezvous." + version + "." + name
+	result, ok := response.(map[string]any)
+	if !ok {
+		return
+	}
+	outcome, reason := "success", "none"
+	if result["ok"] != true {
+		outcome = "refused"
+		switch result["code"] {
+		case "authentication_failed":
+			reason = "authentication_required"
+		case "reservation_required":
+			reason = "lease_unavailable"
+		case "rate_limited":
+			reason = "safety_limit"
+		case "temporarily_unavailable":
+			reason = "draining"
+		default:
+			reason = "invalid_request"
+		}
+	} else if action == "lookup" && result["record"] == nil {
+		outcome, reason = "refused", "lease_unavailable"
+	}
+	s.mu.Lock()
+	info := s.connectionInfo[st.Conn()]
+	s.mu.Unlock()
+	s.diagnostics.Emit(diagnostic.Event{Event: event, Outcome: outcome, Reason: reason, RequestID: requestID, SessionID: info.id, Duration: duration})
 }
 
 func (s *Server) rvError(st network.Stream, version protocol.ID, code string, retry int) {
