@@ -103,7 +103,14 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	id, version, _, _, csrf, e := s.session(r)
 	if e != nil {
-		markDiagnostic(r, "refused", "invalid_credentials")
+		switch {
+		case errors.Is(e, errRateLimit):
+			markAction(r, "")
+		case errors.Is(e, errInvalidSession):
+			markDiagnostic(r, "refused", "invalid_credentials")
+		default:
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 401)
 		return
 	}

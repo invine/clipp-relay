@@ -1086,9 +1086,12 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	id, version, _, _, csrf, err := s.session(r)
 	if err != nil {
-		if errors.Is(err, errInvalidSession) {
+		switch {
+		case errors.Is(err, errRateLimit):
+			markAction(r, "")
+		case errors.Is(err, errInvalidSession):
 			markDiagnostic(r, "refused", "invalid_credentials")
-		} else {
+		default:
 			markDiagnostic(r, "failed", "database_unavailable")
 		}
 		fail(w, 401)
