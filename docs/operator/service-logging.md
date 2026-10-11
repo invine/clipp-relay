@@ -179,7 +179,7 @@ These rows are illustrative. A dependency failure describes a provider request o
 {"time":"2026-10-11T10:32:00Z","level":"WARN","msg":"dependency deletion_journal","event":"dependency.deletion_journal","outcome":"failed","reason":"deadline","duration_ms":5000}
 ```
 
-The same transition rule covers `dependency.google_token`, `dependency.google_jwks` and `dependency.publication_api`. A valid JWKS response that lacks the token's requested key is a credential verification refusal, not a JWKS dependency failure. A publication API failure may leave the previous verified address snapshot usable until its existing five-minute expiry. A journal failure does not relax the deletion proof or startup gate. A quota-clock diagnostic is separate from its existing stricter safety probe and recovery rule.
+The same transition rule covers `dependency.google_token`, `dependency.google_jwks` and `dependency.publication_api`. A valid JWKS response that lacks the token's requested key is a credential verification refusal, not a JWKS dependency failure. A Kubernetes Service watch that closes successfully without an event at its timeout is a normal reconnect, not a publication API failure. A publication API failure may leave the previous verified address snapshot usable until its existing five-minute expiry. A journal failure does not relax the deletion proof or startup gate. A quota-clock diagnostic is separate from its existing stricter safety probe and recovery rule.
 
 ```json
 {"time":"2026-10-11T10:33:00Z","level":"INFO","msg":"observation state","event":"observation.state","outcome":"observed","reason":"none","signal":"cleanup","state":"available"}

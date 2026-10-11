@@ -271,6 +271,7 @@ func (c *Controller) publishLocked() {
 func (c *Controller) watch(ctx context.Context, s *source, changed chan<- struct{}) {
 	for ctx.Err() == nil {
 		started := time.Now()
+		quietClose := false
 		c.mu.Lock()
 		endpoint := c.endpoint(s, true)
 		c.mu.Unlock()
@@ -283,10 +284,13 @@ func (c *Controller) watch(ctx context.Context, s *source, changed chan<- struct
 				if response.StatusCode == 200 {
 					var event json.RawMessage
 					err = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&event)
-					if err != nil {
+					if errors.Is(err, io.EOF) {
+						// A watch may expire without any Service change.
+						quietClose, err = true, nil
+					} else if err != nil {
 						err = diagnostic.ErrInvalidResponse
 					}
-					if err == nil {
+					if err == nil && !quietClose {
 						select {
 						case changed <- struct{}{}:
 						default:
@@ -310,6 +314,13 @@ func (c *Controller) watch(ctx context.Context, s *source, changed chan<- struct
 			case <-ctx.Done():
 				return
 			case <-time.After(5 * time.Second):
+			}
+		} else if quietClose {
+			// Avoid a tight reconnect loop if an intermediary closes watches early.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
 			}
 		}
 	}
