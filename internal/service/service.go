@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/portal"
 )
 
@@ -28,6 +29,12 @@ type Service struct {
 	rendezvousCountV2 func() uint64
 	deletionMetrics   func(context.Context) (DeletionSample, error)
 	cleanupMetrics    func(context.Context) (CleanupSample, error)
+	diagnostics       func(diagnostic.Event)
+	diagnosticMu      sync.Mutex
+	readinessSeen     bool
+	lastReadiness     bool
+	draining          atomic.Bool
+	stopFailed        atomic.Bool
 }
 
 type CleanupSample struct {
@@ -60,15 +67,44 @@ func New() *Service {
 	return s
 }
 
-func (s *Service) SetPublicHandler(handler http.Handler) { s.public = handler }
-func (s *Service) SetReady(ready bool)                   { s.ready.Store(ready) }
-func (s *Service) SetRouting(routing bool)               { s.routing.Store(routing) }
-func (s *Service) SetReadinessCheck(check func() bool)   { s.readinessCheck = check }
+func (s *Service) SetPublicHandler(handler http.Handler)      { s.public = handler }
+func (s *Service) SetReady(ready bool)                        { s.ready.Store(ready); s.observeReadiness() }
+func (s *Service) SetRouting(routing bool)                    { s.routing.Store(routing); s.observeReadiness() }
+func (s *Service) SetReadinessCheck(check func() bool)        { s.readinessCheck = check }
+func (s *Service) SetDiagnostics(emit func(diagnostic.Event)) { s.diagnostics = emit }
+func (s *Service) BeginDrain()                                { s.draining.Store(true); s.SetReady(false) }
+func (s *Service) SetStopFailure()                            { s.stopFailed.Store(true) }
 func (s *Service) readyNow() bool {
 	if !s.ready.Load() || !s.routing.Load() {
 		return false
 	}
 	return s.readinessCheck == nil || s.readinessCheck()
+}
+func (s *Service) observeReadiness() {
+	if s.diagnostics == nil {
+		return
+	}
+	s.diagnosticMu.Lock()
+	defer s.diagnosticMu.Unlock()
+	ready := s.readyNow()
+	if s.readinessSeen && s.lastReadiness == ready {
+		return
+	}
+	seen, wasReady := s.readinessSeen, s.readinessSeen && s.lastReadiness
+	s.readinessSeen, s.lastReadiness = true, ready
+	e := diagnostic.Event{Event: "service.readiness", Outcome: "failed", Reason: "not_published"}
+	if ready {
+		e.Outcome, e.Reason = "success", "none"
+		if seen && !wasReady {
+			e.Outcome = "recovered"
+		}
+	}
+	if !ready && s.draining.Load() {
+		e.Reason = "draining"
+	} else if !ready && s.ready.Load() && s.routing.Load() {
+		e.Reason = "publication_stale"
+	}
+	s.diagnostics(e)
 }
 func (s *Service) SetRendezvousMetrics(v1, v2 func() uint64) {
 	s.rendezvousCountV1, s.rendezvousCountV2 = v1, v2
@@ -113,7 +149,11 @@ func (s *Service) PrivateHandler() http.Handler {
 		}
 	}
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) { health(s.live.Load())(w, r) })
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) { health(s.readyNow())(w, r) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ready := s.readyNow()
+		s.observeReadiness()
+		health(ready)(w, r)
+	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case s.scrapes <- struct{}{}:
@@ -215,14 +255,24 @@ func (c *limitedConn) Close() error { e := c.Conn.Close(); c.once.Do(c.release);
 func (s *Service) Run(ctx context.Context, publicAddr, privateAddr string) error {
 	pub, e := net.Listen("tcp", publicAddr)
 	if e != nil {
+		if s.diagnostics != nil {
+			s.diagnostics(diagnostic.Event{Event: "service.serving", Outcome: "failed", Reason: "listener_failed"})
+		}
 		return errors.New("public listener unavailable")
 	}
 	priv, e := net.Listen("tcp", privateAddr)
 	if e != nil {
 		_ = pub.Close()
+		if s.diagnostics != nil {
+			s.diagnostics(diagnostic.Event{Event: "service.serving", Outcome: "failed", Reason: "listener_failed"})
+		}
 		return errors.New("private listener unavailable")
 	}
 	s.routing.Store(true)
+	if s.diagnostics != nil {
+		s.diagnostics(diagnostic.Event{Event: "service.serving", Outcome: "success", Reason: "none"})
+	}
+	s.observeReadiness()
 	s.servers = []*http.Server{{Handler: s.PublicHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}, {Handler: s.PrivateHandler(), ReadHeaderTimeout: 2 * time.Second, IdleTimeout: 30 * time.Second}}
 	errCh := make(chan error, 2)
 	go func() { errCh <- s.servers[0].Serve(&limitedListener{Listener: pub, slots: make(chan struct{}, 512)}) }()
@@ -235,7 +285,19 @@ func (s *Service) Run(ctx context.Context, publicAddr, privateAddr string) error
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		for _, srv := range s.servers {
-			_ = srv.Shutdown(shutdownCtx)
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				s.stopFailed.Store(true)
+			}
+		}
+		if s.diagnostics != nil {
+			e := diagnostic.Event{Event: "service.stopped", Outcome: "success", Reason: "none"}
+			if s.stopFailed.Load() {
+				e.Outcome, e.Reason = "failed", "internal_failure"
+			}
+			s.diagnostics(e)
+		}
+		if s.stopFailed.Load() {
+			return errors.New("service stop failed")
 		}
 		return nil
 	case e := <-errCh:
@@ -244,6 +306,9 @@ func (s *Service) Run(ctx context.Context, publicAddr, privateAddr string) error
 		s.live.Store(false)
 		_ = pub.Close()
 		_ = priv.Close()
+		if s.diagnostics != nil {
+			s.diagnostics(diagnostic.Event{Event: "service.stopped", Outcome: "failed", Reason: "listener_failed"})
+		}
 		return e
 	}
 }

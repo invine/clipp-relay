@@ -2,11 +2,32 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
+	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestRejectedStartupDoesNotEchoConfigurationCanary(t *testing.T) {
+	const canary = "secret-identity-address-error-canary"
+	if os.Getenv("CLIPP_STARTUP_HELPER") == "1" {
+		flag.CommandLine = flag.NewFlagSet("relay", flag.ContinueOnError)
+		os.Args = []string{"clipp-relay", "-command=serve", "-config=/tmp/" + canary}
+		os.Exit(run())
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestRejectedStartupDoesNotEchoConfigurationCanary")
+	cmd.Env = append(os.Environ(), "CLIPP_STARTUP_HELPER=1")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("invalid configuration accepted")
+	}
+	if strings.Contains(string(output), canary) || !strings.Contains(string(output), `"event":"service.startup"`) || !strings.Contains(string(output), `"reason":"configuration_rejected"`) {
+		t.Fatal(string(output))
+	}
+}
 
 func TestFirstSignalStartsDrainAndSecondForcesIt(t *testing.T) {
 	signals := make(chan os.Signal, 2)
@@ -54,5 +75,22 @@ func TestDrainDeadlineForcesWithoutSecondSignal(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("drain deadline did not force")
+	}
+}
+
+func TestDrainResultSeparatesCompletionDeadlineAndForce(t *testing.T) {
+	cases := []struct {
+		err             error
+		outcome, reason string
+	}{
+		{nil, "success", "none"},
+		{context.DeadlineExceeded, "failed", "deadline"},
+		{context.Canceled, "failed", "forced"},
+	}
+	for _, c := range cases {
+		e := drainResult(c.err, 25*time.Millisecond)
+		if e.Event != "service.drain" || e.Outcome != c.outcome || e.Reason != c.reason || e.Duration != 25*time.Millisecond {
+			t.Fatal(e)
+		}
 	}
 }
