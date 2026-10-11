@@ -234,7 +234,9 @@ func (s *Server) nextDeletion(ctx context.Context) (pendingDeletion, error) {
 	return x, err
 }
 
-func (s *Server) readHead(ctx context.Context) (JournalHead, string, error) {
+func (s *Server) readHead(ctx context.Context) (result JournalHead, resultETag string, resultErr error) {
+	started := time.Now()
+	defer func() { s.transitions.Dependency("dependency.deletion_journal", resultErr, ctx, time.Since(started)) }()
 	if s.deletionJournal == nil {
 		return JournalHead{}, "", errors.New("journal unavailable")
 	}

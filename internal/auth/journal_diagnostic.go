@@ -18,10 +18,9 @@ func (j observedJournal) report(ctx context.Context, started time.Time, err erro
 	j.transitions.Dependency("dependency.deletion_journal", err, ctx, time.Since(started))
 }
 func (j observedJournal) ReadHead(ctx context.Context) (JournalHead, string, error) {
-	started := time.Now()
-	h, etag, err := j.DeletionJournal.ReadHead(ctx)
-	j.report(ctx, started, err)
-	return h, etag, err
+	// The caller must qualify the head against the configured repository and
+	// coverage floor before a successful read can prove recovery.
+	return j.DeletionJournal.ReadHead(ctx)
 }
 func (j observedJournal) CreateEvent(ctx context.Context, key string, data []byte) error {
 	started := time.Now()

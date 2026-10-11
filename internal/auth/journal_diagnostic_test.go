@@ -14,6 +14,7 @@ import (
 type failingHead struct {
 	auth.DeletionJournal
 	fail bool
+	bad  bool
 }
 
 func (j *failingHead) ReadHead(context.Context) (auth.JournalHead, string, error) {
@@ -21,7 +22,11 @@ func (j *failingHead) ReadHead(context.Context) (auth.JournalHead, string, error
 		return auth.JournalHead{}, "", errors.New("OCI secret canary")
 	}
 	zero := strings.Repeat("0", 64)
-	return auth.JournalHead{RepositoryID: "test-repository", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, "etag", nil
+	repository := "test-repository"
+	if j.bad {
+		repository = "wrong-repository"
+	}
+	return auth.JournalHead{RepositoryID: repository, CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, "etag", nil
 }
 
 func TestQualifiedJournalFailureAndRecoveryAreSafeTransitions(t *testing.T) {
@@ -36,6 +41,11 @@ func TestQualifiedJournalFailureAndRecoveryAreSafeTransitions(t *testing.T) {
 		}
 	}
 	j.fail = false
+	j.bad = true
+	if err := s.ValidateDeletionJournal(context.Background()); err == nil {
+		t.Fatal("unqualified head accepted")
+	}
+	j.bad = false
 	for range 2 {
 		if err := s.ValidateDeletionJournal(context.Background()); err != nil {
 			t.Fatal(err)
