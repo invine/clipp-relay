@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/quota"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/connmgr"
@@ -47,15 +48,29 @@ type Credit interface {
 	Take(context.Context, string, int64, int64) (quota.Result, error)
 }
 
+// DiagnosticSink is the shared, catalog-validated application event boundary.
+// It is optional so protocol fixtures can run without capturing stdout.
+type DiagnosticSink interface {
+	Emit(diagnostic.Event)
+	NewID() string
+}
+
 type Options struct {
 	ListenAddress          string // complete TCP multiaddr; port zero is accepted for isolated tests
 	WebSocketListenAddress string // internal plaintext WS behind exact-hostname public TLS
 	WebRTCListenAddress    string // WebRTC Direct UDP; the listener supplies its process certhash
 	WebSocketHostname      string // exact public TLS name; validated with every WSS snapshot
 	MaxSessions            int
+	Diagnostics            DiagnosticSink
+}
+
+type connectionDiagnostic struct {
+	id, transport string
+	ended         string
 }
 
 type session struct {
+	endReason  string
 	conn       network.Conn
 	account    string
 	generation int64
@@ -69,6 +84,8 @@ type Server struct {
 	manager           network.ResourceManager
 	tracer            *circuitTracer
 	authority         Authority
+	diagnostics       DiagnosticSink
+	connectionInfo    map[network.Conn]connectionDiagnostic
 	credit            Credit
 	maxSessions       int
 	tcpEnabled        bool
@@ -212,7 +229,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -255,9 +272,13 @@ func (s *Server) Close() error {
 	var result error
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
+		draining := s.closing
 		s.closing = true
 		conns := make([]network.Conn, 0, len(s.byConn))
-		for c := range s.byConn {
+		for c, v := range s.byConn {
+			if draining {
+				v.endReason = "draining"
+			}
 			conns = append(conns, c)
 		}
 		s.mu.Unlock()
@@ -271,16 +292,69 @@ func (s *Server) Close() error {
 	return result
 }
 
+func connectionTransport(c network.Conn) string {
+	a := c.RemoteMultiaddr()
+	local := c.LocalMultiaddr()
+	if local != nil && hasProtocol(local, ma.P_WEBRTC_DIRECT) {
+		return "webrtc_direct"
+	}
+	if a == nil {
+		return "unknown"
+	}
+	if hasProtocol(a, ma.P_WEBRTC_DIRECT) {
+		return "webrtc_direct"
+	}
+	if hasProtocol(a, ma.P_WS) || hasProtocol(a, ma.P_WSS) {
+		return "wss"
+	}
+	if hasProtocol(a, ma.P_TCP) {
+		return "tcp"
+	}
+	return "unknown"
+}
+
+func (s *Server) emitConnection(c network.Conn, event, outcome, reason, requestID string, duration time.Duration) {
+	if s.diagnostics == nil {
+		return
+	}
+	s.mu.Lock()
+	info, ok := s.connectionInfo[c]
+	s.mu.Unlock()
+	e := diagnostic.Event{Event: event, Outcome: outcome, Reason: reason, RequestID: requestID, Duration: duration}
+	if ok {
+		e.SessionID = info.id
+		e.Transport = info.transport
+	}
+	s.diagnostics.Emit(e)
+}
+
 func (s *Server) connected(_ network.Network, c network.Conn) {
 	s.mu.Lock()
-	if s.closing || len(s.preauth) >= 256 {
+	reason := ""
+	if s.closing {
+		reason = "draining"
+	} else if len(s.preauth) >= 256 {
+		reason = "resource_limit"
+	}
+	if reason != "" {
 		s.mu.Unlock()
+		if s.diagnostics != nil {
+			s.diagnostics.Emit(diagnostic.Event{Event: "relay.connection", Outcome: "refused", Reason: reason, Transport: connectionTransport(c)})
+		}
 		_ = c.Close()
 		return
+	}
+	if s.diagnostics != nil {
+		s.connectionInfo[c] = connectionDiagnostic{id: s.diagnostics.NewID(), transport: connectionTransport(c)}
 	}
 	timer := time.AfterFunc(10*time.Second, func() {
 		s.mu.Lock()
 		_, pending := s.preauth[c]
+		if pending && s.diagnostics != nil {
+			info := s.connectionInfo[c]
+			info.ended = "preauth_expired"
+			s.connectionInfo[c] = info
+		}
 		s.mu.Unlock()
 		if pending {
 			_ = c.Close()
@@ -288,6 +362,7 @@ func (s *Server) connected(_ network.Network, c network.Conn) {
 	})
 	s.preauth[c] = timer
 	s.mu.Unlock()
+	s.emitConnection(c, "relay.connection", "success", "none", "", 0)
 }
 
 func (s *Server) disconnected(_ network.Network, c network.Conn) {
@@ -299,12 +374,35 @@ func (s *Server) disconnected(_ network.Network, c network.Conn) {
 	delete(s.connRate, c)
 	delete(s.rvConnRate, c)
 	if old := s.byConn[c]; old != nil {
-		s.removeLocked(old)
+		reason := old.endReason
+		if reason == "" {
+			reason = "connection_closed"
+		}
+		s.endSessionLocked(old, reason)
 	}
+	info, observed := s.connectionInfo[c]
+	delete(s.connectionInfo, c)
 	s.mu.Unlock()
+	if observed {
+		reason := info.ended
+		if reason == "" {
+			reason = "connection_closed"
+		}
+		s.diagnostics.Emit(diagnostic.Event{Event: "relay.connection", Outcome: "ended", Reason: reason, SessionID: info.id, Transport: info.transport})
+	}
 }
 
-func (s *Server) removeLocked(v *session) { s.removeSessionLocked(v, false) }
+func (s *Server) removeLocked(v *session) { s.endSessionLocked(v, "connection_closed") }
+func (s *Server) endSessionLocked(v *session, reason string) {
+	if s.byConn[v.conn] != v {
+		return
+	}
+	if s.diagnostics != nil {
+		info := s.connectionInfo[v.conn]
+		s.diagnostics.Emit(diagnostic.Event{Event: "relay.session", Outcome: "ended", Reason: reason, SessionID: info.id, Transport: info.transport})
+	}
+	s.removeSessionLocked(v, false)
+}
 
 func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 	if s.byConn[v.conn] != v {
@@ -385,7 +483,7 @@ func (s *Server) expire(v *session) {
 	s.mu.Lock()
 	owned := s.byConn[v.conn] == v && !time.Now().Before(v.deadline)
 	if owned {
-		s.removeLocked(v)
+		s.endSessionLocked(v, "session_expired")
 	}
 	s.mu.Unlock()
 	if owned {
@@ -394,10 +492,17 @@ func (s *Server) expire(v *session) {
 }
 
 func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string) {
+	deadline, renew, code, _ := s.authenticateObserved(ctx, c, raw)
+	return deadline, renew, code
+}
+
+func (s *Server) authenticateObserved(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, string) {
+	reason := ""
+
 	s.mu.Lock()
 	if s.closing {
 		s.mu.Unlock()
-		return time.Time{}, 0, "temporarily_unavailable"
+		return time.Time{}, 0, "temporarily_unavailable", "draining"
 	}
 	allowed := s.globalRate.allow(time.Now(), 200, 400)
 	b := s.connRate[c]
@@ -405,7 +510,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	s.connRate[c] = b
 	s.mu.Unlock()
 	if !allowed {
-		return time.Time{}, 0, "rate_limited"
+		return time.Time{}, 0, "rate_limited", "rate_limited"
 	}
 	var deadline time.Time
 	var renew time.Duration
@@ -413,7 +518,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 	var oldToClose network.Conn
 	var installed *session
 	admit := func(unitCtx context.Context) {
-		deadline, renew, code, oldToClose, installed = s.authenticateSerial(unitCtx, c, raw)
+		deadline, renew, code, oldToClose, installed = s.authenticateSerial(unitCtx, c, raw, &reason)
 	}
 	unitOK := true
 	if bounded, ok := s.authority.(interface {
@@ -427,7 +532,7 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 		s.mu.Lock()
 		owned := s.byConn[c] == installed
 		if owned {
-			s.removeLocked(installed)
+			s.endSessionLocked(installed, "connection_closed")
 		}
 		s.mu.Unlock()
 		if owned {
@@ -438,22 +543,31 @@ func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (
 		_ = oldToClose.Close()
 	}
 	if !unitOK {
-		return time.Time{}, 0, "temporarily_unavailable"
+		return time.Time{}, 0, "temporarily_unavailable", admissionFailure(ctx)
 	}
-	return deadline, renew, code
+	return deadline, renew, code, reason
 }
 
-func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, network.Conn, *session) {
+func admissionFailure(ctx context.Context) string {
+	if ctx.Err() != nil {
+		return "deadline"
+	}
+	return "overloaded"
+}
+
+func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw string, reason *string) (time.Time, time.Duration, string, network.Conn, *session) {
 	guard := &s.peerGuards[peerGuardIndex(c.RemotePeer())]
 	for !guard.TryLock() {
 		select {
 		case <-ctx.Done():
+			*reason = "deadline"
 			return time.Time{}, 0, "temporarily_unavailable", nil, nil
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
 	if ctx.Err() != nil {
 		guard.Unlock()
+		*reason = "deadline"
 		return time.Time{}, 0, "temporarily_unavailable", nil, nil
 	}
 	var oldToClose network.Conn
@@ -461,8 +575,10 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 	credential, err := s.authority.AuthenticateRelay(ctx, raw)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidAccess) {
+			*reason = "invalid_credentials"
 			return time.Time{}, 0, "authentication_failed", nil, nil
 		}
+		*reason = "database_unavailable"
 		return time.Time{}, 0, "temporarily_unavailable", nil, nil
 	}
 	var deadline time.Time
@@ -480,12 +596,14 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 		if err != nil || fresh.AccountID != credential.AccountID {
 			if errors.Is(err, auth.ErrInvalidAccess) || fresh.AccountID != credential.AccountID {
 				code = "authentication_failed"
+				*reason = "invalid_credentials"
 			} else {
 				code = "temporarily_unavailable"
+				*reason = "database_unavailable"
 			}
 			return
 		}
-		deadline, renew, code = s.authenticateAdmitted(unitCtx, c, fresh, &oldToClose)
+		deadline, renew, code = s.authenticateAdmitted(unitCtx, c, fresh, &oldToClose, reason)
 		if code == "" {
 			s.mu.Lock()
 			installed = s.byConn[c]
@@ -496,6 +614,7 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 		WithAccountGuards(context.Context, []string, func(context.Context)) bool
 	}); ok {
 		if !guarded.WithAccountGuards(ctx, accounts, admit) {
+			*reason = admissionFailure(ctx)
 			return time.Time{}, 0, "temporarily_unavailable", oldToClose, installed
 		}
 	} else {
@@ -507,8 +626,9 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 // The account guard remains held from the authoritative recheck through local
 // credit funding and registry installation. A committed policy change therefore
 // cannot be followed by installation of an older observed credential.
-func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn) (time.Time, time.Duration, string) {
+func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn, reason *string) (time.Time, time.Duration, string) {
 	if ctx.Err() != nil {
+		*reason = "deadline"
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
 	s.mu.Lock()
@@ -516,12 +636,15 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 	replaced := s.byPeer[c.RemotePeer()]
 	s.mu.Unlock()
 	if current != nil && current.account != credential.AccountID {
+		*reason = "account_mismatch"
 		return time.Time{}, 0, "account_change_requires_new_connection"
 	}
 	if _, err := s.credit.Ensure(ctx, credential.AccountID, credential.Generation); err != nil {
 		if errors.Is(err, quota.ErrExhausted) {
+			*reason = "" // The fixed authentication catalog has no quota-exhausted pair.
 			return time.Time{}, 0, "quota_exhausted"
 		}
+		*reason = "quota_unavailable"
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
 	deadline := time.Now().Add(15 * time.Minute)
@@ -529,6 +652,7 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		deadline = credential.ExpiresAt
 	}
 	if !time.Now().Before(deadline) {
+		*reason = "expired_credentials"
 		return time.Time{}, 0, "authentication_failed"
 	}
 	var jitter [8]byte
@@ -553,10 +677,12 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		}
 		if count >= credential.SessionLimit {
 			s.mu.Unlock()
+			*reason = "session_limit"
 			return time.Time{}, 0, "session_limit_exceeded"
 		}
 		if len(s.byConn) >= s.maxSessions && replaced == nil {
 			s.mu.Unlock()
+			*reason = "session_limit"
 			return time.Time{}, 0, "session_limit_exceeded"
 		}
 	}
@@ -564,7 +690,7 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		s.removeSessionLocked(current, true)
 	}
 	if replaced != nil && replaced != current {
-		s.removeLocked(replaced)
+		s.endSessionLocked(replaced, "replaced")
 	}
 	v := &session{conn: c, account: credential.AccountID, generation: credential.Generation, deadline: deadline}
 	s.byConn[c] = v
@@ -657,12 +783,48 @@ func writeAuth(st network.Stream, value any) error {
 	return err
 }
 
+func authDiagnostic(code string) (string, string) {
+	switch code {
+	case "":
+		return "success", "none"
+	case "invalid_request":
+		return "refused", "invalid_request"
+	case "authentication_failed":
+		return "refused", "invalid_credentials"
+	case "account_change_requires_new_connection":
+		return "refused", "account_mismatch"
+	case "rate_limited":
+		return "refused", "rate_limited"
+	case "session_limit_exceeded":
+		return "refused", "session_limit"
+	case "quota_exhausted":
+		return "", ""
+	default:
+		return "failed", "database_unavailable"
+	}
+}
+
 func (s *Server) handleAuth(st network.Stream) {
+	requestID := ""
+	if s.diagnostics != nil {
+		requestID = s.diagnostics.NewID()
+	}
+	started := time.Now()
+	emit := func(outcome, reason string) {
+		s.emitConnection(st.Conn(), "relay.authentication", outcome, reason, requestID, time.Since(started))
+	}
+
 	if st.Scope().SetService("clipp.relay-auth") != nil {
+		if s.diagnostics != nil {
+			s.diagnostics.Emit(diagnostic.Event{Event: "service.admission", Outcome: "refused", Reason: "resource_limit", Gate: "stream"})
+		}
 		_ = st.Reset()
 		return
 	}
 	if st.Scope().ReserveMemory(4096, network.ReservationPriorityAlways) != nil {
+		if s.diagnostics != nil {
+			s.diagnostics.Emit(diagnostic.Event{Event: "service.admission", Outcome: "refused", Reason: "resource_limit", Gate: "stream"})
+		}
 		_ = st.Reset()
 		return
 	}
@@ -672,12 +834,14 @@ func (s *Server) handleAuth(st network.Stream) {
 	if err == nil || errors.Is(err, errInvalidRequest) {
 		var extra [1]byte
 		if n, tailErr := st.Read(extra[:]); n != 0 || tailErr != io.EOF {
+			emit("refused", "invalid_request")
 			_ = st.Reset()
 			_ = st.Conn().Close()
 			return
 		}
 	}
 	if err != nil {
+		emit("refused", "invalid_request")
 		if errors.Is(err, errInvalidRequest) {
 			_ = writeAuth(st, map[string]any{"ok": false, "code": "invalid_request"})
 			_ = st.CloseWrite()
@@ -693,7 +857,38 @@ func (s *Server) handleAuth(st network.Stream) {
 	_ = st.SetReadDeadline(time.Now().Add(10 * time.Second))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	deadline, renew, code := s.authenticate(ctx, st.Conn(), raw)
+	wasAuthenticated := s.isAuthenticated(st.Conn())
+	deadline, renew, code, observedReason := s.authenticateObserved(ctx, st.Conn(), raw)
+	outcome, reason := authDiagnostic(code)
+	if observedReason != "" {
+		reason = observedReason
+	}
+	if code == "quota_exhausted" {
+		outcome = ""
+	}
+	if code == "temporarily_unavailable" {
+		switch reason {
+		case "deadline", "overloaded":
+			outcome = ""
+			if s.diagnostics != nil {
+				s.diagnostics.Emit(diagnostic.Event{Event: "service.admission", Outcome: "refused", Reason: reason, Gate: "session"})
+			}
+		case "draining":
+			outcome = "refused"
+		case "":
+			outcome = ""
+		}
+	}
+	if outcome != "" {
+		emit(outcome, reason)
+	}
+	if code == "" {
+		if wasAuthenticated {
+			s.emitConnection(st.Conn(), "relay.session", "success", "renewed", "", 0)
+		} else {
+			s.emitConnection(st.Conn(), "relay.session", "started", "none", "", 0)
+		}
+	}
 	if code != "" {
 		if writeAuth(st, map[string]any{"ok": false, "code": code}) != nil {
 			_ = st.Reset()

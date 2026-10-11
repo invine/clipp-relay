@@ -66,7 +66,7 @@ func (r *endpointReporter) report(n int64, proto protocol.ID, p peer.ID) {
 		}
 		cancel()
 		if err != nil {
-			s.closeAccount(active.account)
+			s.detachAccount(active.account, "reporting_failed")()
 			return
 		}
 	}
@@ -88,11 +88,15 @@ func (r *endpointReporter) TrimIdle(time.Time) {}
 // DetachAccount removes every session while the caller still holds its account
 // guard. The returned connection closes perform I/O after that guard is released.
 func (s *Server) DetachAccount(account string) func() {
+	return s.detachAccount(account, "policy_changed")
+}
+
+func (s *Server) detachAccount(account, reason string) func() {
 	s.mu.Lock()
 	connections := make([]*session, 0, len(s.byAccount[account]))
 	for v := range s.byAccount[account] {
 		connections = append(connections, v)
-		s.removeLocked(v)
+		s.endSessionLocked(v, reason)
 	}
 	s.mu.Unlock()
 	return func() {
@@ -104,5 +108,3 @@ func (s *Server) DetachAccount(account string) func() {
 
 // CloseAccount invalidates all live sessions after an account policy change.
 func (s *Server) CloseAccount(account string) { s.DetachAccount(account)() }
-
-func (s *Server) closeAccount(account string) { s.CloseAccount(account) }
