@@ -1,5 +1,10 @@
 # Relay service logging operator guide
 
+The [approved logging specification](../../.scratch/relay-service-visibility/spec.md),
+[fixed event catalog](../../.scratch/relay-service-visibility/logging-catalog.json),
+and [implementation evidence](../../.scratch/relay-service-visibility/run.md) live
+with the relay service source.
+
 The serving process writes one stream of bounded JSON diagnostic rows to stdout. Read an event as evidence of the stated server-side boundary at its timestamp. A missing row is inconclusive: rate limits, a full queue, a blocked or failed stdout writer, or process exit can discard it. Use the live readiness probe and durable business records when the decision requires current state or proof of a mutation.
 
 ## Captured local rows

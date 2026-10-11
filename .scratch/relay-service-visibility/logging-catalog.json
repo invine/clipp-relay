@@ -1,0 +1,2012 @@
+{
+  "status": "accepted logging contract, 2026-10-11",
+  "events": [
+    {
+      "event": "service.startup",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "configuration_rejected"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "journal_unavailable"
+        ],
+        [
+          "failed",
+          "resource_limit"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "control",
+      "duration_measurable": false
+    },
+    {
+      "event": "service.serving",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "listener_failed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "control",
+      "duration_measurable": false
+    },
+    {
+      "event": "service.readiness",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "not_published"
+        ],
+        [
+          "failed",
+          "publication_stale"
+        ],
+        [
+          "failed",
+          "draining"
+        ],
+        [
+          "recovered",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "control",
+      "duration_measurable": false
+    },
+    {
+      "event": "service.drain",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "deadline"
+        ],
+        [
+          "failed",
+          "forced"
+        ],
+        [
+          "started",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "control",
+      "duration_measurable": true
+    },
+    {
+      "event": "service.stopped",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "listener_failed"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "control",
+      "duration_measurable": false
+    },
+    {
+      "event": "portal.login",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "verification_failed"
+        ],
+        [
+          "refused",
+          "rate_limited"
+        ],
+        [
+          "failed",
+          "provider_unavailable"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ],
+        [
+          "started",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "portal.logout",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "portal.revoke",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "portal.delete",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "deletion_capacity"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "journal_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.approve",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.suspend",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.deny",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.reactivate",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.assign_plan",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.override_quota",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.revoke_credentials",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.plan_create",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "admin.plan_archive",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "not_authorized"
+        ],
+        [
+          "refused",
+          "csrf_rejected"
+        ],
+        [
+          "refused",
+          "origin_rejected"
+        ],
+        [
+          "refused",
+          "recent_auth_required"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "revision_conflict"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "oauth.authorize",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "account_blocked"
+        ],
+        [
+          "refused",
+          "rate_limited"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "electron",
+        "android",
+        "extension",
+        "unknown"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "oauth.consent",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "expired_credentials"
+        ],
+        [
+          "refused",
+          "account_blocked"
+        ],
+        [
+          "refused",
+          "consent_denied"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "electron",
+        "android",
+        "extension",
+        "unknown"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "oauth.code_exchange",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "expired_credentials"
+        ],
+        [
+          "refused",
+          "account_blocked"
+        ],
+        [
+          "refused",
+          "grant_limit"
+        ],
+        [
+          "refused",
+          "rate_limited"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "electron",
+        "android",
+        "extension",
+        "unknown"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "oauth.refresh",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "expired_credentials"
+        ],
+        [
+          "refused",
+          "account_blocked"
+        ],
+        [
+          "refused",
+          "replay_detected"
+        ],
+        [
+          "refused",
+          "rate_limited"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "electron",
+        "android",
+        "extension",
+        "unknown"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.discovery",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "account_blocked"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "refused",
+          "not_published"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.connection",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "overloaded"
+        ],
+        [
+          "refused",
+          "rate_limited"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "refused",
+          "resource_limit"
+        ],
+        [
+          "failed",
+          "handshake_failed"
+        ],
+        [
+          "ended",
+          "preauth_expired"
+        ],
+        [
+          "ended",
+          "connection_closed"
+        ]
+      ],
+      "transports": [
+        "tcp",
+        "wss",
+        "webrtc_direct",
+        "unknown"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.authentication",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "invalid_credentials"
+        ],
+        [
+          "refused",
+          "expired_credentials"
+        ],
+        [
+          "refused",
+          "account_blocked"
+        ],
+        [
+          "refused",
+          "session_limit"
+        ],
+        [
+          "refused",
+          "account_mismatch"
+        ],
+        [
+          "refused",
+          "rate_limited"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "quota_unavailable"
+        ]
+      ],
+      "transports": [
+        "tcp",
+        "wss",
+        "webrtc_direct",
+        "unknown"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.session",
+      "pairs": [
+        [
+          "started",
+          "none"
+        ],
+        [
+          "success",
+          "renewed"
+        ],
+        [
+          "ended",
+          "connection_closed"
+        ],
+        [
+          "ended",
+          "session_expired"
+        ],
+        [
+          "ended",
+          "policy_changed"
+        ],
+        [
+          "ended",
+          "replaced"
+        ],
+        [
+          "ended",
+          "draining"
+        ],
+        [
+          "ended",
+          "account_mismatch"
+        ],
+        [
+          "ended",
+          "reporting_failed"
+        ],
+        [
+          "ended",
+          "clock_unavailable"
+        ]
+      ],
+      "transports": [
+        "tcp",
+        "wss",
+        "webrtc_direct",
+        "unknown"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": false
+    },
+    {
+      "event": "relay.reservation",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "refused",
+          "protocol_refused"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ],
+        [
+          "success",
+          "renewed"
+        ]
+      ],
+      "transports": [
+        "unknown"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": false
+    },
+    {
+      "event": "relay.circuit",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "refused",
+          "protocol_refused"
+        ],
+        [
+          "failed",
+          "connection_failed"
+        ],
+        [
+          "started",
+          "none"
+        ],
+        [
+          "ended",
+          "none"
+        ]
+      ],
+      "transports": [
+        "unknown"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.rendezvous.v1.register",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "lease_unavailable"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.rendezvous.v1.find",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "lease_unavailable"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.rendezvous.v1.unregister",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "lease_unavailable"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.rendezvous.v2.register",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "lease_unavailable"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.rendezvous.v2.find",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "lease_unavailable"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.rendezvous.v2.unregister",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "authentication_required"
+        ],
+        [
+          "refused",
+          "lease_unavailable"
+        ],
+        [
+          "refused",
+          "safety_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "failed",
+          "internal_failure"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "quota.funding",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "quota_exhausted"
+        ],
+        [
+          "refused",
+          "account_blocked"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "clock_unavailable"
+        ],
+        [
+          "uncertain",
+          "allocation_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "quota.credit_retired",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "success",
+          "expired"
+        ],
+        [
+          "success",
+          "discarded"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": false
+    },
+    {
+      "event": "quota.reporting",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "reporting_failed"
+        ],
+        [
+          "failed",
+          "clock_unavailable"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": true
+    },
+    {
+      "event": "dependency.database",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "unavailable"
+        ],
+        [
+          "failed",
+          "deadline"
+        ],
+        [
+          "failed",
+          "invalid_response"
+        ],
+        [
+          "failed",
+          "canceled"
+        ],
+        [
+          "recovered",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": true
+    },
+    {
+      "event": "dependency.google_token",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "unavailable"
+        ],
+        [
+          "failed",
+          "deadline"
+        ],
+        [
+          "failed",
+          "invalid_response"
+        ],
+        [
+          "failed",
+          "canceled"
+        ],
+        [
+          "recovered",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": true
+    },
+    {
+      "event": "dependency.google_jwks",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "unavailable"
+        ],
+        [
+          "failed",
+          "deadline"
+        ],
+        [
+          "failed",
+          "invalid_response"
+        ],
+        [
+          "failed",
+          "canceled"
+        ],
+        [
+          "recovered",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": true
+    },
+    {
+      "event": "dependency.publication_api",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "unavailable"
+        ],
+        [
+          "failed",
+          "deadline"
+        ],
+        [
+          "failed",
+          "invalid_response"
+        ],
+        [
+          "failed",
+          "canceled"
+        ],
+        [
+          "recovered",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": true
+    },
+    {
+      "event": "dependency.deletion_journal",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "unavailable"
+        ],
+        [
+          "failed",
+          "deadline"
+        ],
+        [
+          "failed",
+          "invalid_response"
+        ],
+        [
+          "failed",
+          "canceled"
+        ],
+        [
+          "recovered",
+          "none"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": true
+    },
+    {
+      "event": "maintenance.cleanup",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "deadline"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": true
+    },
+    {
+      "event": "maintenance.deletion",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "failed",
+          "database_unavailable"
+        ],
+        [
+          "failed",
+          "journal_unavailable"
+        ],
+        [
+          "failed",
+          "deadline"
+        ],
+        [
+          "started",
+          "none"
+        ],
+        [
+          "uncertain",
+          "commit_unconfirmed"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "http.request_refused",
+      "pairs": [
+        [
+          "refused",
+          "invalid_route"
+        ],
+        [
+          "refused",
+          "invalid_method"
+        ],
+        [
+          "refused",
+          "invalid_request"
+        ],
+        [
+          "refused",
+          "overloaded"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "failure_only",
+      "duration_measurable": false
+    },
+    {
+      "event": "service.admission",
+      "pairs": [
+        [
+          "refused",
+          "overloaded"
+        ],
+        [
+          "refused",
+          "resource_limit"
+        ],
+        [
+          "refused",
+          "draining"
+        ],
+        [
+          "refused",
+          "deadline"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "duration_measurable": false,
+      "log": "failure_only"
+    }
+  ],
+  "limits": {
+    "activity_rate": 20,
+    "activity_burst": 40,
+    "control_rate": 4,
+    "control_burst": 8,
+    "key_rate": 1,
+    "key_burst": 5,
+    "queue_records": 256,
+    "row_bytes": 2048,
+    "summary_after_seconds": 10,
+    "sample_every_seconds": 60,
+    "sample_deadline_seconds": 5,
+    "stale_after_seconds": 180
+  },
+  "signals": [
+    "cleanup",
+    "pending_deletion",
+    "quota_clock",
+    "process_cpu",
+    "process_memory",
+    "recovery",
+    "full_backup",
+    "repository_retention",
+    "certificate",
+    "database_resources"
+  ],
+  "states": [
+    "available",
+    "unknown",
+    "unavailable",
+    "failed",
+    "stale"
+  ],
+  "log_tuple_count": 499,
+  "scope": "structured logging only; metric endpoints and collectors excluded",
+  "control_events": [
+    {
+      "event": "log.suppressed",
+      "pairs": [
+        [
+          "observed",
+          "diagnostic_loss"
+        ]
+      ],
+      "fields": [
+        "rate_limited_count",
+        "queue_full_count",
+        "window_seconds"
+      ]
+    },
+    {
+      "event": "observation.state",
+      "pairs": [
+        [
+          "observed",
+          "none"
+        ],
+        [
+          "recovered",
+          "none"
+        ],
+        [
+          "failed",
+          "observation_failed"
+        ],
+        [
+          "failed",
+          "observation_stale"
+        ],
+        [
+          "observed",
+          "producer_unavailable"
+        ],
+        [
+          "observed",
+          "observation_unknown"
+        ]
+      ],
+      "signals": [
+        "cleanup",
+        "pending_deletion",
+        "quota_clock",
+        "process_cpu",
+        "process_memory",
+        "recovery",
+        "full_backup",
+        "repository_retention",
+        "certificate",
+        "database_resources"
+      ],
+      "states": [
+        "available",
+        "unknown",
+        "unavailable",
+        "failed",
+        "stale"
+      ]
+    },
+    {
+      "event": "observation.threshold",
+      "pairs": [
+        [
+          "observed",
+          "warning"
+        ],
+        [
+          "observed",
+          "critical"
+        ],
+        [
+          "observed",
+          "breach"
+        ],
+        [
+          "recovered",
+          "none"
+        ]
+      ],
+      "signals": [
+        "cleanup",
+        "pending_deletion"
+      ]
+    }
+  ]
+}
