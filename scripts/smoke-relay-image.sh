@@ -28,8 +28,15 @@ if output=$(docker run --rm --read-only --network none --cap-drop ALL \
 else
   status=$?
 fi
-if [[ "$status" != 1 || "$output" != *'configuration rejected'* ]]; then
-  echo "image failed wrong: exit=$status output=$output" >&2
+if [[ "$status" != 1 ]] || ! jq -e -s '
+    length == 1 and
+    .[0].event == "service.startup" and
+    .[0].level == "ERROR" and
+    .[0].msg == "service startup" and
+    .[0].outcome == "failed" and
+    .[0].reason == "configuration_rejected"
+  ' >/dev/null 2>&1 <<< "$output"; then
+  echo "image failed its missing-config smoke check: exit=$status" >&2
   exit 1
 fi
 
