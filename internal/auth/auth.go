@@ -25,6 +25,7 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -47,11 +48,18 @@ func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, pgx.Tx
 	s.commitAccount = commit
 }
 
+// SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
+// Production leaves this unset.
+func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
+	s.commitCredential = commit
+}
+
 func Google() Provider {
 	return Provider{AuthorizationURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", KeysURL: "https://www.googleapis.com/oauth2/v3/certs"}
 }
 
 type Server struct {
+	diagnostics                        *diagnostic.Logger
 	Pool                               *pgxpool.Pool
 	db                                 *database.Runtime
 	Origin, ClientID, ClientSecret     string
@@ -81,6 +89,7 @@ type Server struct {
 	beforeProfileRead                  func()
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
+	commitCredential                   func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
@@ -400,7 +409,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/accounts/{id}", s.adminAccount)
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.observedRequest(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) }))
+	})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.loginFlow(w, r, nil)
@@ -410,6 +421,7 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 	case s.providerSlots <- struct{}{}:
 		defer func() { <-s.providerSlots }()
 	default:
+		markDiagnostic(r, "refused", "rate_limited")
 		fail(w, 503)
 		return
 	}
@@ -448,6 +460,7 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 	}
 	if len(s.flows)+len(s.consents) >= 1024 {
 		s.mu.Unlock()
+		markDiagnostic(r, "refused", "rate_limited")
 		fail(w, 503)
 		return
 	}
@@ -483,6 +496,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	case s.providerSlots <- struct{}{}:
 		defer func() { <-s.providerSlots }()
 	default:
+		markDiagnostic(r, "refused", "rate_limited")
 		fail(w, 503)
 		return
 	}
@@ -501,11 +515,19 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	var claimed string
 	e = s.db.QueryRow(ctx, `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND nonce_digest=$3 AND pepper_version=$4 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING id`, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "browser-binding", bind.Value), s.digest(s.CurrentPepper, "google-nonce", f.nonce), s.CurrentPepper).Scan(&claimed)
 	if e != nil {
+		if e != pgx.ErrNoRows {
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 400)
 		return
 	}
 	claims, e := s.exchange(ctx, code, f.nonce)
 	if e != nil {
+		if errors.Is(e, errProviderUnavailable) {
+			markDiagnostic(r, "failed", "provider_unavailable")
+		} else {
+			markDiagnostic(r, "refused", "verification_failed")
+		}
 		fail(w, 401)
 		return
 	}
@@ -607,9 +629,11 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e = tx.Commit(ctx); e != nil {
+		// The portal catalog has no uncertain pair; never claim issuance here.
 		fail(w, 503)
 		return
 	}
+	markDiagnostic(r, "success", "none")
 	cookie(w, sessionCookie, credential, 0)
 	if f.intent != nil {
 		s.presentConsent(w, r, accountID, credential, *f.intent)
@@ -630,6 +654,8 @@ type identity struct {
 	IssuedAt      int64   `json:"iat"`
 }
 
+var errProviderUnavailable = errors.New("provider unavailable")
+
 func (s *Server) exchange(ctx context.Context, code, nonce string) (identity, error) {
 	values := url.Values{"code": {code}, "client_id": {s.ClientID}, "client_secret": {s.ClientSecret}, "grant_type": {"authorization_code"}, "redirect_uri": {s.Origin + "/auth/callback"}}
 	req, e := http.NewRequestWithContext(ctx, "POST", s.provider.TokenURL, strings.NewReader(values.Encode()))
@@ -639,21 +665,21 @@ func (s *Server) exchange(ctx context.Context, code, nonce string) (identity, er
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, e := s.client.Do(req)
 	if e != nil {
-		return identity{}, e
+		return identity{}, errProviderUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return identity{}, errors.New("provider unavailable")
+		return identity{}, errProviderUnavailable
 	}
 	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
 	if e != nil || len(body) > 256<<10 {
-		return identity{}, errors.New("provider response oversized")
+		return identity{}, errProviderUnavailable
 	}
 	var token struct {
 		IDToken string `json:"id_token"`
 	}
 	if json.Unmarshal(body, &token) != nil || len(token.IDToken) > 256<<10 {
-		return identity{}, errors.New("provider response invalid")
+		return identity{}, errProviderUnavailable
 	}
 	return s.verify(ctx, token.IDToken, nonce)
 }
@@ -721,15 +747,15 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	resp, e := s.client.Do(req)
 	s.lastKeyFetch = now
 	if e != nil {
-		return nil, e
+		return nil, errProviderUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, errors.New("keys unavailable")
+		return nil, errProviderUnavailable
 	}
 	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
 	if e != nil || len(body) > 256<<10 {
-		return nil, errors.New("keys oversized")
+		return nil, errProviderUnavailable
 	}
 	var jwks struct {
 		Keys []struct {

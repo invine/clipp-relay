@@ -95,6 +95,7 @@ func run() int {
 	srv := service.New()
 	db := database.NewRuntime(pool)
 	portal := auth.NewWithRuntime(db, c, material, auth.Google())
+	portal.SetDiagnostics(logger)
 	if err := portal.ValidatePepperCoverage(startup); err != nil {
 		if !errors.Is(err, auth.ErrRetainedPepperUnavailable) {
 			return fail("configuration_rejected")
