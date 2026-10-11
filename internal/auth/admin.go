@@ -65,16 +65,19 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 	id, version, _, _, csrf, err := s.session(r)
 	if err != nil {
 		if errors.Is(err, errInvalidSession) {
+			markDiagnostic(r, "refused", "not_authorized")
 			fail(w, 401)
 		} else if errors.Is(err, errRateLimit) {
 			fail(w, 429)
 		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
 			fail(w, 503)
 		}
 		return actor, false
 	}
 	policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile)
 	if err != nil {
+		markDiagnostic(r, "refused", "not_authorized")
 		w.Header().Set("X-Admin-Policy-Revision", "0")
 		fail(w, 403)
 		return actor, false
@@ -89,28 +92,34 @@ FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id
 WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation
 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, id, s.sessionDigest(r, version), version).Scan(&email, &verified, &hd, &authenticated)
 	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return actor, false
 	}
 	if !policy.Allows(email, verified, deref(hd)) {
+		markDiagnostic(r, "refused", "not_authorized")
 		fail(w, 403)
 		return actor, false
 	}
 	if mutation {
 		if time.Since(authenticated) > 10*time.Minute || authenticated.After(time.Now().Add(time.Minute)) {
+			markDiagnostic(r, "refused", "recent_auth_required")
 			fail(w, 401)
 			return actor, false
 		}
 		if r.Header.Get("Origin") != s.Origin {
+			markDiagnostic(r, "refused", "origin_rejected")
 			fail(w, 403)
 			return actor, false
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 		if r.ParseForm() != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+			markDiagnostic(r, "refused", "csrf_rejected")
 			fail(w, 403)
 			return actor, false
 		}
 		if !reasonOK(r.PostForm.Get("reason")) {
+			markDiagnostic(r, "refused", "invalid_request")
 			fail(w, 400)
 			return actor, false
 		}
@@ -377,12 +386,28 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	expected, valid := revision(r.PostForm.Get("revision"))
 	action := r.PostForm.Get("action")
 	spec, known := accountActions[action]
+	switch action {
+	case "approve", "suspend", "deny", "reactivate":
+		markAction(r, "admin."+action)
+	case "assign":
+		markAction(r, "admin.assign_plan")
+	case "override":
+		markAction(r, "admin.override_quota")
+	case "revoke":
+		markAction(r, "admin.revoke_credentials")
+	case "review":
+		// The fixed catalog has no review action; successful review is quiet.
+	default:
+		markAction(r, "http.request_refused")
+	}
 	if !idPattern.MatchString(target) || !valid || !known {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
 	plan := r.PostForm.Get("plan_id")
 	if spec.planRequired && !idPattern.MatchString(plan) {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
@@ -422,6 +447,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 			closeConnections()
 		}
 		if uncertain {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			uncertainResponse(w)
 		} else {
 			http.Redirect(w, r, "/admin?selected="+url.QueryEscape(target), http.StatusSeeOther)
@@ -469,10 +495,12 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		return
 	}
 	if deleting || actual != expected {
+		markDiagnostic(r, "refused", "revision_conflict")
 		fail(w, 409)
 		return
 	}
 	if !spec.states[status] {
+		markDiagnostic(r, "refused", "revision_conflict")
 		fail(w, 409)
 		return
 	}
@@ -489,6 +517,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		var archived bool
 		e = tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL,weekly_bytes,sessions FROM public.quota_plans WHERE id=$1 FOR UPDATE`, plan).Scan(&archived, &weeklyBytes, &sessionLimit)
 		if e == pgx.ErrNoRows || archived {
+			markDiagnostic(r, "refused", "revision_conflict")
 			fail(w, 409)
 			return
 		}
@@ -615,12 +644,14 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 	bytes, e1 := parseQuotaBytes(r.PostForm.Get("weekly_bytes"), r.PostForm.Get("weekly_bytes_unit"))
 	sessions, e2 := strconv.ParseInt(r.PostForm.Get("sessions"), 10, 32)
 	if name == "" || len(name) > 120 || e1 != nil || e2 != nil || bytes < 0 || sessions < 0 {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
 	id := r.PostForm.Get("operation_id")
 	proof := r.PostForm.Get("operation_proof")
 	if !idPattern.MatchString(id) || subtle.ConstantTimeCompare([]byte(proof), []byte(s.planOperationProof(r, actor, id))) != 1 {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 403)
 		return
 	}
@@ -649,6 +680,7 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if subtle.ConstantTimeCompare(stored, digest[:]) != 1 {
+			markDiagnostic(r, "refused", "revision_conflict")
 			fail(w, 409)
 			return
 		}
@@ -682,6 +714,7 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		committed := s.planCreateCommitted(recoveryCtx, id, digest)
 		cancel()
 		if !committed {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			planRetry(w, r, actor, name, bytes, sessions)
 			return
 		}
@@ -690,6 +723,7 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
+	markAction(r, "admin.plan_archive")
 	actor, ok := s.administrator(w, r, true)
 	if !ok {
 		return
@@ -697,6 +731,7 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	expected, valid := revision(r.PostForm.Get("revision"))
 	if !idPattern.MatchString(id) || !valid {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
@@ -723,6 +758,7 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if actual != expected || archived {
+		markDiagnostic(r, "refused", "revision_conflict")
 		fail(w, 409)
 		return
 	}
@@ -737,7 +773,12 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,plan_id,reason,actor_email) VALUES($1,clock_timestamp(),'plan_archived',$2,$3,$4)`, auditID, id, r.PostForm.Get("reason"), actor.email)
-	if e != nil || tx.Commit(ctx) != nil {
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	if tx.Commit(ctx) != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
 	}

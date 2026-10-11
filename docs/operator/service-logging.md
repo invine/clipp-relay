@@ -38,6 +38,28 @@ Illustrative rows from separate HTTP requests:
 
 `oauth.authorize/success` means a validated authorization request reached the consent page or sign-in redirect. `oauth.consent/success` means an authorization code committed, and `oauth.code_exchange/success` or `oauth.refresh/success` means the credentials committed before the HTTP response was written. `refused/expired_credentials`, `refused/grant_limit`, and `refused/replay_detected` separate common policy cases; `uncertain/commit_unconfirmed` means the server could not prove the transaction result. A replay refusal is logged after its grant-termination transaction commits. None of these rows proves client receipt or Relay Authentication. Request IDs are independent random diagnostics, never OAuth state, a cookie, or a credential. Unknown routes and wrong methods emit `http.request_refused` with `invalid_route` or `invalid_method`; raw URL, query, header and body values are excluded. Routine successful portal pages and assets emit no activity row.
 
+## Owner and administrator actions
+
+Illustrative rows from separate requests and one background deletion worker:
+
+```json
+{"time":"2026-10-11T10:30:00Z","level":"INFO","msg":"portal logout","event":"portal.logout","outcome":"success","reason":"none","request_id":"0123456789abcdef0123456789abcdef","duration_ms":8}
+{"time":"2026-10-11T10:31:00Z","level":"INFO","msg":"portal revoke","event":"portal.revoke","outcome":"refused","reason":"csrf_rejected","request_id":"11111111111111111111111111111111","duration_ms":3}
+{"time":"2026-10-11T10:32:00Z","level":"WARN","msg":"portal revoke","event":"portal.revoke","outcome":"uncertain","reason":"commit_unconfirmed","request_id":"22222222222222222222222222222222","duration_ms":12}
+{"time":"2026-10-11T10:33:00Z","level":"INFO","msg":"admin approve","event":"admin.approve","outcome":"refused","reason":"revision_conflict","request_id":"33333333333333333333333333333333","duration_ms":6}
+{"time":"2026-10-11T10:34:00Z","level":"INFO","msg":"admin plan_create","event":"admin.plan_create","outcome":"success","reason":"none","request_id":"44444444444444444444444444444444","duration_ms":16}
+{"time":"2026-10-11T10:35:00Z","level":"INFO","msg":"portal delete","event":"portal.delete","outcome":"success","reason":"none","request_id":"55555555555555555555555555555555","duration_ms":20}
+{"time":"2026-10-11T10:35:05Z","level":"INFO","msg":"maintenance deletion","event":"maintenance.deletion","outcome":"started","reason":"none"}
+{"time":"2026-10-11T10:35:06Z","level":"WARN","msg":"maintenance deletion","event":"maintenance.deletion","outcome":"failed","reason":"journal_unavailable","duration_ms":1000}
+{"time":"2026-10-11T10:35:07Z","level":"INFO","msg":"maintenance deletion","event":"maintenance.deletion","outcome":"success","reason":"none","duration_ms":34}
+```
+
+`portal.logout/success` means only that the Portal Session delete statement returned success; it does not revoke Login Grants or Relay Sessions. `portal.revoke/success` follows the Account-wide Revocation transaction and its local session effects. A failed transaction acknowledgement is `uncertain/commit_unconfirmed`, even if the database may have committed; conservative account fences and session closure still apply. The logger never turns a lost acknowledgement into success without a separate proof. Origin, CSRF, recent-auth, administrator allowlist and account revision checks remain the authority and have fixed refusal categories. `admin.plan_create/success` also covers an idempotent retry or a lost acknowledgement for which the stored operation and audit were independently proven. A changed replay is `refused/revision_conflict`.
+
+`portal.delete/success` means the owner deletion request committed its admission and returned HTTP 202. It does **not** mean erasure has completed. The HTTP status endpoint reports pending as 202 and completed as 200; it produces no routine page activity row. `maintenance.deletion/started` identifies one due worker attempt, and `failed/journal_unavailable` means that attempt could not prove a journal step and will be retried under the durable backoff. A later attempt may succeed. `uncertain/commit_unconfirmed` means finalization could not be proven; it does not claim rollback. `maintenance.deletion/success` appears only after journal proof and final database commit or independent finalization proof. Worker rows have no request ID because they are not the owner's HTTP request. These rows are bounded diagnostics, not a durable audit history or proof of browser receipt. Administrator review has no pair in the fixed catalog and therefore emits no invented event. No row carries actor or target identity, email, plan name, form input, operation proof, deletion credential or journal key.
+
+For local proof, provision the disposable PostgreSQL 18 TLS/SCRAM fixture described in [real database checks](../../README.md#local-real-database-check) and run `CLIPP_TEST_SERVING_CONFIG=<fixture-serving-config> go test -count=1 ./internal/auth -run 'Test(OwnerAndAdminMutationDiagnosticsFollowHTTPCommitProof|OwnerDeletionLogsAcceptanceAndProvenCompletion|AdministratorAccountDiagnosticsRespectRevisionAndCommit|AdministratorPlanDiagnosticsDistinguishProofFromUncertainty)$'`. `go test` without the serving config skips durable tests and is not equivalent evidence. Routine and race checks remain those in [relay verification](../verification.md). Local evidence does not establish deployed behavior.
+
 ## Relay connection and authentication rows
 
 These examples describe one physical TCP connection. The IDs are generated by the relay solely for diagnostics. They are unrelated to a Peer ID, Relay Account, token, or client identity.

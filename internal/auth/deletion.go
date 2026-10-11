@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
 )
@@ -59,6 +60,8 @@ type deletionEvent struct {
 type uncertainDeletion struct{ operationID string }
 
 var errJournalTargetUncommitted = errors.New("journal target event not committed")
+var errDeletionJournalDiagnostic = errors.New("deletion journal failed")
+var errDeletionFinalizationUnconfirmed = errors.New("deletion finalization uncertain")
 
 // SetDeletionJournal requires an operator-supplied repository identity and
 // coverage floor. A nil/unqualified journal leaves deletion unavailable.
@@ -79,30 +82,45 @@ func (s *Server) qualifiedHead(h JournalHead) bool {
 }
 
 func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
-	if s.deletionJournal == nil || s.deletionRepository == "" || r.Header.Get("Origin") != s.Origin {
+	if r.Header.Get("Origin") != s.Origin {
+		markDiagnostic(r, "refused", "origin_rejected")
+		fail(w, 503)
+		return
+	}
+	if s.deletionJournal == nil || s.deletionRepository == "" {
+		markDiagnostic(r, "failed", "journal_unavailable")
 		fail(w, 503)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 400)
 		return
 	}
 	id, version, _, _, csrf, e := s.session(r)
 	if e != nil {
+		markDiagnostic(r, "refused", "invalid_credentials")
 		fail(w, 401)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 403)
 		return
 	}
 	if _, _, err := s.readHead(r.Context()); err != nil {
+		markDiagnostic(r, "failed", "journal_unavailable")
 		fail(w, 503)
 		return
 	}
 	var subject string
-	if s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, id).Scan(&subject) != nil {
+	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, id).Scan(&subject); err != nil {
+		if err == pgx.ErrNoRows {
+			markDiagnostic(r, "refused", "invalid_credentials")
+		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 409)
 		return
 	}
@@ -131,7 +149,12 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var recent bool
-			if tx.QueryRow(ctx, `SELECT $1::timestamptz >= clock_timestamp()-interval '10 minutes' AND $1::timestamptz <= clock_timestamp()`, authenticatedAt).Scan(&recent) != nil || !recent {
+			if err := tx.QueryRow(ctx, `SELECT $1::timestamptz >= clock_timestamp()-interval '10 minutes' AND $1::timestamptz <= clock_timestamp()`, authenticatedAt).Scan(&recent); err != nil || !recent {
+				if err != nil {
+					markDiagnostic(r, "failed", "database_unavailable")
+				} else {
+					markDiagnostic(r, "refused", "recent_auth_required")
+				}
 				fail(w, 403)
 				return
 			}
@@ -141,6 +164,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if pending >= 1024 {
+				markDiagnostic(r, "refused", "deletion_capacity")
 				fail(w, 503)
 				return
 			}
@@ -189,6 +213,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	cookie(w, sessionCookie, "", -1)
 	if uncertain {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		uncertainResponse(w)
 		return
 	}
@@ -431,10 +456,31 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 		return nil
 	}
 	if err != nil {
+		if s.diagnostics != nil {
+			s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.deletion", Outcome: "failed", Reason: "database_unavailable"})
+		}
 		return err
+	}
+	started := time.Now()
+	if s.diagnostics != nil {
+		s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.deletion", Outcome: "started", Reason: "none"})
 	}
 	err = s.reconcileDeletion(ctx, x)
 	if err != nil {
+		if s.diagnostics != nil {
+			outcome, reason := "", ""
+			switch {
+			case errors.Is(err, errDeletionFinalizationUnconfirmed):
+				outcome, reason = "uncertain", "commit_unconfirmed"
+			case errors.Is(err, context.DeadlineExceeded):
+				outcome, reason = "failed", "deadline"
+			case errors.Is(err, errDeletionJournalDiagnostic):
+				outcome, reason = "failed", "journal_unavailable"
+			}
+			if outcome != "" {
+				s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.deletion", Outcome: outcome, Reason: reason, Duration: time.Since(started)})
+			}
+		}
 		s.deletionRetried.Add(1)
 		// Durable backoff is fair across pending operations and cannot be bypassed
 		// by manual calls to this same entry point.
@@ -443,6 +489,11 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 		stop()
 	} else {
 		s.deletionCompleted.Add(1)
+		// This is the proven finalization boundary, including a lost commit
+		// acknowledgement that finalizeDeletion independently verified.
+		if s.diagnostics != nil {
+			s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.deletion", Outcome: "success", Reason: "none", Duration: time.Since(started)})
+		}
 	}
 	return err
 }
@@ -478,7 +529,7 @@ func retrySeconds(id string, attempt int) float64 {
 func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error {
 	head, etag, err := s.readHead(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
 	}
 	event, data, err := s.eventFor(ctx, x, head)
 	if err != nil {
@@ -488,12 +539,12 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 		err = s.verifyCommittedChain(ctx, head, event.Sequence, event.Hash)
 		if err == nil {
 			if err = s.proveEvent(ctx, fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID), data); err != nil {
-				return err
+				return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
 			}
 			return s.finalizeDeletion(ctx, x)
 		}
 		if !errors.Is(err, errJournalTargetUncommitted) {
-			return err
+			return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
 		}
 		event, data, err = s.rebaseDeletionEvent(ctx, x, head)
 		if err != nil {
@@ -501,14 +552,14 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 		}
 	}
 	if head.Sequence != event.Sequence-1 || head.Hash != event.PreviousHash || (x.Generation != nil && head.MaintenanceGeneration != *x.Generation) {
-		return errors.New("journal chain or maintenance generation changed")
+		return fmt.Errorf("%w: journal chain or maintenance generation changed", errDeletionJournalDiagnostic)
 	}
 	key := fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID)
 	bounded, stop := context.WithTimeout(ctx, 5*time.Second)
 	_ = s.deletionJournal.CreateEvent(bounded, key, data)
 	stop()
 	if err = s.proveEvent(ctx, key, data); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
 	}
 	next := head
 	next.Sequence = event.Sequence
@@ -519,9 +570,9 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 	actual, _, readErr := s.readHead(ctx)
 	if readErr != nil || actual.Sequence != next.Sequence || actual.Hash != next.Hash || actual.MaintenanceGeneration != next.MaintenanceGeneration || actual.RepositoryID != next.RepositoryID || actual.CoverageFloor != next.CoverageFloor {
 		if replaceErr != nil {
-			return errors.New("journal head acknowledgement unresolved")
+			return fmt.Errorf("%w: journal head acknowledgement unresolved", errDeletionJournalDiagnostic)
 		}
-		return errors.New("journal head proof failed")
+		return fmt.Errorf("%w: journal head proof failed", errDeletionJournalDiagnostic)
 	}
 	return s.finalizeDeletion(ctx, x)
 }
@@ -593,7 +644,7 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	if checkErr == nil && complete {
 		return nil
 	}
-	return errors.New("deletion finalization uncertain")
+	return errDeletionFinalizationUnconfirmed
 }
 
 // importRetainedUsage runs inside the fresh Pending account's creation

@@ -996,11 +996,13 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
+		markDiagnostic(r, "refused", "origin_rejected")
 		fail(w, 403)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 400)
 		return
 	}
@@ -1010,10 +1012,16 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e != nil && !errors.Is(e, errInvalidSession) {
+		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return
 	}
 	if e != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		if e != nil {
+			markDiagnostic(r, "refused", "invalid_credentials")
+		} else {
+			markDiagnostic(r, "refused", "csrf_rejected")
+		}
 		fail(w, 403)
 		return
 	}
@@ -1021,6 +1029,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	digest := s.digest(version, "portal-session", c.Value)
 	_, e = s.db.Exec(r.Context(), `DELETE FROM public.portal_sessions WHERE credential_digest=$1`, digest)
 	if e != nil {
+		// The single-statement commit acknowledgement does not prove rollback.
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
 	}
@@ -1030,20 +1040,28 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
+		markDiagnostic(r, "refused", "origin_rejected")
 		fail(w, 403)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 400)
 		return
 	}
 	id, version, _, _, csrf, err := s.session(r)
 	if err != nil {
+		if errors.Is(err, errInvalidSession) {
+			markDiagnostic(r, "refused", "invalid_credentials")
+		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 401)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 403)
 		return
 	}
@@ -1116,6 +1134,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		}
 		cookie(w, sessionCookie, "", -1)
 		if uncertain {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			uncertainResponse(w)
 		} else {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
