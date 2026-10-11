@@ -74,7 +74,6 @@ func TestSharedHTTPActivityAndShutdownIgnoreBlockedOrFailedOutput(t *testing.T) 
 					t.Fatal("writer did not block")
 				}
 			}
-			start := time.Now()
 			var wg sync.WaitGroup
 			for range 100 {
 				wg.Add(1)
@@ -89,11 +88,26 @@ func TestSharedHTTPActivityAndShutdownIgnoreBlockedOrFailedOutput(t *testing.T) 
 					}
 				}()
 			}
-			wg.Wait()
-			app.BeginDrain()
-			log.Close()
-			if elapsed := time.Since(start); elapsed > 2*time.Second {
-				t.Fatalf("HTTP activity or shutdown waited for diagnostics: %s", elapsed)
+			completed := make(chan struct{})
+			go func() { wg.Wait(); close(completed) }()
+			select {
+			case <-completed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("public HTTP activity waited for diagnostics")
+			}
+			drained := make(chan struct{})
+			go func() { app.BeginDrain(); close(drained) }()
+			select {
+			case <-drained:
+			case <-time.After(2 * time.Second):
+				t.Fatal("drain waited for diagnostics")
+			}
+			closed := make(chan struct{})
+			go func() { log.Close(); close(closed) }()
+			select {
+			case <-closed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("logger shutdown waited for output")
 			}
 		})
 	}
