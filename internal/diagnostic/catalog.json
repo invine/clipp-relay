@@ -1236,7 +1236,7 @@
         "none"
       ],
       "log": "activity",
-      "duration_measurable": false
+      "duration_measurable": true
     },
     {
       "event": "relay.rendezvous.v1.register",

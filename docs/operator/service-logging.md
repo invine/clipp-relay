@@ -55,3 +55,33 @@ A connection row means a Noise-authenticated physical connection was admitted; i
 Relay Session ends distinguish `connection_closed`, `session_expired`, `replaced`, `policy_changed`, `reporting_failed`, and `draining`. The current accounting error contract does not distinguish clock failure from other temporary reporting failures, so this slice uses `reporting_failed` rather than asserting `clock_unavailable`. Handshake failures rejected before a libp2p connection callback have no relay-side producer here. A server-side authentication success proves neither a reservation nor a circuit nor client receipt. The fixed shared rate limits can suppress individual rows; `log.suppressed` is a best-effort aggregate with no identity list. Quiet periods emit no heartbeat.
 
 Focused local checks for this slice: `go test -count=1 ./internal/relay -run 'Test(RelayAuthDiagnosticJourney|PolicyCloseEmitsSessionEndWithoutIdentity|RelaySessionExpiryIsDistinctFromDisconnect|RelayAuthRefusalIsBoundedAndPrivate|PreauthenticationExpiresWithoutRelaySession|MalformedAuthFrameDoesNotLeakPayload|DrainEndsRelaySessionWithDrainReason|QuotaReporterClosesSessionsWithReportingReason|QuotaExhaustionKeepsAuthenticationReasonHonest|PhysicalTransportDiagnosticIDsNeverCarryAcrossConnections|ClientDisconnectDuringDrainKeepsConnectionReason)$'`. The complete relay suite, routine verification and race verification provide broader regression evidence. These local checks do not establish deployed behavior.
+
+## Reservation, circuit and Rendezvous rows
+
+```json
+{"time":"2026-10-11T10:23:00Z","level":"INFO","msg":"relay authentication","event":"relay.authentication","outcome":"success","reason":"none","request_id":"19df8c2080e2a813aeb2ed99e321b3c1","session_id":"8b754e3d75693c1f218dce2fc355671a","transport":"tcp","duration_ms":4}
+{"time":"2026-10-11T10:23:01Z","level":"INFO","msg":"relay reservation","event":"relay.reservation","outcome":"refused","reason":"draining","request_id":"98e1147caaf8ba28e9564986b12c7d2a","session_id":"8b754e3d75693c1f218dce2fc355671a","transport":"unknown"}
+{"time":"2026-10-11T10:24:00Z","level":"INFO","msg":"relay reservation","event":"relay.reservation","outcome":"success","reason":"none","transport":"unknown"}
+{"time":"2026-10-11T10:25:00Z","level":"INFO","msg":"relay reservation","event":"relay.reservation","outcome":"success","reason":"renewed","transport":"unknown"}
+```
+
+Authentication success does not imply a reservation. The refused row above came from a protected HOP stream on the same physical connection, so it has connection and request IDs. The stock reservation callbacks for new and renewed reservations have no physical connection or request association; their `transport` is `unknown` and they omit both IDs. A stock success callback means the relay allowed the reservation; it does not prove the client received its response. A malformed or unreadable denied HOP request has no truthful RESERVE/CONNECT label and produces no operation row.
+
+```json
+{"time":"2026-10-11T10:26:00Z","level":"INFO","msg":"relay circuit","event":"relay.circuit","outcome":"started","reason":"none","transport":"unknown"}
+{"time":"2026-10-11T10:26:00Z","level":"INFO","msg":"relay circuit","event":"relay.circuit","outcome":"success","reason":"none","transport":"unknown"}
+{"time":"2026-10-11T10:26:07Z","level":"INFO","msg":"relay circuit","event":"relay.circuit","outcome":"ended","reason":"none","transport":"unknown","duration_ms":7000}
+```
+
+Stock `started` means circuit capacity was allocated; `success` means the stock CONNECT handler returned OK. `ended` uses the stock callback's measured circuit lifetime. These aggregate callbacks cannot be joined to a reservation, Relay Session, transport, Peer ID or specific HOP request. They do not show bytes, payload, Direct Connection success or Clip delivery. Resource limit and protocol refusals are separate fixed reasons; a failed STOP setup is `failed/connection_failed`. A close after setup failure can still have a measured lifetime.
+
+```json
+{"time":"2026-10-11T10:27:00Z","level":"INFO","msg":"relay rendezvous v2 register","event":"relay.rendezvous.v2.register","outcome":"refused","reason":"lease_unavailable","request_id":"43658814e868ae379956c3d3e53e5400","session_id":"8b754e3d75693c1f218dce2fc355671a","duration_ms":1}
+{"time":"2026-10-11T10:27:02Z","level":"INFO","msg":"relay rendezvous v2 register","event":"relay.rendezvous.v2.register","outcome":"success","reason":"none","request_id":"096b2b41eb6c39897ea093f6b9f6df22","session_id":"8b754e3d75693c1f218dce2fc355671a","duration_ms":1}
+{"time":"2026-10-11T10:27:03Z","level":"INFO","msg":"relay rendezvous v1 find","event":"relay.rendezvous.v1.find","outcome":"success","reason":"none","request_id":"f52bbaed7182434a917eb4f72d2ebd25","session_id":"730217c0b963dc4c42b3c8392d575455","duration_ms":1}
+{"time":"2026-10-11T10:27:04Z","level":"INFO","msg":"relay rendezvous v2 find","event":"relay.rendezvous.v2.find","outcome":"refused","reason":"lease_unavailable","request_id":"9581afec6d0bf5fe6bd45f25bb0bd83e","session_id":"730217c0b963dc4c42b3c8392d575455","duration_ms":1}
+```
+
+The version is the actual protocol on that stream. A `find` miss is logged as `refused/lease_unavailable` even though the compatibility wire response is `ok:true` with no record. `register/lease_unavailable` means the current connection lacked a live stock reservation. No row includes the looked-up Peer ID, Signed Peer Record, address, topic or response body. The outcome is observed after server processing and does not assert client receipt. A request that fails before a valid action can be identified has no truthful version-specific operation row. Shared output limits can suppress repeated rows.
+
+Focused local checks: `go test -count=1 ./internal/relay -run 'Test(ReservationDiagnosticsDistinguishAuthenticationAndStockRenewal|CircuitDiagnosticsUseOnlyStockAggregateEvidence|RendezvousDiagnosticsFollowVersionAndLeaseOutcome|RendezvousRepeatedMissesRemainBounded)$'`. The routine and race profiles are the required broader gates. This local evidence does not establish deployed behavior.

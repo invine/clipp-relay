@@ -134,16 +134,20 @@ func (b *tokenBucket) allow(now time.Time, rate, burst float64) bool {
 
 type gatedHost struct {
 	host.Host
-	check              func(network.Stream) bool
+	check              func(network.Stream) (bool, string)
 	doneHop            func()
 	observeReservation func(network.Stream) network.Stream
+	observeDeniedHop   func(network.Stream, string)
 	stopConn           func(peer.ID) network.Conn
 }
 
 func (h gatedHost) SetStreamHandler(id protocol.ID, handler network.StreamHandler) {
 	if id == hopProtocol {
 		h.Host.SetStreamHandler(id, func(s network.Stream) {
-			if !h.check(s) {
+			if allowed, reason := h.check(s); !allowed {
+				if h.observeDeniedHop != nil {
+					h.observeDeniedHop(s, reason)
+				}
 				hopStatus(s, pbv2.Status_PERMISSION_DENIED)
 				return
 			}
@@ -229,7 +233,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{}, authority: a, credit: credit, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, credit: credit, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -259,7 +263,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	h.SetStreamHandler(RendezvousV1Protocol, s.handleRendezvous)
 	h.SetStreamHandler(RendezvousV2Protocol, s.handleRendezvous)
 	resources := relay.Resources{Limit: &relay.RelayLimit{Duration: 120 * time.Second, Data: 2 << 20}, ReservationTTL: 30 * time.Minute, MaxReservations: 6000, MaxCircuits: 16, BufferSize: 2048, MaxReservationsPerPeer: 1, MaxReservationsPerIP: 6000, MaxReservationsPerASN: 6000}
-	s.stock, err = relay.New(gatedHost{Host: h, check: s.permitted, doneHop: s.doneHop, stopConn: s.authoritativeConn, observeReservation: func(st network.Stream) network.Stream { return &reservationStream{Stream: st, server: s} }}, relay.WithResources(resources), relay.WithMetricsTracer(s.tracer), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
+	s.stock, err = relay.New(gatedHost{Host: h, check: s.permitted, doneHop: s.doneHop, stopConn: s.authoritativeConn, observeDeniedHop: s.observeDeniedHop, observeReservation: func(st network.Stream) network.Stream { return &reservationStream{Stream: st, server: s} }}, relay.WithResources(resources), relay.WithMetricsTracer(s.tracer), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
 	if err != nil {
 		_ = h.Close()
 		_ = manager.Close()
@@ -424,15 +428,47 @@ func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 	}
 }
 
-func (s *Server) permitted(st network.Stream) bool {
+func (s *Server) permitted(st network.Stream) (bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.byConn[st.Conn()]
-	if s.closing || v == nil || !time.Now().Before(v.deadline) {
-		return false
+	if s.closing {
+		return false, "draining"
+	}
+	if v == nil || !time.Now().Before(v.deadline) {
+		return false, "authentication_required"
 	}
 	s.hopHandlers++
-	return true
+	return true, ""
+}
+
+// On a denied HOP stream, inspect only the bounded first stock request so the
+// refusal can be labeled RESERVE or CONNECT. This never grants admission and
+// the existing permission-denied wire response remains authoritative.
+func (s *Server) observeDeniedHop(st network.Stream, reason string) {
+	if s.diagnostics == nil {
+		return
+	}
+	_ = st.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	reader := util.NewDelimitedReader(st, 4096)
+	defer reader.Close()
+	var msg pbv2.HopMessage
+	if reader.ReadMsg(&msg) != nil {
+		return
+	}
+	event := ""
+	switch msg.GetType() {
+	case pbv2.HopMessage_RESERVE:
+		event = "relay.reservation"
+	case pbv2.HopMessage_CONNECT:
+		event = "relay.circuit"
+	default:
+		return
+	}
+	s.mu.Lock()
+	info := s.connectionInfo[st.Conn()]
+	s.mu.Unlock()
+	s.diagnostics.Emit(diagnostic.Event{Event: event, Outcome: "refused", Reason: reason, RequestID: s.diagnostics.NewID(), SessionID: info.id, Transport: "unknown"})
 }
 
 func (s *Server) doneHop() {
