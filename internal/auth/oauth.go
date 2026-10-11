@@ -18,6 +18,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
+	if s.commitCredential != nil {
+		return s.commitCredential(ctx, tx)
+	}
+	return tx.Commit(ctx)
+}
+
 type oauthIntent struct{ client, redirect, state, challenge string }
 type oauthConsent struct {
 	intent  oauthIntent
@@ -102,6 +109,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
+	markClient(r, client)
 	account, _, _, _, _, e := s.session(r)
 	if e != nil {
 		if errors.Is(e, errInvalidSession) {
@@ -166,9 +174,19 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	}
 	if status != "Active" {
 		s.dropConsent(id)
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, intent.client) != nil || tx.Commit(r.Context()) != nil {
+		if s.auditCredential(r.Context(), tx, "credential_blocked", account, intent.client) != nil {
 			s.oauthError(w, 503)
 			return
+		}
+		if tx.Commit(r.Context()) != nil {
+			if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
+				markDiagnostic(r, "uncertain", "commit_unconfirmed")
+			}
+			s.oauthError(w, 503)
+			return
+		}
+		if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
+			markDiagnostic(r, "refused", "account_blocked")
 		}
 		denyAuthorization(w, r, intent)
 		return
@@ -180,8 +198,16 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		return
 	}
 	_, e = tx.Exec(r.Context(), `INSERT INTO public.authorization_transactions(id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at,flow_kind,client_type,redirect_uri,challenge,client_state_digest,account_id,credential_generation) VALUES($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp()+interval '10 minutes','clipp',$6,$7,$8,$9,$10,$11)`, transaction, s.digest(version, "consent-id", id), s.digest(version, "consent-nonce", nonce), binding, version, intent.client, intent.redirect, intent.challenge, s.digest(version, "client-state", intent.state), account, generation)
-	if e != nil || tx.Commit(r.Context()) != nil {
+	if e != nil {
 		s.dropConsent(id)
+		s.oauthError(w, 503)
+		return
+	}
+	if tx.Commit(r.Context()) != nil {
+		s.dropConsent(id)
+		if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
+		}
 		s.oauthError(w, 503)
 		return
 	}
@@ -250,6 +276,12 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 	}
 	epoch := s.flowEpoch
 	s.mu.Unlock()
+	if ok {
+		markClient(r, consent.intent.client)
+	}
+	if ok && time.Now().After(consent.expires) {
+		markDiagnostic(r, "refused", "expired_credentials")
+	}
 	if !ok || time.Now().After(consent.expires) || consent.epoch != epoch || consent.account != account || consent.version != version || subtle.ConstantTimeCompare(consent.binding, s.digest(version, "consent-browser", cookie.Value)) != 1 {
 		s.oauthError(w, 401)
 		return
@@ -286,15 +318,26 @@ func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, account strin
 		return
 	}
 	if status != "Active" {
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, intent.client) != nil || tx.Commit(r.Context()) != nil {
+		if s.auditCredential(r.Context(), tx, "credential_blocked", account, intent.client) != nil {
 			s.oauthError(w, 503)
 			return
 		}
+		if tx.Commit(r.Context()) != nil {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
+			s.oauthError(w, 503)
+			return
+		}
+		markDiagnostic(r, "refused", "account_blocked")
 		denyAuthorization(w, r, intent)
 		return
 	}
 	_, e = tx.Exec(r.Context(), `INSERT INTO public.authorization_codes(credential_digest,pepper_version,account_id,credential_generation,client_type,redirect_uri,challenge,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),clock_timestamp()+interval '5 minutes')`, s.digest(s.CurrentPepper, "authorization-code", code), s.CurrentPepper, account, generation, intent.client, intent.redirect, intent.challenge)
-	if e != nil || tx.Commit(r.Context()) != nil {
+	if e != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	if s.commitCredentialTx(r.Context(), tx) != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		s.oauthError(w, 503)
 		return
 	}
@@ -351,6 +394,9 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := r.PostForm.Get("client_id")
+	if trace := diagnosticFor(r); trace != nil && r.PostForm.Get("grant_type") == "refresh_token" {
+		trace.event = "oauth.refresh"
+	}
 	allowed := map[string]bool{"grant_type": true, "client_id": true}
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
@@ -376,6 +422,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
+	markClient(r, client)
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
 		s.exchangeCode(w, r, client)
@@ -432,15 +479,24 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client str
 	var storedClient, storedRedirect, storedChallenge string
 	var fresh bool
 	e = tx.QueryRow(r.Context(), `SELECT credential_generation,client_type,redirect_uri,challenge,consumed_at IS NULL AND expires_at>clock_timestamp() FROM public.authorization_codes WHERE credential_digest=$1 AND pepper_version=$2 FOR UPDATE`, digest, version).Scan(&codeGeneration, &storedClient, &storedRedirect, &storedChallenge, &fresh)
+	if e == nil && !fresh {
+		markDiagnostic(r, "refused", "expired_credentials")
+	}
 	if e != nil || !fresh || storedClient != client || storedRedirect != redirect || subtle.ConstantTimeCompare([]byte(storedChallenge), []byte(challenge)) != 1 || codeGeneration != generation {
 		s.oauthError(w, 401)
 		return
 	}
 	if status != "Active" {
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, client) != nil || tx.Commit(r.Context()) != nil {
+		if s.auditCredential(r.Context(), tx, "credential_blocked", account, client) != nil {
 			s.oauthError(w, 503)
 			return
 		}
+		if tx.Commit(r.Context()) != nil {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
+			s.oauthError(w, 503)
+			return
+		}
+		markDiagnostic(r, "refused", "account_blocked")
 		s.oauthError(w, 403)
 		return
 	}
@@ -450,10 +506,16 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client str
 		return
 	}
 	if count >= 20 {
-		if s.auditCredential(r.Context(), tx, "grant_cap", account, client) != nil || tx.Commit(r.Context()) != nil {
+		if s.auditCredential(r.Context(), tx, "grant_cap", account, client) != nil {
 			s.oauthError(w, 503)
 			return
 		}
+		if tx.Commit(r.Context()) != nil {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
+			s.oauthError(w, 503)
+			return
+		}
+		markDiagnostic(r, "refused", "grant_limit")
 		s.oauthError(w, 429)
 		return
 	}
@@ -479,7 +541,12 @@ func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client str
 	if e == nil {
 		e = s.insertCredentialTokens(r.Context(), tx, grant, refresh, access, 1)
 	}
-	if e != nil || tx.Commit(r.Context()) != nil {
+	if e != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	if s.commitCredentialTx(r.Context(), tx) != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		s.oauthError(w, 503)
 		return
 	}
@@ -530,6 +597,9 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 	var grantGeneration, refreshGeneration, currentRefreshGeneration int64
 	var active, consumed bool
 	e = tx.QueryRow(r.Context(), `SELECT g.id,g.client_type,g.credential_generation,g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp(),f.consumed_at IS NOT NULL,f.generation,g.current_refresh_generation FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE f.credential_digest=$1 AND f.pepper_version=$2 FOR UPDATE OF g,f`, digest, version).Scan(&grant, &storedClient, &grantGeneration, &active, &consumed, &refreshGeneration, &currentRefreshGeneration)
+	if e == nil && !active {
+		markDiagnostic(r, "refused", "expired_credentials")
+	}
 	if e != nil || storedClient != client || !active || generation != grantGeneration {
 		s.oauthError(w, 401)
 		return
@@ -539,10 +609,16 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 		if e == nil {
 			e = s.auditCredential(r.Context(), tx, "refresh_reuse", account, client)
 		}
-		if e != nil || tx.Commit(r.Context()) != nil {
+		if e != nil {
 			s.oauthError(w, 503)
 			return
 		}
+		if tx.Commit(r.Context()) != nil {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
+			s.oauthError(w, 503)
+			return
+		}
+		markDiagnostic(r, "refused", "replay_detected")
 		s.oauthError(w, 401)
 		return
 	}
@@ -551,10 +627,16 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 		return
 	}
 	if status != "Active" {
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, client) != nil || tx.Commit(r.Context()) != nil {
+		if s.auditCredential(r.Context(), tx, "credential_blocked", account, client) != nil {
 			s.oauthError(w, 503)
 			return
 		}
+		if tx.Commit(r.Context()) != nil {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
+			s.oauthError(w, 503)
+			return
+		}
+		markDiagnostic(r, "refused", "account_blocked")
 		s.oauthError(w, 403)
 		return
 	}
@@ -575,7 +657,12 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 	if e == nil {
 		e = s.insertCredentialTokens(r.Context(), tx, grant, next, access, currentRefreshGeneration+1)
 	}
-	if e != nil || tx.Commit(r.Context()) != nil {
+	if e != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	if s.commitCredentialTx(r.Context(), tx) != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		s.oauthError(w, 503)
 		return
 	}

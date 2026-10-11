@@ -27,6 +27,22 @@ type adminIdentity struct {
 	version         uint64
 }
 
+type adminFormErrorKey struct{}
+
+func adminAccountDiagnosticEvent(action string) string {
+	switch action {
+	case "approve", "suspend", "deny", "reactivate":
+		return "admin." + action
+	case "assign":
+		return "admin.assign_plan"
+	case "override":
+		return "admin.override_quota"
+	case "revoke":
+		return "admin.revoke_credentials"
+	}
+	return ""
+}
+
 type accountActionSpec struct {
 	states       map[string]bool
 	event        string
@@ -65,21 +81,27 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 	id, version, _, _, csrf, err := s.session(r)
 	if err != nil {
 		if errors.Is(err, errInvalidSession) {
+			markDiagnostic(r, "refused", "not_authorized")
 			fail(w, 401)
 		} else if errors.Is(err, errRateLimit) {
 			fail(w, 429)
 		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
 			fail(w, 503)
 		}
 		return actor, false
 	}
 	policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile)
 	if err != nil {
+		markDiagnostic(r, "refused", "not_authorized")
 		w.Header().Set("X-Admin-Policy-Revision", "0")
 		fail(w, 403)
 		return actor, false
 	}
 	w.Header().Set("X-Admin-Policy-Revision", strconv.FormatUint(policy.Revision, 10))
+	if s.beforeAdminDetailsRead != nil {
+		s.beforeAdminDetailsRead()
+	}
 	var email string
 	var verified bool
 	var hd *string
@@ -89,28 +111,43 @@ FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id
 WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation
 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, id, s.sessionDigest(r, version), version).Scan(&email, &verified, &hd, &authenticated)
 	if err != nil {
-		fail(w, 503)
+		if errors.Is(err, pgx.ErrNoRows) {
+			markDiagnostic(r, "refused", "not_authorized")
+			fail(w, 401)
+		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
+			fail(w, 503)
+		}
 		return actor, false
 	}
 	if !policy.Allows(email, verified, deref(hd)) {
+		markDiagnostic(r, "refused", "not_authorized")
 		fail(w, 403)
 		return actor, false
 	}
 	if mutation {
 		if time.Since(authenticated) > 10*time.Minute || authenticated.After(time.Now().Add(time.Minute)) {
+			markDiagnostic(r, "refused", "recent_auth_required")
 			fail(w, 401)
 			return actor, false
 		}
 		if r.Header.Get("Origin") != s.Origin {
+			markDiagnostic(r, "refused", "origin_rejected")
 			fail(w, 403)
 			return actor, false
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-		if r.ParseForm() != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		parseErr := r.ParseForm()
+		if prior, ok := r.Context().Value(adminFormErrorKey{}).(error); ok {
+			parseErr = prior
+		}
+		if parseErr != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+			markDiagnostic(r, "refused", "csrf_rejected")
 			fail(w, 403)
 			return actor, false
 		}
 		if !reasonOK(r.PostForm.Get("reason")) {
+			markDiagnostic(r, "refused", "invalid_request")
 			fail(w, 400)
 			return actor, false
 		}
@@ -122,6 +159,9 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 // Called after ordered account locks, so wall time and metadata cannot be
 // evaluated before a competing administrator or session operation completes.
 func (s *Server) recheckAdministrator(w http.ResponseWriter, tx pgx.Tx, r *http.Request, actor *adminIdentity) int {
+	if s.beforeAdminRecheck != nil {
+		s.beforeAdminRecheck()
+	}
 	var email string
 	var verified, recent bool
 	var hd *string
@@ -133,21 +173,26 @@ WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
 AND ps.credential_generation=a.credential_generation
 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, actor.id, s.sessionDigest(r, actor.version), actor.version).Scan(&email, &verified, &hd, &recent)
 	if err == pgx.ErrNoRows {
+		markDiagnostic(r, "refused", "not_authorized")
 		return 401
 	}
 	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
 		return 503
 	}
 	if !recent {
+		markDiagnostic(r, "refused", "recent_auth_required")
 		return 401
 	}
 	policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile)
 	if err != nil {
+		markDiagnostic(r, "refused", "not_authorized")
 		w.Header().Set("X-Admin-Policy-Revision", "0")
 		return 403
 	}
 	w.Header().Set("X-Admin-Policy-Revision", strconv.FormatUint(policy.Revision, 10))
 	if !policy.Allows(email, verified, deref(hd)) {
+		markDiagnostic(r, "refused", "not_authorized")
 		return 403
 	}
 	actor.email = strings.ToLower(strings.TrimSpace(email))
@@ -159,9 +204,11 @@ func (s *Server) lockActor(w http.ResponseWriter, tx pgx.Tx, r *http.Request, ac
 	var id string
 	err := tx.QueryRow(r.Context(), `SELECT id FROM public.accounts WHERE id=$1 FOR UPDATE`, actor.id).Scan(&id)
 	if err == pgx.ErrNoRows {
+		markDiagnostic(r, "refused", "not_authorized")
 		return 401
 	}
 	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
 		return 503
 	}
 	return s.recheckAdministrator(w, tx, r, actor)
@@ -369,20 +416,39 @@ func revision(raw string) (int64, bool) {
 }
 
 func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
+	// Parse once under the same body limit before authorization so a known
+	// fixed action can retain its refusal outcome. Preserve a parsing error
+	// for administrator(), which still owns the actual CSRF decision.
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		r = r.WithContext(context.WithValue(r.Context(), adminFormErrorKey{}, err))
+	}
+	action := r.PostForm.Get("action")
+	if event := adminAccountDiagnosticEvent(action); event != "" {
+		markAction(r, event)
+	} else if action == "review" {
+		// Review has no fixed catalog pair; the route is still handled.
+		markAction(r, "")
+	}
 	actor, ok := s.administrator(w, r, true)
 	if !ok {
 		return
 	}
 	target := r.PathValue("id")
 	expected, valid := revision(r.PostForm.Get("revision"))
-	action := r.PostForm.Get("action")
 	spec, known := accountActions[action]
+	if !known {
+		// Unknown action text never becomes an event name.
+		markAction(r, "http.request_refused")
+	}
 	if !idPattern.MatchString(target) || !valid || !known {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
 	plan := r.PostForm.Get("plan_id")
 	if spec.planRequired && !idPattern.MatchString(plan) {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
@@ -390,6 +456,9 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	var uncertain bool
 	var securitySubject string
 	var closeConnections func()
+	if s.beforeAccountActionGuard != nil {
+		s.beforeAccountActionGuard()
+	}
 	update := func(unitCtx context.Context) {
 		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
 		if applied != nil && s.accountChanged != nil {
@@ -399,6 +468,11 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	if spec.security {
 		var subject string
 		if e := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, target).Scan(&subject); e != nil {
+			if errors.Is(e, pgx.ErrNoRows) {
+				markDiagnostic(r, "refused", "invalid_request")
+			} else {
+				markDiagnostic(r, "failed", "database_unavailable")
+			}
 			fail(w, 503)
 			return
 		}
@@ -406,15 +480,18 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		guardEntered := false
 		guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 			guardEntered = true
-			if !s.WithAccountGuards(unitCtx, []string{actor.id, target}, update) {
+			if accountGuardErr := s.withAccountGuards(unitCtx, []string{actor.id, target}, update); accountGuardErr != nil {
+				markGuardDiagnostic(r, accountGuardErr)
 				fail(w, 503)
 			}
 			return nil
 		})
 		if guardErr != nil && !guardEntered {
+			markGuardDiagnostic(r, guardErr)
 			fail(w, 503)
 		}
-	} else if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, update) {
+	} else if accountGuardErr := s.withAccountGuards(r.Context(), []string{actor.id, target}, update); accountGuardErr != nil {
+		markGuardDiagnostic(r, accountGuardErr)
 		fail(w, 503)
 	}
 	if applied != nil {
@@ -422,6 +499,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 			closeConnections()
 		}
 		if uncertain {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			uncertainResponse(w)
 		} else {
 			http.Redirect(w, r, "/admin?selected="+url.QueryEscape(target), http.StatusSeeOther)
@@ -469,10 +547,12 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		return
 	}
 	if deleting || actual != expected {
+		markDiagnostic(r, "refused", "revision_conflict")
 		fail(w, 409)
 		return
 	}
 	if !spec.states[status] {
+		markDiagnostic(r, "refused", "revision_conflict")
 		fail(w, 409)
 		return
 	}
@@ -489,6 +569,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		var archived bool
 		e = tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL,weekly_bytes,sessions FROM public.quota_plans WHERE id=$1 FOR UPDATE`, plan).Scan(&archived, &weeklyBytes, &sessionLimit)
 		if e == pgx.ErrNoRows || archived {
+			markDiagnostic(r, "refused", "revision_conflict")
 			fail(w, 409)
 			return
 		}
@@ -615,12 +696,14 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 	bytes, e1 := parseQuotaBytes(r.PostForm.Get("weekly_bytes"), r.PostForm.Get("weekly_bytes_unit"))
 	sessions, e2 := strconv.ParseInt(r.PostForm.Get("sessions"), 10, 32)
 	if name == "" || len(name) > 120 || e1 != nil || e2 != nil || bytes < 0 || sessions < 0 {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
 	id := r.PostForm.Get("operation_id")
 	proof := r.PostForm.Get("operation_proof")
 	if !idPattern.MatchString(id) || subtle.ConstantTimeCompare([]byte(proof), []byte(s.planOperationProof(r, actor, id))) != 1 {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 403)
 		return
 	}
@@ -649,6 +732,7 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if subtle.ConstantTimeCompare(stored, digest[:]) != 1 {
+			markDiagnostic(r, "refused", "revision_conflict")
 			fail(w, 409)
 			return
 		}
@@ -682,6 +766,7 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		committed := s.planCreateCommitted(recoveryCtx, id, digest)
 		cancel()
 		if !committed {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			planRetry(w, r, actor, name, bytes, sessions)
 			return
 		}
@@ -690,6 +775,7 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
+	markAction(r, "admin.plan_archive")
 	actor, ok := s.administrator(w, r, true)
 	if !ok {
 		return
@@ -697,6 +783,7 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	expected, valid := revision(r.PostForm.Get("revision"))
 	if !idPattern.MatchString(id) || !valid {
+		markDiagnostic(r, "refused", "invalid_request")
 		fail(w, 400)
 		return
 	}
@@ -723,6 +810,7 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if actual != expected || archived {
+		markDiagnostic(r, "refused", "revision_conflict")
 		fail(w, 409)
 		return
 	}
@@ -737,7 +825,12 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,plan_id,reason,actor_email) VALUES($1,clock_timestamp(),'plan_archived',$2,$3,$4)`, auditID, id, r.PostForm.Get("reason"), actor.email)
-	if e != nil || tx.Commit(ctx) != nil {
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	if tx.Commit(ctx) != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
 	}

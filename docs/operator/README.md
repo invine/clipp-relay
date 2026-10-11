@@ -27,3 +27,6 @@ owner UID and the running Pod revision instead of calling rollout status.
 Credentials, real private Helm values, profiles, and diagnostic captures remain
 outside source control. Capacity qualification is deferred. Completion of the
 wizard or a direct clip transfer does not establish forced relay-only transfer.
+
+For application startup, readiness and drain diagnostics, see the
+[service lifecycle row examples](service-logging.md).

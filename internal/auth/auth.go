@@ -25,6 +25,7 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -47,11 +48,25 @@ func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, pgx.Tx
 	s.commitAccount = commit
 }
 
+// SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
+// Production leaves this unset.
+func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
+	s.commitCredential = commit
+}
+
+// SetPortalCommitHookForTest injects a lost portal-session commit acknowledgment.
+// Production leaves this unset.
+func (s *Server) SetPortalCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
+	s.commitPortal = commit
+}
+
 func Google() Provider {
 	return Provider{AuthorizationURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", KeysURL: "https://www.googleapis.com/oauth2/v3/certs"}
 }
 
 type Server struct {
+	diagnostics                        *diagnostic.Logger
+	transitions                        *diagnostic.Transitions
 	Pool                               *pgxpool.Pool
 	db                                 *database.Runtime
 	Origin, ClientID, ClientSecret     string
@@ -79,8 +94,15 @@ type Server struct {
 	globalRate                         rate
 	accountRates                       map[string]rate
 	beforeProfileRead                  func()
+	beforeAdminDetailsRead             func()
+	beforeAdminRecheck                 func()
+	beforeOwnerSubjectRead             func()
+	beforeAccountActionGuard           func()
+	beforeOwnerRecheck                 func(context.Context, pgx.Tx)
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
+	commitCredential                   func(context.Context, pgx.Tx) error
+	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
@@ -110,6 +132,10 @@ func (s *Server) WithServingUnit(ctx context.Context, work func(context.Context)
 // WithAccountGuards orders all local account operations before their SQL row
 // locks. Relay admission holds the same guard through registry installation.
 func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(context.Context)) bool {
+	return s.withAccountGuards(ctx, ids, work) == nil
+}
+
+func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(context.Context)) error {
 	executed := false
 	err := s.db.WithUnit(ctx, func(unitCtx context.Context) error {
 		ordered := append([]string(nil), ids...)
@@ -142,7 +168,13 @@ func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(
 		work(unitCtx)
 		return nil
 	})
-	return err == nil && executed
+	if err != nil {
+		return err
+	}
+	if !executed {
+		return errors.New("account guard work did not execute")
+	}
+	return nil
 }
 
 // CapacitySample is a separate, aggregate live observation. Nil counts mean
@@ -400,7 +432,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/accounts/{id}", s.adminAccount)
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.observedRequest(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) }))
+	})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.loginFlow(w, r, nil)
@@ -410,6 +444,7 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 	case s.providerSlots <- struct{}{}:
 		defer func() { <-s.providerSlots }()
 	default:
+		markDiagnostic(r, "refused", "rate_limited")
 		fail(w, 503)
 		return
 	}
@@ -448,6 +483,7 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 	}
 	if len(s.flows)+len(s.consents) >= 1024 {
 		s.mu.Unlock()
+		markDiagnostic(r, "refused", "rate_limited")
 		fail(w, 503)
 		return
 	}
@@ -483,6 +519,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	case s.providerSlots <- struct{}{}:
 		defer func() { <-s.providerSlots }()
 	default:
+		markDiagnostic(r, "refused", "rate_limited")
 		fail(w, 503)
 		return
 	}
@@ -501,11 +538,19 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	var claimed string
 	e = s.db.QueryRow(ctx, `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND nonce_digest=$3 AND pepper_version=$4 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING id`, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "browser-binding", bind.Value), s.digest(s.CurrentPepper, "google-nonce", f.nonce), s.CurrentPepper).Scan(&claimed)
 	if e != nil {
+		if e != pgx.ErrNoRows {
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 400)
 		return
 	}
 	claims, e := s.exchange(ctx, code, f.nonce)
 	if e != nil {
+		if errors.Is(e, errProviderUnavailable) {
+			markDiagnostic(r, "failed", "provider_unavailable")
+		} else {
+			markDiagnostic(r, "refused", "verification_failed")
+		}
 		fail(w, 401)
 		return
 	}
@@ -606,10 +651,17 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	if e = tx.Commit(ctx); e != nil {
+	if s.commitPortal != nil {
+		e = s.commitPortal(ctx, tx)
+	} else {
+		e = tx.Commit(ctx)
+	}
+	if e != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
 	}
+	markDiagnostic(r, "success", "none")
 	cookie(w, sessionCookie, credential, 0)
 	if f.intent != nil {
 		s.presentConsent(w, r, accountID, credential, *f.intent)
@@ -630,7 +682,22 @@ type identity struct {
 	IssuedAt      int64   `json:"iat"`
 }
 
-func (s *Server) exchange(ctx context.Context, code, nonce string) (identity, error) {
+var errProviderUnavailable = errors.New("provider unavailable")
+
+func (s *Server) exchange(ctx context.Context, code, nonce string) (result identity, resultErr error) {
+	started := time.Now()
+	tokenOK := false
+	var classificationErr error
+	defer func() {
+		if tokenOK {
+			s.transitions.Dependency("dependency.google_token", nil, ctx, time.Since(started))
+		} else {
+			if classificationErr == nil {
+				classificationErr = resultErr
+			}
+			s.transitions.Dependency("dependency.google_token", classificationErr, ctx, time.Since(started))
+		}
+	}()
 	values := url.Values{"code": {code}, "client_id": {s.ClientID}, "client_secret": {s.ClientSecret}, "grant_type": {"authorization_code"}, "redirect_uri": {s.Origin + "/auth/callback"}}
 	req, e := http.NewRequestWithContext(ctx, "POST", s.provider.TokenURL, strings.NewReader(values.Encode()))
 	if e != nil {
@@ -639,22 +706,28 @@ func (s *Server) exchange(ctx context.Context, code, nonce string) (identity, er
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, e := s.client.Do(req)
 	if e != nil {
-		return identity{}, e
+		return identity{}, errProviderUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return identity{}, errors.New("provider unavailable")
+		if resp.StatusCode < 500 {
+			classificationErr = diagnostic.ErrInvalidResponse
+		}
+		return identity{}, errProviderUnavailable
 	}
 	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
 	if e != nil || len(body) > 256<<10 {
-		return identity{}, errors.New("provider response oversized")
+		classificationErr = diagnostic.ErrInvalidResponse
+		return identity{}, errProviderUnavailable
 	}
 	var token struct {
 		IDToken string `json:"id_token"`
 	}
 	if json.Unmarshal(body, &token) != nil || len(token.IDToken) > 256<<10 {
-		return identity{}, errors.New("provider response invalid")
+		classificationErr = diagnostic.ErrInvalidResponse
+		return identity{}, errProviderUnavailable
 	}
+	tokenOK = true
 	return s.verify(ctx, token.IDToken, nonce)
 }
 func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error) {
@@ -702,7 +775,7 @@ func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error
 	}
 	return c, nil
 }
-func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+func (s *Server) key(ctx context.Context, kid string) (result *rsa.PublicKey, resultErr error) {
 	s.keyMu.Lock()
 	defer s.keyMu.Unlock()
 	now := time.Now()
@@ -714,6 +787,15 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	if s.keys[kid] == nil && len(s.keys) > 0 && now.Sub(s.lastKeyFetch) < time.Minute {
 		return nil, errors.New("key unavailable")
 	}
+	started := time.Now()
+	var classificationErr error
+	var validResponse bool
+	defer func() {
+		if classificationErr == nil && !validResponse {
+			classificationErr = resultErr
+		}
+		s.transitions.Dependency("dependency.google_jwks", classificationErr, ctx, time.Since(started))
+	}()
 	req, e := http.NewRequestWithContext(ctx, "GET", s.provider.KeysURL, nil)
 	if e != nil {
 		return nil, e
@@ -721,15 +803,19 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	resp, e := s.client.Do(req)
 	s.lastKeyFetch = now
 	if e != nil {
-		return nil, e
+		return nil, errProviderUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, errors.New("keys unavailable")
+		if resp.StatusCode < 500 {
+			classificationErr = diagnostic.ErrInvalidResponse
+		}
+		return nil, errProviderUnavailable
 	}
 	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
 	if e != nil || len(body) > 256<<10 {
-		return nil, errors.New("keys oversized")
+		classificationErr = diagnostic.ErrInvalidResponse
+		return nil, errProviderUnavailable
 	}
 	var jwks struct {
 		Keys []struct {
@@ -742,6 +828,7 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 		} `json:"keys"`
 	}
 	if json.Unmarshal(body, &jwks) != nil || len(jwks.Keys) > 32 {
+		classificationErr = diagnostic.ErrInvalidResponse
 		return nil, errors.New("keys invalid")
 	}
 	keys := map[string]*rsa.PublicKey{}
@@ -761,6 +848,7 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 		keys[j.Kid] = &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(ex)}
 	}
 	if len(keys) == 0 {
+		classificationErr = diagnostic.ErrInvalidResponse
 		return nil, errors.New("keys empty")
 	}
 	age := time.Duration(0)
@@ -792,6 +880,7 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	if age > 6*time.Hour {
 		age = 6 * time.Hour
 	}
+	validResponse = true
 	s.keys = keys
 	s.keysUntil = now.Add(age)
 	if k := keys[kid]; k != nil && age > 0 {
@@ -958,11 +1047,13 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
+		markDiagnostic(r, "refused", "origin_rejected")
 		fail(w, 403)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 400)
 		return
 	}
@@ -972,10 +1063,16 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e != nil && !errors.Is(e, errInvalidSession) {
+		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return
 	}
 	if e != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		if e != nil {
+			markDiagnostic(r, "refused", "invalid_credentials")
+		} else {
+			markDiagnostic(r, "refused", "csrf_rejected")
+		}
 		fail(w, 403)
 		return
 	}
@@ -983,6 +1080,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	digest := s.digest(version, "portal-session", c.Value)
 	_, e = s.db.Exec(r.Context(), `DELETE FROM public.portal_sessions WHERE credential_digest=$1`, digest)
 	if e != nil {
+		// The single-statement commit acknowledgement does not prove rollback.
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
 	}
@@ -992,34 +1091,56 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
+		markDiagnostic(r, "refused", "origin_rejected")
 		fail(w, 403)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 400)
 		return
 	}
 	id, version, _, _, csrf, err := s.session(r)
 	if err != nil {
+		switch {
+		case errors.Is(err, errRateLimit):
+			markAction(r, "")
+		case errors.Is(err, errInvalidSession):
+			markDiagnostic(r, "refused", "invalid_credentials")
+		default:
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 401)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 403)
 		return
 	}
 	var subject string
+	if s.beforeOwnerSubjectRead != nil {
+		s.beforeOwnerSubjectRead()
+	}
 	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, id).Scan(&subject); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			markDiagnostic(r, "refused", "invalid_credentials")
+		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 503)
 		return
 	}
 	var applied, uncertain bool
 	var closeConnections func()
+	if s.beforeAccountActionGuard != nil {
+		s.beforeAccountActionGuard()
+	}
 	guardEntered := false
 	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 		guardEntered = true
-		if !s.WithAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
+		if guardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
 			tx, e := s.db.Begin(ctx)
 			if e != nil {
 				fail(w, 503)
@@ -1034,8 +1155,17 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var live bool
+			if s.beforeOwnerRecheck != nil {
+				s.beforeOwnerRecheck(ctx, tx)
+			}
 			e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.account_id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp())`, id, s.sessionDigest(r, version), version).Scan(&live)
-			if e != nil || !live {
+			if e != nil {
+				markDiagnostic(r, "failed", "database_unavailable")
+				fail(w, 401)
+				return
+			}
+			if !live {
+				markDiagnostic(r, "refused", "invalid_credentials")
 				fail(w, 401)
 				return
 			}
@@ -1064,12 +1194,14 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
 			}
 			applied, uncertain = true, e != nil
-		}) {
+		}); guardErr != nil {
+			markGuardDiagnostic(r, guardErr)
 			fail(w, 503)
 		}
 		return nil
 	})
 	if guardErr != nil && !guardEntered {
+		markGuardDiagnostic(r, guardErr)
 		fail(w, 503)
 	}
 	if applied {
@@ -1078,6 +1210,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		}
 		cookie(w, sessionCookie, "", -1)
 		if uncertain {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			uncertainResponse(w)
 		} else {
 			http.Redirect(w, r, "/", http.StatusSeeOther)

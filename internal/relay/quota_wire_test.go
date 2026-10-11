@@ -114,6 +114,7 @@ func runAccountCutoff(t *testing.T, opts Options, transport string) {
 		t.Fatal(err)
 	}
 	data := make([]byte, 128<<10)
+	copy(data, []byte("private-relayed-payload-canary"))
 	for off := 0; off < len(data); off += 4096 {
 		if _, err = st.Write(data[off : off+4096]); err != nil {
 			break

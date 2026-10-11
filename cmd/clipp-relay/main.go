@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +14,7 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/publication"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
@@ -24,18 +24,27 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	os.Exit(run())
+}
+
+func run() int {
+	logger := diagnostic.New(os.Stdout)
+	defer logger.Close()
+	dependencies := diagnostic.NewTransitions(logger.Emit)
+	fail := func(reason string) int {
+		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: reason})
+		return 1
+	}
 	command := flag.String("command", "", "migrate or serve")
 	path := flag.String("config", "", "absolute path to versioned non-secret configuration")
 	flag.Parse()
 	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "serve") {
-		logger.Error("invalid invocation")
-		os.Exit(2)
+		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: "configuration_rejected"})
+		return 2
 	}
 	c, err := config.Load(*path)
 	if err != nil {
-		logger.Error("configuration rejected", "reason", err.Error())
-		os.Exit(1)
+		return fail("configuration_rejected")
 	}
 	maintenance := *command == "migrate"
 	var material config.Material
@@ -45,8 +54,7 @@ func main() {
 		material, err = c.ReadMaterial()
 	}
 	if err != nil {
-		logger.Error("Secret material rejected", "reason", err.Error())
-		os.Exit(1)
+		return fail("configuration_rejected")
 	}
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -55,11 +63,11 @@ func main() {
 	defer stop()
 	forceCtx, force := context.WithCancel(context.Background())
 	defer force()
-	go handleSignals(signals, stop, force)
+	drainRequested := make(chan struct{})
+	go handleSignals(signals, func() { close(drainRequested); stop() }, force)
 	pool, err := database.NewPool(ctx, c, material, maintenance)
 	if err != nil {
-		logger.Error("database configuration rejected")
-		os.Exit(1)
+		return fail("database_unavailable")
 	}
 	defer pool.Close()
 	startupLimit := 10 * time.Second
@@ -70,36 +78,30 @@ func main() {
 	defer cancel()
 	if maintenance {
 		if err = database.Migrate(startup, pool); err != nil {
-			logger.Error("migration failed", "reason", err.Error())
-			os.Exit(1)
+			return fail("database_unavailable")
 		}
-		logger.Info("migration complete", "revision", database.ExpectedRevision)
-		return
+		return 0
 	}
 	if err = database.VerifyServing(startup, pool); err != nil {
-		logger.Error("startup validation failed", "reason", err.Error())
-		os.Exit(1)
+		return fail("database_unavailable")
 	}
 	debug.SetMemoryLimit(1536 << 20)
 	var rlimit unix.Rlimit
 	if unix.Getrlimit(unix.RLIMIT_NOFILE, &rlimit) != nil || rlimit.Cur < 16384 {
-		logger.Error("file descriptor soft limit below 16384")
-		os.Exit(1)
+		return fail("resource_limit")
 	}
 	if c.RelayTCP.Listen == "" && c.RelayWebSocket.Listen == "" && c.RelayWebRTC.Listen == "" {
-		logger.Error("relay listener missing")
-		os.Exit(1)
+		return fail("configuration_rejected")
 	}
-	logger.Info("service starting", "schema_revision", database.ExpectedRevision)
 	srv := service.New()
 	db := database.NewRuntime(pool)
+	db.SetTransitions(dependencies)
 	portal := auth.NewWithRuntime(db, c, material, auth.Google())
+	portal.SetDiagnostics(logger)
+	portal.SetTransitions(dependencies)
 	if err := portal.ValidatePepperCoverage(startup); err != nil {
-		if errors.Is(err, auth.ErrRetainedPepperUnavailable) {
-			logger.Warn("retained usage key unavailable; new registration blocked")
-		} else {
-			logger.Error("pepper keyring coverage failed")
-			os.Exit(1)
+		if !errors.Is(err, auth.ErrRetainedPepperUnavailable) {
+			return fail("configuration_rejected")
 		}
 	}
 	srv.SetDeletionMetrics(func(ctx context.Context) (service.DeletionSample, error) {
@@ -111,8 +113,7 @@ func main() {
 		return service.CleanupSample{OldestSeconds: observed.OldestAge.Seconds(), Warning: observed.Warning, Critical: observed.Critical, Breach: observed.Breach, Completed: observed.Completed, Failed: observed.Failed, BreachEpisodes: observed.BreachEpisodes}, err
 	})
 	if c.Journal.Region == "" {
-		logger.Error("journal configuration required before serving")
-		os.Exit(1)
+		return fail("configuration_rejected")
 	}
 	{
 		journal, journalErr := auth.NewOCIJournal(auth.OCIJournalOptions{
@@ -122,21 +123,49 @@ func main() {
 			PrivateKeyPEM: material.JournalSigningKey,
 		})
 		if journalErr != nil {
-			logger.Error("journal configuration rejected")
-			os.Exit(1)
+			return fail("configuration_rejected")
 		}
 		portal.SetDeletionJournal(journal, c.Journal.RepositoryID, c.Journal.CoverageFloor, c.Journal.CoverageHash)
 		if journalErr = portal.ValidateDeletionJournal(startup); journalErr != nil {
-			logger.Error("journal qualification failed")
-			os.Exit(1)
+			return fail("journal_unavailable")
 		}
 	}
 	credit := quota.NewWithRuntime(db)
+	credit.SetDiagnostics(logger)
 	defer credit.Close()
-	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname})
+	observations := diagnostic.NewObservations(logger.Emit, func(ctx context.Context) (string, error) {
+		sample, err := portal.SampleCleanupSignals(ctx)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case sample.Breach:
+			return "breach", nil
+		case sample.Critical:
+			return "critical", nil
+		case sample.Warning:
+			return "warning", nil
+		default:
+			return "none", nil
+		}
+	}, func(ctx context.Context) (string, error) {
+		sample, err := portal.SampleDeletionSignals(ctx)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case sample.Critical:
+			return "critical", nil
+		case sample.Warning:
+			return "warning", nil
+		default:
+			return "none", nil
+		}
+	})
+	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
 	if err != nil {
-		logger.Error("relay listener failed", "reason", err.Error())
-		os.Exit(1)
+		logger.Emit(diagnostic.Event{Event: "service.serving", Outcome: "failed", Reason: "listener_failed"})
+		return 1
 	}
 	defer dataPlane.Close()
 	srv.SetRendezvousMetrics(dataPlane.RendezvousCountV1, dataPlane.RendezvousCountV2)
@@ -174,45 +203,66 @@ func main() {
 	}
 	discovery, err := relay.NewDiscovery(dataPlane, portal, c.PortalOrigin[len("https://"):], nil)
 	if err != nil {
-		logger.Error("relay publication failed", "reason", err.Error())
-		os.Exit(1)
+		return fail("configuration_rejected")
 	}
 	srv.SetReadinessCheck(discovery.Published)
+	srv.SetDiagnostics(logger.Emit)
 	var apiClient *http.Client
 	var apiURL, apiToken string
 	if publicationConfig.TCP.Enabled && len(publicationConfig.TCP.Overrides) == 0 || publicationConfig.WebRTC.Enabled && len(publicationConfig.WebRTC.Overrides) == 0 {
 		apiClient, apiURL, apiToken, err = publication.KubernetesAPI(c.RelayServices.TokenFile, c.RelayServices.CAFile)
 		if err != nil {
-			logger.Error("relay Service API configuration failed", "reason", err.Error())
-			os.Exit(1)
+			return fail("configuration_rejected")
 		}
 	}
 	controller, err := publication.New(discovery, apiClient, apiURL, apiToken, publicationConfig, srv.SetReady)
 	if err != nil {
-		logger.Error("relay publication configuration failed", "reason", err.Error())
-		os.Exit(1)
+		return fail("configuration_rejected")
 	}
+	controller.SetTransitions(dependencies)
 	mux := http.NewServeMux()
 	mux.Handle("/v1/relay", discovery)
 	mux.Handle("/", portal.Handler())
 	srv.SetPublicHandler(mux)
 	srv.SetRouting(false)
+	logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "success", Reason: "none", SchemaRevision: database.ExpectedRevision})
 	go controller.Run(ctx)
+	go observations.Run(ctx)
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			safe, _, sampled := credit.ClockHealth()
+			observations.Clock(safe, sampled, time.Now())
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	serveCtx, stopServing := context.WithCancel(context.Background())
 	defer stopServing()
 	go func() {
-		<-ctx.Done()
-		srv.SetReady(false)
+		<-drainRequested
+		logger.Emit(diagnostic.Event{Event: "service.drain", Outcome: "started", Reason: "none"})
+		started := time.Now()
+		srv.BeginDrain()
 		dataPlane.StartDrain()
 		_ = discovery.Publish(nil)
-		_ = drainWithDeadline(forceCtx, 30*time.Second, dataPlane.Drain)
+		drainErr := drainWithDeadline(forceCtx, 30*time.Second, dataPlane.Drain)
+		if drainErr != nil && !errors.Is(drainErr, context.DeadlineExceeded) && !errors.Is(drainErr, context.Canceled) {
+			srv.SetStopFailure()
+		} else {
+			logger.Emit(drainResult(drainErr, time.Since(started)))
+		}
 		stopServing()
 	}()
 	go portal.Maintain(ctx)
 	if err = srv.Run(serveCtx, c.Listeners.Public, c.Listeners.Private); err != nil {
-		logger.Error("service stopped", "reason", "listener failure")
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func handleSignals(signals <-chan os.Signal, stop, force func()) {
@@ -226,4 +276,15 @@ func drainWithDeadline(forceCtx context.Context, grace time.Duration, drain func
 	ctx, cancel := context.WithTimeout(forceCtx, grace)
 	defer cancel()
 	return drain(ctx)
+}
+
+func drainResult(err error, duration time.Duration) diagnostic.Event {
+	e := diagnostic.Event{Event: "service.drain", Outcome: "success", Reason: "none", Duration: duration}
+	if errors.Is(err, context.DeadlineExceeded) {
+		e.Outcome, e.Reason = "failed", "deadline"
+	}
+	if errors.Is(err, context.Canceled) {
+		e.Outcome, e.Reason = "failed", "forced"
+	}
+	return e
 }

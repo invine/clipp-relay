@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/quota"
 	"github.com/libp2p/go-libp2p/core/metrics"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -44,6 +45,7 @@ func (r *endpointReporter) report(n int64, proto protocol.ID, p peer.ID) {
 	}
 	remaining := n
 	for remaining > 0 {
+		started := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		balance, err := s.credit.Take(ctx, active.account, active.generation, 0)
 		if err == nil && balance.Usable == 0 {
@@ -66,7 +68,13 @@ func (r *endpointReporter) report(n int64, proto protocol.ID, p peer.ID) {
 		}
 		cancel()
 		if err != nil {
-			s.closeAccount(active.account)
+			if s.diagnostics != nil {
+				// Stock byte callbacks carry only a Peer ID. Their account
+				// association is sampled at report time, so they cannot
+				// truthfully carry request or physical-session correlation.
+				s.diagnostics.Emit(diagnostic.Event{Event: "quota.reporting", Outcome: "failed", Reason: "reporting_failed", Duration: time.Since(started)})
+			}
+			s.detachAccount(active.account, "reporting_failed")()
 			return
 		}
 	}
@@ -88,11 +96,15 @@ func (r *endpointReporter) TrimIdle(time.Time) {}
 // DetachAccount removes every session while the caller still holds its account
 // guard. The returned connection closes perform I/O after that guard is released.
 func (s *Server) DetachAccount(account string) func() {
+	return s.detachAccount(account, "policy_changed")
+}
+
+func (s *Server) detachAccount(account, reason string) func() {
 	s.mu.Lock()
 	connections := make([]*session, 0, len(s.byAccount[account]))
 	for v := range s.byAccount[account] {
 		connections = append(connections, v)
-		s.removeLocked(v)
+		s.endSessionLocked(v, reason)
 	}
 	s.mu.Unlock()
 	return func() {
@@ -104,5 +116,3 @@ func (s *Server) DetachAccount(account string) func() {
 
 // CloseAccount invalidates all live sessions after an account policy change.
 func (s *Server) CloseAccount(account string) { s.DetachAccount(account)() }
-
-func (s *Server) closeAccount(account string) { s.CloseAccount(account) }
