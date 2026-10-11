@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -10,10 +11,191 @@ import (
 	"testing"
 	"time"
 
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/service"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type diagnosticBuffer struct {
+	sync.Mutex
+	bytes.Buffer
+}
+
+type stalledDiagnosticOutput struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *stalledDiagnosticOutput) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return len(p), nil
+}
+
+func (b *diagnosticBuffer) Write(p []byte) (int, error) {
+	b.Lock()
+	defer b.Unlock()
+	return b.Buffer.Write(p)
+}
+func (b *diagnosticBuffer) String() string { b.Lock(); defer b.Unlock(); return b.Buffer.String() }
+
+func TestReadinessRowsFollowPublicationAndRouting(t *testing.T) {
+	s := service.New()
+	var output diagnosticBuffer
+	log := diagnostic.New(&output)
+	s.SetDiagnostics(log.Emit)
+	s.SetRouting(false)
+	s.SetReadinessCheck(func() bool { return false })
+	s.SetReady(true)
+	probe := func() int {
+		r := httptest.NewRecorder()
+		s.PrivateHandler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		return r.Code
+	}
+	if probe() != 503 {
+		t.Fatal("unbound service ready")
+	}
+	s.SetRouting(true)
+	if probe() != 503 {
+		t.Fatal("unpublished service ready")
+	}
+	s.SetReadinessCheck(func() bool { return true })
+	if probe() != 200 {
+		t.Fatal("published service unavailable")
+	}
+	s.SetReadinessCheck(func() bool { return false })
+	if probe() != 503 {
+		t.Fatal("stale publication kept service ready")
+	}
+	s.SetReadinessCheck(func() bool { return true })
+	if probe() != 200 {
+		t.Fatal("publication recovery not ready")
+	}
+	s.BeginDrain()
+	if probe() != 503 {
+		t.Fatal("draining service ready")
+	}
+	log.Close()
+	rows := output.String()
+	if !strings.Contains(rows, `"event":"service.readiness"`) || !strings.Contains(rows, `"outcome":"recovered"`) || !strings.Contains(rows, `"reason":"not_published"`) || !strings.Contains(rows, `"reason":"publication_stale"`) || !strings.Contains(rows, `"reason":"draining"`) {
+		t.Fatal(rows)
+	}
+	if strings.Count(rows, `"event":"service.readiness"`) != 5 {
+		t.Fatal(rows)
+	}
+}
+
+func TestListenerFailureHasSafeCatalogReason(t *testing.T) {
+	s := service.New()
+	var output diagnosticBuffer
+	log := diagnostic.New(&output)
+	s.SetDiagnostics(log.Emit)
+	if err := s.Run(context.Background(), "invalid-listen-address-secret-canary", "127.0.0.1:0"); err == nil {
+		t.Fatal("invalid listener served")
+	}
+	log.Close()
+	rows := output.String()
+	if !strings.Contains(rows, `"event":"service.serving"`) || !strings.Contains(rows, `"reason":"listener_failed"`) || strings.Contains(rows, "secret-canary") {
+		t.Fatal(rows)
+	}
+	if !strings.Contains(rows, `"level":"ERROR"`) {
+		t.Fatal(rows)
+	}
+}
+
+func TestBoundListenersAndCompletedStopHaveSeparateRows(t *testing.T) {
+	s := service.New()
+	var output diagnosticBuffer
+	log := diagnostic.New(&output)
+	s.SetDiagnostics(log.Emit)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- s.Run(ctx, "127.0.0.1:0", "127.0.0.1:0") }()
+	// Listener success is emitted only after both binds. The writer is asynchronous.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(output.String(), `"event":"service.serving"`) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("service did not stop")
+	}
+	log.Close()
+	rows := output.String()
+	if !strings.Contains(rows, `"event":"service.serving"`) || !strings.Contains(rows, `"event":"service.stopped"`) {
+		t.Fatal(rows)
+	}
+}
+
+func TestBlockedDiagnosticsDoNotHoldServingOrShutdown(t *testing.T) {
+	s := service.New()
+	w := &stalledDiagnosticOutput{entered: make(chan struct{}), release: make(chan struct{})}
+	log := diagnostic.New(w)
+	s.SetDiagnostics(log.Emit)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- s.Run(ctx, "127.0.0.1:0", "127.0.0.1:0") }()
+	select {
+	case <-w.entered:
+	case <-time.After(time.Second):
+		cancel()
+		close(w.release)
+		t.Fatal("serving event did not reach writer")
+	}
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown waited for output")
+	}
+	log.Close()
+	if time.Since(start) > 300*time.Millisecond {
+		t.Fatal("shutdown exceeded diagnostic flush bound")
+	}
+	close(w.release)
+}
+
+func TestFailedStopIsNotReportedAsCompleted(t *testing.T) {
+	s := service.New()
+	var output diagnosticBuffer
+	log := diagnostic.New(&output)
+	s.SetDiagnostics(log.Emit)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- s.Run(ctx, "127.0.0.1:0", "127.0.0.1:0") }()
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(output.String(), `"event":"service.serving"`) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	s.SetStopFailure()
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("failed stop returned success")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("service did not stop")
+	}
+	log.Close()
+	if !strings.Contains(output.String(), `"event":"service.stopped"`) || !strings.Contains(output.String(), `"reason":"internal_failure"`) {
+		t.Fatal(output.String())
+	}
+}
 
 func TestClockUnavailabilityDoesNotWithdrawHTTPReadiness(t *testing.T) {
 	s := service.New()
