@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/relay"
 	ma "github.com/multiformats/go-multiaddr"
 )
@@ -44,10 +45,13 @@ type Controller struct {
 	apiURL, token string
 	config        Config
 	ready         func(bool)
+	transitions   *diagnostic.Transitions
 	now           func() time.Time
 	mu            sync.Mutex
 	sources       map[string]*source
 }
+
+func (c *Controller) SetTransitions(t *diagnostic.Transitions) { c.transitions = t }
 
 func New(d *relay.Discovery, client *http.Client, apiURL, token string, cfg Config, ready func(bool)) (*Controller, error) {
 	if d == nil || ready == nil {
@@ -115,12 +119,15 @@ func (c *Controller) get(ctx context.Context, s *source) ([]ma.Multiaddr, string
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
+		if response.StatusCode < 500 {
+			return nil, "", diagnostic.ErrInvalidResponse
+		}
 		return nil, "", fmt.Errorf("Service API status %d", response.StatusCode)
 	}
 	var service serviceResponse
 	dec := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
 	if err = dec.Decode(&service); err != nil {
-		return nil, "", err
+		return nil, "", diagnostic.ErrInvalidResponse
 	}
 	portPresent := false
 	for _, p := range service.Spec.Ports {
@@ -163,7 +170,7 @@ func (c *Controller) get(ctx context.Context, s *source) ([]ma.Multiaddr, string
 	}
 	sort.Strings(keys)
 	if len(keys) > 16 {
-		return nil, "", errors.New("too many observed Service addresses")
+		return nil, "", diagnostic.ErrInvalidResponse
 	}
 	addresses := make([]ma.Multiaddr, 0, len(keys))
 	for _, key := range keys {
@@ -192,9 +199,16 @@ func validDNS(name string) bool {
 // Sync verifies every watched Service. A failed API read keeps the last good
 // snapshot until its original five-minute deadline; it cannot extend freshness.
 func (c *Controller) Sync(ctx context.Context) error {
+	started := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var first error
+	defer func() {
+		// Only watched Sources exercise the Kubernetes API.
+		if len(c.sources) > 0 {
+			c.transitions.Dependency("dependency.publication_api", first, ctx, time.Since(started))
+		}
+	}()
 	for _, name := range []string{"tcp", "webrtc"} {
 		s := c.sources[name]
 		if s == nil {
@@ -256,6 +270,7 @@ func (c *Controller) publishLocked() {
 
 func (c *Controller) watch(ctx context.Context, s *source, changed chan<- struct{}) {
 	for ctx.Err() == nil {
+		started := time.Now()
 		c.mu.Lock()
 		endpoint := c.endpoint(s, true)
 		c.mu.Unlock()
@@ -268,6 +283,9 @@ func (c *Controller) watch(ctx context.Context, s *source, changed chan<- struct
 				if response.StatusCode == 200 {
 					var event json.RawMessage
 					err = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&event)
+					if err != nil {
+						err = diagnostic.ErrInvalidResponse
+					}
 					if err == nil {
 						select {
 						case changed <- struct{}{}:
@@ -275,10 +293,17 @@ func (c *Controller) watch(ctx context.Context, s *source, changed chan<- struct
 						}
 					}
 				} else {
-					err = fmt.Errorf("Service watch status %d", response.StatusCode)
+					if response.StatusCode < 500 {
+						err = diagnostic.ErrInvalidResponse
+					} else {
+						err = fmt.Errorf("Service watch status %d", response.StatusCode)
+					}
 				}
 				_ = response.Body.Close()
 			}
+		}
+		if ctx.Err() == nil {
+			c.transitions.Dependency("dependency.publication_api", err, ctx, time.Since(started))
 		}
 		if err != nil {
 			select {

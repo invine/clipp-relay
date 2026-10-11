@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/diagnostic"
 )
 
 func TestPepperRetirementRequiresCredentialCoverage(t *testing.T) {
@@ -57,6 +58,34 @@ func TestCleanupSignalsReportRetentionBreach(t *testing.T) {
 	if signals.OldestAge < 47*time.Hour || !signals.Warning || !signals.Critical || !signals.Breach {
 		t.Fatalf("retention breach invisible: %+v", signals)
 	}
+	var events []diagnostic.Event
+	observations := diagnostic.NewObservations(func(e diagnostic.Event) { events = append(events, e) }, func(ctx context.Context) (string, error) {
+		v, err := s.SampleCleanupSignals(ctx)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case v.Breach:
+			return "breach", nil
+		case v.Critical:
+			return "critical", nil
+		case v.Warning:
+			return "warning", nil
+		default:
+			return "none", nil
+		}
+	}, nil)
+	observations.Tick(ctx, time.Now())
+	observations.Wait()
+	breachLogged := false
+	for _, e := range events {
+		if e.Event == "observation.threshold" && e.Signal == "cleanup" && e.Reason == "breach" {
+			breachLogged = true
+		}
+	}
+	if !breachLogged {
+		t.Fatalf("real SQL breach not logged: %+v", events)
+	}
 	baseline := signals.BreachEpisodes
 	if _, err := db.Pool.Exec(ctx, `UPDATE public.cleanup_breach_record SET active=false WHERE singleton=true`); err != nil {
 		t.Fatal(err)
@@ -84,5 +113,19 @@ func TestCleanupSignalsReportRetentionBreach(t *testing.T) {
 	persisted, err := restarted.SampleCleanupSignals(ctx)
 	if err != nil || persisted.BreachEpisodes <= baseline {
 		t.Fatalf("breach episode lost across restart: %+v %v", persisted, err)
+	}
+	observations.Tick(ctx, time.Now().Add(time.Minute))
+	observations.Wait()
+	if persisted.Breach {
+		t.Fatalf("cleanup did not clear real SQL breach: %+v", persisted)
+	}
+	cleared := false
+	for _, e := range events {
+		if e.Event == "observation.threshold" && e.Signal == "cleanup" && e.Reason != "breach" {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatalf("cleanup threshold clearance not logged: %+v", events)
 	}
 }

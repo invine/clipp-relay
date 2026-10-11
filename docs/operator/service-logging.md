@@ -126,3 +126,29 @@ Focused local checks: `go test -count=1 ./internal/relay -run 'Test(ReservationD
 `quota.credit_retired/success/discarded` means process-local usable credit was invalidated after a policy or generation change; `expired` means its local week deadline passed. Ordinary retirement does not refund Quota Committed. The stock HOP/STOP byte reporter logs no successful callback rows. On a reporting failure, `quota.reporting/failed/reporting_failed` is aggregate evidence without a request or Relay Session ID; all live sessions for the sampled account are closed, and their individual `relay.session/ended/reporting_failed` rows may carry real physical-connection IDs. Reporter callbacks may charge a later association for an old connection's tail bytes, so these rows cannot establish exact transferred bytes or client receipt. Repeated outcomes share the fixed activity and per-tuple rate limits; individual rows and the best-effort loss summary may be absent.
 
 Focused checks: `go test -count=1 ./internal/quota -run 'Test(QuotaDiagnostics|LostCommitReplyReconcilesSameReceipt|KnownRollbackRetriesWithoutDoubleDebit|DatabaseOutageOnlyAllowsConfirmedLocalCredit|AllocationProcessCrashAtCommitBoundary)$'` with a disposable real PostgreSQL 18 TLS/SCRAM fixture, plus `go test -count=1 ./internal/relay -run 'Test(QuotaReporterClosesSessionsWithReportingReason|ConfirmedPartialCreditClosesAllAccountSessionsOnExhaustion|ReporterChargesCurrentPeerAssociationAndRecordsUnattributedTail)$'`. The real SQL fixture must be recorded separately from routine checks, which can skip it. Local checks do not establish deployed behavior.
+
+## Dependency and maintenance observations
+
+These rows are illustrative. A dependency failure describes a provider request or database operation; a later `recovered` row means a fresh operation succeeded. Neither proves a particular client received a response. Repeated failures and repeated successes in the same state stay quiet. Durations measure the individual operation. Raw SQL, upstream URLs and response bodies are excluded.
+
+```json
+{"time":"2026-10-11T10:30:00Z","level":"WARN","msg":"dependency database","event":"dependency.database","outcome":"failed","reason":"unavailable","duration_ms":503}
+{"time":"2026-10-11T10:31:00Z","level":"INFO","msg":"dependency database","event":"dependency.database","outcome":"recovered","reason":"none","duration_ms":12}
+{"time":"2026-10-11T10:32:00Z","level":"WARN","msg":"dependency deletion_journal","event":"dependency.deletion_journal","outcome":"failed","reason":"deadline","duration_ms":5000}
+```
+
+The same transition rule covers `dependency.google_token`, `dependency.google_jwks` and `dependency.publication_api`. A publication API failure may leave the previous verified address snapshot usable until its existing five-minute expiry. A journal failure does not relax the deletion proof or startup gate. A quota-clock diagnostic is separate from its existing stricter safety probe and recovery rule.
+
+```json
+{"time":"2026-10-11T10:33:00Z","level":"INFO","msg":"observation state","event":"observation.state","outcome":"observed","reason":"none","signal":"cleanup","state":"available"}
+{"time":"2026-10-11T10:33:00Z","level":"INFO","msg":"observation threshold","event":"observation.threshold","outcome":"observed","reason":"warning","signal":"cleanup"}
+{"time":"2026-10-11T10:34:00Z","level":"WARN","msg":"observation state","event":"observation.state","outcome":"failed","reason":"observation_failed","signal":"cleanup","state":"failed"}
+{"time":"2026-10-11T10:37:00Z","level":"WARN","msg":"observation state","event":"observation.state","outcome":"failed","reason":"observation_stale","signal":"cleanup","state":"stale"}
+{"time":"2026-10-11T10:38:00Z","level":"INFO","msg":"observation state","event":"observation.state","outcome":"recovered","reason":"none","signal":"cleanup","state":"available"}
+{"time":"2026-10-11T10:38:00Z","level":"INFO","msg":"observation threshold","event":"observation.threshold","outcome":"recovered","reason":"none","signal":"cleanup"}
+{"time":"2026-10-11T10:38:00Z","level":"INFO","msg":"observation state","event":"observation.state","outcome":"observed","reason":"producer_unavailable","signal":"full_backup","state":"unavailable"}
+```
+
+The diagnostic pass runs every 60 seconds with a five-second deadline and one pass in flight. A failed sample immediately invalidates its current value; an unrefreshed successful sample becomes stale after 180 seconds. No value or periodic gauge appears in these rows. Cleanup warning is older than one hour, critical at 12 hours and breach at 24 hours. Pending deletion warning is at 15 minutes and critical at one hour or 820 pending operations (80% of 1,024, rounded up). A threshold row tracks the highest crossed level; a fresh lower sample changes that level, and `recovered/none` clears it. Recovery, full backup, repository retention, certificate and database infrastructure producers remain unavailable and cannot satisfy a recoverability gate. The existing private `/metrics` endpoint and maintenance worker cadence retain their own behavior.
+
+Focused checks: `go test -count=1 ./internal/diagnostic ./internal/database ./internal/publication ./internal/auth -run 'Test(DependencyTransitionsEmitFailureAndProvenRecoveryOnly|MaintenanceObservationTransitionsAndFreshness|MaintenanceObservationHasOneInFlightPass|RuntimeWorkFailureAndRecoveryAreAggregateTransitions|ServiceChangesAndOutagePublishCompleteSnapshot|QualifiedJournalFailureAndRecoveryAreSafeTransitions|CleanupSignalsReportRetentionBreach|OwnerDeletionJournalReconciliationAndFreshPendingAccount)$'`. The last two require a disposable real PostgreSQL fixture; a skip is not a pass. Run the routine and race verification profiles separately.

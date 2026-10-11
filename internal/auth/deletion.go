@@ -67,6 +67,9 @@ var errDeletionFinalizationUnconfirmed = errors.New("deletion finalization uncer
 // coverage floor. A nil/unqualified journal leaves deletion unavailable.
 func (s *Server) SetDeletionJournal(j DeletionJournal, repository string, floor int64, floorHash string) {
 	s.deletionJournal = j
+	if j != nil && s.transitions != nil {
+		s.deletionJournal = observedJournal{DeletionJournal: j, transitions: s.transitions}
+	}
 	s.deletionRepository = repository
 	s.deletionFloor = floor
 	s.deletionFloorHash = floorHash
@@ -256,7 +259,9 @@ func (s *Server) nextDeletion(ctx context.Context) (pendingDeletion, error) {
 	return x, err
 }
 
-func (s *Server) readHead(ctx context.Context) (JournalHead, string, error) {
+func (s *Server) readHead(ctx context.Context) (result JournalHead, resultETag string, resultErr error) {
+	started := time.Now()
+	defer func() { s.transitions.Dependency("dependency.deletion_journal", resultErr, ctx, time.Since(started)) }()
 	if s.deletionJournal == nil {
 		return JournalHead{}, "", errors.New("journal unavailable")
 	}

@@ -30,6 +30,7 @@ func main() {
 func run() int {
 	logger := diagnostic.New(os.Stdout)
 	defer logger.Close()
+	dependencies := diagnostic.NewTransitions(logger.Emit)
 	fail := func(reason string) int {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: reason})
 		return 1
@@ -94,8 +95,10 @@ func run() int {
 	}
 	srv := service.New()
 	db := database.NewRuntime(pool)
+	db.SetTransitions(dependencies)
 	portal := auth.NewWithRuntime(db, c, material, auth.Google())
 	portal.SetDiagnostics(logger)
+	portal.SetTransitions(dependencies)
 	if err := portal.ValidatePepperCoverage(startup); err != nil {
 		if !errors.Is(err, auth.ErrRetainedPepperUnavailable) {
 			return fail("configuration_rejected")
@@ -130,6 +133,35 @@ func run() int {
 	credit := quota.NewWithRuntime(db)
 	credit.SetDiagnostics(logger)
 	defer credit.Close()
+	observations := diagnostic.NewObservations(logger.Emit, func(ctx context.Context) (string, error) {
+		sample, err := portal.SampleCleanupSignals(ctx)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case sample.Breach:
+			return "breach", nil
+		case sample.Critical:
+			return "critical", nil
+		case sample.Warning:
+			return "warning", nil
+		default:
+			return "none", nil
+		}
+	}, func(ctx context.Context) (string, error) {
+		sample, err := portal.SampleDeletionSignals(ctx)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case sample.Critical:
+			return "critical", nil
+		case sample.Warning:
+			return "warning", nil
+		default:
+			return "none", nil
+		}
+	})
 	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
 	if err != nil {
 		logger.Emit(diagnostic.Event{Event: "service.serving", Outcome: "failed", Reason: "listener_failed"})
@@ -187,6 +219,7 @@ func run() int {
 	if err != nil {
 		return fail("configuration_rejected")
 	}
+	controller.SetTransitions(dependencies)
 	mux := http.NewServeMux()
 	mux.Handle("/v1/relay", discovery)
 	mux.Handle("/", portal.Handler())
@@ -194,6 +227,20 @@ func run() int {
 	srv.SetRouting(false)
 	logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "success", Reason: "none", SchemaRevision: database.ExpectedRevision})
 	go controller.Run(ctx)
+	go observations.Run(ctx)
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			safe, _, sampled := credit.ClockHealth()
+			observations.Clock(safe, sampled, time.Now())
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	serveCtx, stopServing := context.WithCancel(context.Background())
 	defer stopServing()
 	go func() {

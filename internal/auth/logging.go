@@ -16,6 +16,15 @@ type requestDiagnostic struct {
 // SetDiagnostics attaches the serving process's bounded logger before Handler is used.
 // It creates no identity-linked or cross-request diagnostic state.
 func (s *Server) SetDiagnostics(logger *diagnostic.Logger) { s.diagnostics = logger }
+func (s *Server) SetTransitions(transitions *diagnostic.Transitions) {
+	s.transitions = transitions
+	if s.deletionJournal != nil {
+		if observed, ok := s.deletionJournal.(observedJournal); ok {
+			s.deletionJournal = observed.DeletionJournal
+		}
+		s.deletionJournal = observedJournal{DeletionJournal: s.deletionJournal, transitions: transitions}
+	}
+}
 
 func diagnosticFor(r *http.Request) *requestDiagnostic {
 	trace, _ := r.Context().Value(diagnosticContextKey{}).(*requestDiagnostic)
