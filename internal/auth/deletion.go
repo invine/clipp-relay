@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -193,8 +194,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Location", "/auth/deletion/"+operation)
 	w.Header().Set("Retry-After", "5")
-	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte("Deletion pending; retrying independently."))
+	renderDeletion(w, true, "/auth/deletion/"+operation)
 }
 
 func (s *Server) deletionStatus(w http.ResponseWriter, r *http.Request) {
@@ -213,14 +213,7 @@ func (s *Server) deletionStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	if completed == nil {
-		w.Header().Set("Retry-After", "5")
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte("Deletion pending; retrying independently."))
-		return
-	}
-	_, _ = w.Write([]byte("Deletion complete."))
+	renderDeletion(w, completed == nil, r.URL.Path)
 }
 
 type pendingDeletion struct {
@@ -680,4 +673,16 @@ func (s *Server) SampleDeletionSignals(ctx context.Context) (DeletionSignals, er
 	out.Warning = out.OldestAge >= 15*time.Minute
 	out.Critical = out.OldestAge >= time.Hour || count >= 820
 	return out, nil
+}
+
+func renderDeletion(w http.ResponseWriter, pending bool, statusURL string) {
+	status := http.StatusOK
+	if pending {
+		w.Header().Set("Retry-After", "5")
+		status = http.StatusAccepted
+	}
+	portal.Render(w, status, "deletion", struct {
+		Pending   bool
+		StatusURL string
+	}{pending, statusURL})
 }

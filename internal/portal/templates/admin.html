@@ -1,0 +1,218 @@
+{{define "admin"}}
+{{template "head" "Clipp Relay — Administration"}}
+<main class="page admin-page">
+  <div class="page-heading">
+<div>
+<p class="eyebrow">ADMINISTRATION</p>
+<h1>Relay workspace</h1>
+<p class="muted">Manage account access and weekly allowances.</p>
+</div>
+<a class="button secondary" href="/">Your account <span aria-hidden="true">↗</span>
+</a>
+</div>
+  <p class="muted fine-print">Applied allowlist revision {{.PolicyRevision}}
+</p>
+  <section class="service-totals" aria-label="Service totals">
+<div class="card">
+<span class="badge status-Pending">Pending</span>
+<strong>{{.Pending}}
+</strong>
+</div>
+<div class="card">
+<span class="badge status-Active">Active</span>
+<strong>{{.Active}}
+</strong>
+</div>
+<div class="card">
+<span class="badge status-Suspended">Suspended</span>
+<strong>{{.Suspended}}
+</strong>
+</div>
+<div class="card">
+<span class="badge status-Denied">Denied</span>
+<strong>{{.Denied}}
+</strong>
+</div>
+</section>
+  <div class="admin-grid">
+  <section class="card">
+<div class="section-heading">
+<div>
+<p class="eyebrow">RELAY ACCOUNTS</p>
+<h2>Accounts</h2>
+</div>
+</div>
+<p class="scroll-hint muted fine-print">Swipe the table to see all columns and account actions.</p>
+<div class="table-scroll">
+<table>
+<thead>
+<tr>
+<th scope="col">Email</th>
+<th scope="col">Status</th>
+<th scope="col">Revision</th>
+<th scope="col">Plan</th>
+<th scope="col">
+<span class="sr-only">Action</span>
+</th>
+</tr>
+</thead>
+<tbody>{{range .Accounts}}
+<tr{{if eq .ID $.Selected}} class="selected-row"{{end}}>
+<td class="account-email">{{.Email}}
+</td>
+<td>
+<span class="badge status-{{.Status}}">{{.Status}}
+</span>
+</td>
+<td>{{.Revision}}
+</td>
+<td class="identifier" title="{{.PlanID}}">{{if .PlanID}}{{.PlanID}}{{else}}Unassigned{{end}}
+</td>
+<td>
+<a class="table-link" href="/admin?selected={{.ID}}&accounts_after={{$.AccountCursor}}&plans_after={{$.PlanCursor}}&limit={{$.Limit}}">Select</a>
+</td>
+</tr>{{else}}
+<tr>
+<td colspan="5" class="empty-state">No accounts on this page.</td>
+</tr>{{end}}
+</tbody>
+</table>
+</div>{{if .NextAccount}}
+<a class="button secondary pagination" href="/admin?accounts_after={{.NextAccount}}&plans_after={{.PlanCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next accounts →</a>{{end}}
+</section>
+  <section class="card account-editor">
+<p class="eyebrow">ACCOUNT EDITOR</p>
+<h2>Selected account</h2>{{with .SelectedAccount}}
+<p class="account-email">{{.Email}}
+</p>
+<p>
+<span class="badge status-{{.Status}}">{{.Status}}
+</span> <span class="muted fine-print">Revision {{.Revision}}
+</span>
+</p>
+<form class="form-stack" method="post" action="/admin/accounts/{{.ID}}">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="revision" value="{{.Revision}}">
+<label>Action<select name="action">
+<option value="approve">Approve</option>
+<option value="suspend">Suspend</option>
+<option value="reactivate">Reactivate</option>
+<option value="deny">Deny</option>
+<option value="review">Return to pending review</option>
+<option value="revoke">Revoke credentials</option>
+<option value="assign">Assign replacement plan</option>
+<option value="override">Set quota overrides</option>
+</select>
+</label>
+<label>Plan<select name="plan_id">{{range $.Plans}}{{if not .Archived}}
+<option value="{{.ID}}"{{if eq .ID $.SelectedAccount.PlanID}} selected{{end}}>{{.Name}} ({{bytes .Bytes}}/week, {{.Sessions}} sessions)</option>{{end}}{{end}}
+</select>
+</label>{{with byteInput .WeeklyOverride}}
+<div>
+<label for="weekly-override">Weekly allowance override</label>
+<div class="quantity-input">
+<input id="weekly-override" name="weekly_bytes_override" type="number" min="0" step="any" value="{{.Value}}">
+<label class="sr-only" for="override-unit">Allowance unit</label>
+<select id="override-unit" name="weekly_bytes_override_unit">{{template "unit-options" .Unit}}
+</select>
+</div>
+<p class="muted fine-print">Leave blank to use the plan allowance.</p>
+</div>{{end}}
+<label>Session override (blank uses plan)<input name="sessions_override" type="number" min="0" value="{{.SessionOverride}}">
+</label>
+<label>Reason<select name="reason">{{template "reasons"}}
+</select>
+</label>
+<button>Apply changes</button>
+</form>{{else}}
+<div class="empty-state">
+<p>Select an account from the table to review its access, plan, and overrides.</p>
+</div>{{end}}
+</section>
+  </div>
+  <section class="card">
+<div class="section-heading">
+<div>
+<p class="eyebrow">ALLOWANCE LIBRARY</p>
+<h2>Quota Plans</h2>
+</div>
+<span class="muted fine-print">Assigned allowances stay fixed</span>
+</div>
+<p class="scroll-hint muted fine-print">Swipe the table to see all columns and plan actions.</p>
+<div class="table-scroll">
+<table>
+<thead>
+<tr>
+<th scope="col">Name</th>
+<th scope="col">Weekly allowance</th>
+<th scope="col">Sessions</th>
+<th scope="col">Revision</th>
+<th scope="col">State</th>
+<th scope="col">
+<span class="sr-only">Action</span>
+</th>
+</tr>
+</thead>
+<tbody>{{range .Plans}}
+<tr>
+<td>
+<strong>{{.Name}}
+</strong>
+</td>
+<td title="{{.Bytes}} bytes">{{bytes .Bytes}}
+</td>
+<td>{{.Sessions}}
+</td>
+<td>{{.Revision}}
+</td>
+<td>
+<span class="badge {{if .Archived}}status-Suspended{{else}}status-Active{{end}}">{{if .Archived}}Archived{{else}}Available{{end}}
+</span>
+</td>
+<td>{{if not .Archived}}
+<form method="post" action="/admin/plans/{{.ID}}/archive">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="revision" value="{{.Revision}}">
+<input type="hidden" name="reason" value="routine_administration">
+<button class="secondary compact">Archive</button>
+</form>{{end}}
+</td>
+</tr>{{else}}
+<tr>
+<td colspan="6" class="empty-state">No plans on this page.</td>
+</tr>{{end}}
+</tbody>
+</table>
+</div>{{if .NextPlan}}
+<a class="button secondary pagination" href="/admin?plans_after={{.NextPlan}}&accounts_after={{.AccountCursor}}&selected={{.Selected}}&limit={{.Limit}}">Next plans →</a>{{end}}
+  <div class="create-plan">
+<h3>Create plan</h3>
+<p class="muted">Choose an allowance and a maximum number of concurrent relay connections.</p>
+<form class="plan-form" method="post" action="/admin/plans">
+<label>Name<input name="name" maxlength="120" placeholder="e.g. Standard" required>
+</label>
+<div>
+<label for="weekly-bytes">Weekly allowance</label>
+<div class="quantity-input">
+<input id="weekly-bytes" name="weekly_bytes" type="number" min="0" step="any" placeholder="1" required>
+<label class="sr-only" for="weekly-unit">Allowance unit</label>
+<select id="weekly-unit" name="weekly_bytes_unit">{{template "unit-options" "GiB"}}
+</select>
+</div>
+</div>
+<label>Sessions<input name="sessions" type="number" min="0" placeholder="5" required>
+</label>
+<label>Reason<select name="reason">{{template "reasons"}}
+</select>
+</label>
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="operation_id" value="{{.OperationID}}">
+<input type="hidden" name="operation_proof" value="{{.OperationProof}}">
+<button>Create plan</button>
+</form>
+<p class="muted fine-print">Units use powers of 1024: 1 GiB = 1024 MiB.</p>
+</div>
+</section>
+</main>
+{{template "foot"}}
+{{end}}

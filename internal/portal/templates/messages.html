@@ -1,0 +1,91 @@
+{{define "consent"}}{{template "head" "Authorize Clipp Relay"}}
+<main class="page narrow">
+<section class="card welcome">
+<p class="eyebrow">CONNECT YOUR APP</p>
+<h1>Authorize Clipp Relay</h1>
+<p class="lede">Allow <strong>{{clientName .Client}}
+</strong> to use this relay account?</p>
+<p class="muted">The app will be able to connect through this relay within your account’s allowance. You can revoke access from your relay account at any time.</p>
+<form method="post" action="/oauth/authorize">
+<input type="hidden" name="flow" value="{{.Flow}}">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit">Authorize Clipp →</button>
+</form>
+<p class="muted fine-print">To cancel, close this page and return to Clipp.</p>
+</section>
+</main>{{template "foot"}}{{end}}
+
+{{define "setup"}}{{template "head" "Clipp Relay — Service setup"}}
+<main class="page narrow">
+<section class="card welcome">
+<p class="eyebrow">CLIPP RELAY</p>
+<span class="badge status-Pending">Setup in progress</span>
+<h1>Getting ready<br>to connect.</h1>
+<p class="lede">Service setup is in progress.</p>
+<p class="muted">The relay portal will be available after the operator completes service configuration. Please check back shortly.</p>
+</section>
+</main>{{template "foot"}}{{end}}
+
+{{define "uncertain"}}{{template "head" "Clipp Relay — Result uncertain"}}
+<main class="page narrow">
+<section class="card welcome">
+<p class="eyebrow">PLEASE CHECK YOUR ACCOUNT</p>
+<h1>Result could not be confirmed</h1>
+<p class="lede">Access has been closed while the saved result is checked.</p>
+<p class="muted">Reload the account before taking another action.</p>
+<a class="button" href="/">Return to your account →</a>
+</section>
+</main>{{template "foot"}}{{end}}
+
+{{define "plan-retry"}}{{template "head" "Clipp Relay — Retry plan creation"}}
+<main class="page narrow">
+<section class="card welcome">
+<p class="eyebrow">PLAN CREATION</p>
+<h1>Plan result could not be confirmed</h1>
+<p class="lede">Retry this same operation to check or finish it. Do not start a new plan form for this attempt.</p>
+<div class="note">
+<strong>{{.Name}}
+</strong> · {{bytes .Bytes}} per week · {{.Sessions}} sessions</div>
+<form method="post" action="/admin/plans">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="operation_id" value="{{.OperationID}}">
+<input type="hidden" name="operation_proof" value="{{.OperationProof}}">
+<input type="hidden" name="reason" value="{{.Reason}}">
+<input type="hidden" name="name" value="{{.Name}}">
+<input type="hidden" name="weekly_bytes" value="{{.Bytes}}">
+<input type="hidden" name="sessions" value="{{.Sessions}}">
+<button>Retry this plan →</button>
+</form>
+</section>
+</main>{{template "foot"}}{{end}}
+
+{{define "error"}}{{template "head" "Clipp Relay — Request unavailable"}}
+<main class="page narrow">
+<section class="card welcome">
+<p class="eyebrow">REQUEST {{.Status}}
+</p>
+<h1>Request could not be completed</h1>
+<p class="lede">{{.Message}}
+</p>
+<div class="heading-actions">
+<a class="button" href="/">Return to your account</a>
+<a class="button secondary" href="/auth/login">Sign in with Google</a>
+</div>
+</section>
+</main>{{template "foot"}}{{end}}
+
+{{define "deletion"}}{{template "head" "Clipp Relay — Account deletion"}}
+<main class="page narrow">
+<section class="card welcome">
+<p class="eyebrow">ACCOUNT DELETION</p>{{if .Pending}}
+<span class="badge status-Pending">In progress</span>
+<h1>Deletion pending</h1>
+<p class="lede">Deletion pending; retrying independently.</p>
+<p class="muted">Your access has been closed. This operation continues even if you close the page.</p>
+<a class="button secondary" href="{{.StatusURL}}">Check deletion status →</a>{{else}}
+<h1>Deletion complete.</h1>
+<p class="lede">Your relay account has been deleted.</p>
+<p class="muted">Signing in again creates a new account that requires administrator approval.</p>
+<a class="button secondary" href="/">Return to the portal →</a>{{end}}
+</section>
+</main>{{template "foot"}}{{end}}

@@ -31,7 +31,7 @@ func TestOwnerProfileShowsCommittedUsageAndAbsoluteHistory(t *testing.T) {
 	}
 	out := portalRequest(s, "GET", "/", cookie, nil, "")
 	body := out.Body.String()
-	if out.Code != 200 || !strings.Contains(body, "Quota committed: 65536 bytes") || !strings.Contains(body, "12345 bytes") || !strings.Contains(body, "includes unused funded credit") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Unavailable") || strings.Contains(body, "Quota committed: 10240 bytes") {
+	if out.Code != 200 || !strings.Contains(body, "Quota committed: 64 KiB") || !strings.Contains(body, "12.06 KiB") || !strings.Contains(body, "includes unused funded credit") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Unavailable") || strings.Contains(body, "Quota committed: 10 KiB") {
 		t.Fatalf("profile: %d %s", out.Code, body)
 	}
 	const grantID = "312ff0d4-b531-4240-a0d5-9012805863fb"

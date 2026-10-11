@@ -1,0 +1,40 @@
+{{define "head"}}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>{{.}}
+</title>
+  <link rel="stylesheet" href="/assets/portal.css">
+</head>
+<body>
+<header class="site-header">
+<a class="brand" href="/">
+<span class="brand-mark" aria-hidden="true">
+</span>Clipp <span class="brand-product">Relay</span>
+</a>
+<span class="header-note">A connection for your devices</span>
+</header>
+{{end}}
+
+{{define "foot"}}
+<footer class="site-footer">Clipp Relay · Your clipboard, connected.</footer>
+</body>
+</html>{{end}}
+
+{{define "unit-options"}}
+<option value="B"{{if eq . "B"}} selected{{end}}>bytes</option>
+<option value="KiB"{{if eq . "KiB"}} selected{{end}}>KiB</option>
+<option value="MiB"{{if eq . "MiB"}} selected{{end}}>MiB</option>
+<option value="GiB"{{if eq . "GiB"}} selected{{end}}>GiB</option>
+<option value="TiB"{{if eq . "TiB"}} selected{{end}}>TiB</option>
+{{end}}
+
+{{define "reasons"}}
+<option value="routine_administration">Routine administration</option>
+<option value="policy_enforcement">Policy enforcement</option>
+<option value="suspected_abuse">Suspected abuse</option>
+<option value="security_response">Security response</option>
+<option value="support_correction">Support correction</option>{{end}}
