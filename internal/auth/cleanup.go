@@ -2,8 +2,11 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"clipp-relay/internal/diagnostic"
 )
 
 // CleanupSignals expose age and outcomes without account or credential labels.
@@ -202,10 +205,12 @@ func (s *Server) Maintain(ctx context.Context) {
 	if s.deletionJournal != nil {
 		go s.MaintainDeletions(ctx)
 	}
+	failedPreviously := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		started := time.Now()
 		observation, cancelObservation := context.WithTimeout(ctx, 3*time.Second)
 		observationError := s.recordCleanupBreach(observation)
 		cancelObservation()
@@ -219,8 +224,20 @@ func (s *Server) Maintain(ctx context.Context) {
 		cancelObservation()
 		if err == nil && observationError == nil {
 			s.cleanupCompleted.Add(1)
+			if failedPreviously && s.diagnostics != nil {
+				s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.cleanup", Outcome: "success", Reason: "none", Duration: time.Since(started)})
+			}
+			failedPreviously = false
 		} else if ctx.Err() == nil {
 			s.cleanupFailed.Add(1)
+			if s.diagnostics != nil {
+				reason := "database_unavailable"
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(observationError, context.DeadlineExceeded) {
+					reason = "deadline"
+				}
+				s.diagnostics.Emit(diagnostic.Event{Event: "maintenance.cleanup", Outcome: "failed", Reason: reason, Duration: time.Since(started)})
+			}
+			failedPreviously = true
 		}
 		if ctx.Err() != nil {
 			return

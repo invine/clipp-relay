@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/diagnostic"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -198,13 +199,25 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		discoveryError(w, 400, "invalid_request")
 		return
 	}
+	started := time.Now()
+	requestID := ""
+	if d.server.diagnostics != nil {
+		requestID = d.server.diagnostics.NewID()
+	}
+	emit := func(outcome, reason string) {
+		if d.server.diagnostics != nil {
+			d.server.diagnostics.Emit(diagnostic.Event{Event: "relay.discovery", Outcome: outcome, Reason: reason, RequestID: requestID, Duration: time.Since(started)})
+		}
+	}
 	if !d.server.Serving() {
 		discoveryError(w, 503, "temporarily_unavailable")
+		emit("refused", "draining")
 		return
 	}
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") || strings.Count(authHeader, " ") != 1 {
 		discoveryError(w, 401, "authentication_failed")
+		emit("refused", "invalid_credentials")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -213,6 +226,7 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidAccess) {
 			discoveryError(w, 401, "authentication_failed")
+			emit("refused", "invalid_credentials")
 		} else {
 			discoveryError(w, 503, "temporarily_unavailable")
 		}
@@ -220,6 +234,7 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !d.server.Serving() {
 		discoveryError(w, 503, "temporarily_unavailable")
+		emit("refused", "draining")
 		return
 	}
 	d.mu.RLock()
@@ -228,10 +243,12 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	d.mu.RUnlock()
 	if len(addresses) == 0 || time.Since(verified) > 5*time.Minute {
 		discoveryError(w, 503, "temporarily_unavailable")
+		emit("refused", "not_published")
 		return
 	}
 	if d.server.ActiveSessions() >= d.server.maxSessions {
 		discoveryError(w, 429, "rate_limited")
+		emit("refused", "safety_limit")
 		return
 	}
 	expiry := time.Now().Add(time.Minute)
@@ -254,5 +271,7 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	if n, err := w.Write(data); err == nil && n == len(data) {
+		emit("success", "none")
+	}
 }
