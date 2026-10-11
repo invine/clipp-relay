@@ -426,6 +426,9 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	action := r.PostForm.Get("action")
 	if event := adminAccountDiagnosticEvent(action); event != "" {
 		markAction(r, event)
+	} else if action == "review" {
+		// Review has no fixed catalog pair; the route is still handled.
+		markAction(r, "")
 	}
 	actor, ok := s.administrator(w, r, true)
 	if !ok {
@@ -453,6 +456,9 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	var uncertain bool
 	var securitySubject string
 	var closeConnections func()
+	if s.beforeAccountActionGuard != nil {
+		s.beforeAccountActionGuard()
+	}
 	update := func(unitCtx context.Context) {
 		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
 		if applied != nil && s.accountChanged != nil {
@@ -462,6 +468,11 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	if spec.security {
 		var subject string
 		if e := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, target).Scan(&subject); e != nil {
+			if errors.Is(e, pgx.ErrNoRows) {
+				markDiagnostic(r, "refused", "invalid_request")
+			} else {
+				markDiagnostic(r, "failed", "database_unavailable")
+			}
 			fail(w, 503)
 			return
 		}
@@ -469,15 +480,18 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		guardEntered := false
 		guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 			guardEntered = true
-			if !s.WithAccountGuards(unitCtx, []string{actor.id, target}, update) {
+			if accountGuardErr := s.withAccountGuards(unitCtx, []string{actor.id, target}, update); accountGuardErr != nil {
+				markGuardDiagnostic(r, accountGuardErr)
 				fail(w, 503)
 			}
 			return nil
 		})
 		if guardErr != nil && !guardEntered {
+			markGuardDiagnostic(r, guardErr)
 			fail(w, 503)
 		}
-	} else if !s.WithAccountGuards(r.Context(), []string{actor.id, target}, update) {
+	} else if accountGuardErr := s.withAccountGuards(r.Context(), []string{actor.id, target}, update); accountGuardErr != nil {
+		markGuardDiagnostic(r, accountGuardErr)
 		fail(w, 503)
 	}
 	if applied != nil {

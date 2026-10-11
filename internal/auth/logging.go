@@ -2,15 +2,18 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
+	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
 )
 
 type diagnosticContextKey struct{}
 type requestDiagnostic struct {
 	event, outcome, reason, client, id string
+	handled                            bool
 }
 
 // SetDiagnostics attaches the serving process's bounded logger before Handler is used.
@@ -48,6 +51,20 @@ func markClient(r *http.Request, client string) {
 func markAction(r *http.Request, event string) {
 	if trace := diagnosticFor(r); trace != nil {
 		trace.event, trace.client = event, ""
+		trace.handled = true
+	}
+}
+
+func markGuardDiagnostic(r *http.Request, err error) {
+	switch {
+	case errors.Is(err, database.ErrWorkUnavailable):
+		markAction(r, "http.request_refused")
+		markDiagnostic(r, "refused", "overloaded")
+	case r.Context().Err() != nil:
+		// A caller cancellation cannot prove a database failure.
+		markAction(r, "")
+	default:
+		markDiagnostic(r, "failed", "database_unavailable")
 	}
 }
 func routeEvent(r *http.Request) string {
@@ -109,6 +126,9 @@ func (s *Server) observedRequest(w http.ResponseWriter, r *http.Request, next ht
 	out := &diagnosticResponse{ResponseWriter: w}
 	next.ServeHTTP(out, r)
 	if trace.event == "" {
+		if trace.handled {
+			return
+		}
 		var reason string
 		switch out.status {
 		case http.StatusNotFound:

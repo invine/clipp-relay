@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"regexp"
@@ -137,6 +138,194 @@ func TestAdministratorRecheckUsesCatalogReason(t *testing.T) {
 	if err := db.Pool.QueryRow(context.Background(), `SELECT a.status, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_approved') FROM public.accounts a WHERE a.id=$1`, target).Scan(&status, &audited); err != nil || status != "Pending" || audited {
 		t.Fatalf("guard refusal changed account status=%s audited=%t err=%v", status, audited, err)
 	}
+}
+
+func TestUncatalogedAdministratorActionDoesNotClaimUnknownRoute(t *testing.T) {
+	s, cookie, _, origin := adminFixture(t)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s.SetDiagnostics(logger)
+	target, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"routine_administration"}, "revision": {"1"}, "action": {"review"}}
+	if out := internalRequest(s, http.MethodPost, "/admin/accounts/"+target, cookie, form, origin); out.Code != http.StatusNotFound {
+		t.Fatalf("missing review target status %d", out.Code)
+	}
+	form.Set("action", "SECRET_UNKNOWN_ACTION_CANARY")
+	if out := internalRequest(s, http.MethodPost, "/admin/accounts/"+target, cookie, form, origin); out.Code != http.StatusBadRequest {
+		t.Fatalf("unknown action status %d", out.Code)
+	}
+	if out := internalRequest(s, http.MethodGet, "/admin/no-such-route/"+target, cookie, nil, origin); out.Code != http.StatusNotFound {
+		t.Fatalf("unknown route status %d", out.Code)
+	}
+	logger.Close()
+	logs := output.String()
+	assertActionLog(t, logs, "http.request_refused", "refused", "invalid_route")
+	assertActionLog(t, logs, "http.request_refused", "refused", "invalid_request")
+	var rows int
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		if line != "" {
+			rows++
+		}
+	}
+	if rows != 2 || strings.Contains(logs, "SECRET_") || strings.Contains(logs, target) || strings.Contains(logs, cookie.Value) {
+		t.Fatalf("handled review/unknown action produced a false or unsafe row: %s", logs)
+	}
+}
+
+func TestOwnerRevokeConcurrentInvalidationAndSQLFailureHaveDistinctRows(t *testing.T) {
+	t.Run("account removed after session", func(t *testing.T) {
+		s, cookie, db, origin := adminFixture(t)
+		var output bytes.Buffer
+		logger := diagnostic.New(&output)
+		s.SetDiagnostics(logger)
+		var accountID string
+		if err := db.Pool.QueryRow(context.Background(), `SELECT account_id FROM public.portal_sessions WHERE credential_digest=$1`, s.digest(s.CurrentPepper, "portal-session", cookie.Value)).Scan(&accountID); err != nil {
+			t.Fatal(err)
+		}
+		s.beforeOwnerSubjectRead = func() {
+			if _, err := db.Pool.Exec(context.Background(), `DELETE FROM public.portal_sessions WHERE account_id=$1`, accountID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Pool.Exec(context.Background(), `DELETE FROM public.accounts WHERE id=$1`, accountID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
+		if out := internalRequest(s, http.MethodPost, "/auth/revoke", cookie, form, origin); out.Code != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent invalidation status %d", out.Code)
+		}
+		logger.Close()
+		assertActionLog(t, output.String(), "portal.revoke", "refused", "invalid_credentials")
+	})
+	t.Run("transactional SQL error", func(t *testing.T) {
+		s, cookie, _, origin := adminFixture(t)
+		var output bytes.Buffer
+		logger := diagnostic.New(&output)
+		s.SetDiagnostics(logger)
+		s.beforeOwnerRecheck = func(ctx context.Context, tx pgx.Tx) {
+			_, _ = tx.Exec(ctx, `SELECT 1/0`)
+		}
+		form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
+		if out := internalRequest(s, http.MethodPost, "/auth/revoke", cookie, form, origin); out.Code != http.StatusUnauthorized {
+			t.Fatalf("recheck SQL error status %d", out.Code)
+		}
+		logger.Close()
+		assertActionLog(t, output.String(), "portal.revoke", "failed", "database_unavailable")
+	})
+}
+
+type headOnlyLoggingJournal struct {
+	DeletionJournal
+	head JournalHead
+}
+
+func (j headOnlyLoggingJournal) ReadHead(context.Context) (JournalHead, string, error) {
+	return j.head, "initial", nil
+}
+
+func TestOwnerDeleteTransactionalSQLFailureKeepsDatabaseReason(t *testing.T) {
+	s, cookie, _, origin := adminFixture(t)
+	zero := strings.Repeat("0", 64)
+	s.SetDeletionJournal(headOnlyLoggingJournal{head: JournalHead{
+		RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero,
+		Sequence: 0, Hash: zero, Format: 1,
+	}}, "local-qualified-fixture", 0, zero)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s.SetDiagnostics(logger)
+	s.beforeOwnerRecheck = func(ctx context.Context, tx pgx.Tx) {
+		_, _ = tx.Exec(ctx, `SELECT 1/0`)
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
+	if out := internalRequest(s, http.MethodPost, "/auth/delete", cookie, form, origin); out.Code != http.StatusUnauthorized {
+		t.Fatalf("recheck SQL error status %d", out.Code)
+	}
+	logger.Close()
+	logs := output.String()
+	assertActionLog(t, logs, "portal.delete", "failed", "database_unavailable")
+	if strings.Contains(logs, cookie.Value) || strings.Contains(logs, "invalid_credentials") {
+		t.Fatalf("delete SQL failure claimed credential refusal or leaked credential: %s", logs)
+	}
+}
+
+func TestAdministratorMissingSecurityTargetKeepsRefusalReason(t *testing.T) {
+	s, cookie, _, origin := adminFixture(t)
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s.SetDiagnostics(logger)
+	target, err := uuid()
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "revision": {"1"}, "action": {"deny"}}
+	if out := internalRequest(s, http.MethodPost, "/admin/accounts/"+target, cookie, form, origin); out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing target status %d", out.Code)
+	}
+	logger.Close()
+	logs := output.String()
+	assertActionLog(t, logs, "admin.deny", "refused", "invalid_request")
+	if strings.Contains(logs, target) || strings.Contains(logs, cookie.Value) {
+		t.Fatalf("administrator material leaked: %s", logs)
+	}
+}
+
+func TestOwnerGuardOverloadAndCancellationDoNotClaimDatabaseFailure(t *testing.T) {
+	t.Run("overload", func(t *testing.T) {
+		s, cookie, _, origin := adminFixture(t)
+		var output bytes.Buffer
+		logger := diagnostic.New(&output)
+		s.SetDiagnostics(logger)
+		var releases []func()
+		defer func() {
+			for _, release := range releases {
+				release()
+			}
+		}()
+		s.beforeAccountActionGuard = func() {
+			for range 64 {
+				_, release, err := s.db.StartUnit(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				releases = append(releases, release)
+			}
+		}
+		form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
+		if out := internalRequest(s, http.MethodPost, "/auth/revoke", cookie, form, origin); out.Code != http.StatusServiceUnavailable {
+			t.Fatalf("overload status %d", out.Code)
+		}
+		logger.Close()
+		assertActionLog(t, output.String(), "http.request_refused", "refused", "overloaded")
+		if strings.Contains(output.String(), "database_unavailable") {
+			t.Fatalf("overload claimed database failure: %s", output.String())
+		}
+	})
+	t.Run("caller canceled", func(t *testing.T) {
+		s, cookie, _, origin := adminFixture(t)
+		var output bytes.Buffer
+		logger := diagnostic.New(&output)
+		s.SetDiagnostics(logger)
+		form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
+		r := httptest.NewRequest(http.MethodPost, "/auth/revoke", strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("Origin", origin)
+		r.AddCookie(cookie)
+		ctx, cancel := context.WithCancel(r.Context())
+		r = r.WithContext(ctx)
+		s.beforeAccountActionGuard = cancel
+		out := httptest.NewRecorder()
+		s.Handler().ServeHTTP(out, r)
+		if out.Code != http.StatusServiceUnavailable {
+			t.Fatalf("canceled status %d", out.Code)
+		}
+		logger.Close()
+		if output.Len() != 0 {
+			t.Fatalf("caller cancellation produced action claim: %s", output.String())
+		}
+	})
 }
 
 func TestAdministratorAccountDiagnosticsRespectRevisionAndCommit(t *testing.T) {

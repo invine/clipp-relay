@@ -142,6 +142,9 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var subject string
+	if s.beforeOwnerSubjectRead != nil {
+		s.beforeOwnerSubjectRead()
+	}
 	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, id).Scan(&subject); err != nil {
 		if err == pgx.ErrNoRows {
 			markDiagnostic(r, "refused", "invalid_credentials")
@@ -158,10 +161,13 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	var admitted, uncertain bool
 	var closeConnections func()
+	if s.beforeAccountActionGuard != nil {
+		s.beforeAccountActionGuard()
+	}
 	guardEntered := false
 	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 		guardEntered = true
-		if !s.WithAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
+		if accountGuardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
 			tx, err := s.db.Begin(ctx)
 			if err != nil {
 				fail(w, 503)
@@ -170,8 +176,21 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			defer tx.Rollback(ctx)
 			var live bool
 			var authenticatedAt time.Time
+			if s.beforeOwnerRecheck != nil {
+				s.beforeOwnerRecheck(ctx, tx)
+			}
 			err = tx.QueryRow(ctx, `SELECT ps.google_authenticated_at,ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id WHERE a.id=$1 AND a.subject=$2 AND a.deletion_started_at IS NULL AND ps.credential_digest=$3 AND ps.pepper_version=$4 FOR UPDATE OF a`, id, subject, s.sessionDigest(r, version), version).Scan(&authenticatedAt, &live)
-			if err != nil || !live {
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					markDiagnostic(r, "refused", "invalid_credentials")
+				} else {
+					markDiagnostic(r, "failed", "database_unavailable")
+				}
+				fail(w, 401)
+				return
+			}
+			if !live {
+				markDiagnostic(r, "refused", "invalid_credentials")
 				fail(w, 401)
 				return
 			}
@@ -224,12 +243,14 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
 			}
 			admitted, uncertain = true, err != nil
-		}) {
+		}); accountGuardErr != nil {
+			markGuardDiagnostic(r, accountGuardErr)
 			fail(w, 503)
 		}
 		return nil
 	})
 	if guardErr != nil && !guardEntered {
+		markGuardDiagnostic(r, guardErr)
 		fail(w, 503)
 	}
 	if !admitted {
