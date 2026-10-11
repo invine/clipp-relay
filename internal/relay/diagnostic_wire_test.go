@@ -332,6 +332,18 @@ func TestQuotaReporterClosesSessionsWithReportingReason(t *testing.T) {
 	if row["session_id"] == nil {
 		t.Fatal(row)
 	}
+	report := waitRow(t, out, "quota.reporting", "failed", "reporting_failed")
+	if report["request_id"] != nil || report["session_id"] != nil {
+		t.Fatalf("aggregate reporter invented correlation: %v", report)
+	}
+	for _, r := range out.rows() {
+		if r["event"] == "quota.reporting" && r["outcome"] == "success" {
+			t.Fatalf("routine byte callback logged success: %v", r)
+		}
+	}
+	if strings.Contains(out.text(), "private-relayed-payload-canary") {
+		t.Fatal("opaque relay payload leaked into diagnostics")
+	}
 }
 
 func TestQuotaExhaustionKeepsAuthenticationReasonHonest(t *testing.T) {
