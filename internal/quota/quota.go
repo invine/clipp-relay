@@ -2,7 +2,6 @@
 package quota
 
 import (
-	"clipp-relay/internal/database"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -11,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"clipp-relay/internal/database"
+	"clipp-relay/internal/diagnostic"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -49,6 +50,7 @@ func (b *balance) clearPending() {
 
 type Quota struct {
 	runtime       *database.Runtime
+	diagnostics   *diagnostic.Logger
 	mu            sync.Mutex
 	balances      map[string]*balance
 	clock         clockState
@@ -60,6 +62,21 @@ type Quota struct {
 	probeQuery    func(context.Context) (time.Time, error)
 	beforeLock    func()
 	beforeInstall func()
+}
+
+// SetDiagnostics connects the process-wide, bounded application logger.
+// Configure it before serving requests; quota never retains diagnostic IDs.
+func (q *Quota) SetDiagnostics(logger *diagnostic.Logger) { q.diagnostics = logger }
+
+func (q *Quota) emit(event, outcome, reason string, started time.Time) {
+	if q.diagnostics == nil {
+		return
+	}
+	e := diagnostic.Event{Event: event, Outcome: outcome, Reason: reason}
+	if !started.IsZero() {
+		e.Duration = time.Since(started)
+	}
+	q.diagnostics.Emit(e)
 }
 
 func (q *Quota) now() time.Time {
@@ -157,6 +174,9 @@ func (q *Quota) reapExpired() {
 	for id, b := range entries {
 		b.mu.Lock()
 		if !b.deadline.IsZero() && !q.now().Before(b.deadline) {
+			if b.usable > 0 {
+				q.emit("quota.credit_retired", "success", "expired", time.Time{})
+			}
 			b.usable = 0
 			b.week = time.Time{}
 			b.deadline = time.Time{}
@@ -179,6 +199,9 @@ func (q *Quota) Invalidate(id string) {
 	b := q.acquire(id)
 	b.epoch.Add(1)
 	b.mu.Lock()
+	if b.usable > 0 {
+		q.emit("quota.credit_retired", "success", "discarded", time.Time{})
+	}
 	b.usable = 0
 	b.mu.Unlock()
 	q.release(id, b)
@@ -192,6 +215,9 @@ func (q *Quota) InvalidateAbove(id string, cap int64) bool {
 	above := b.committed > cap
 	if above {
 		b.epoch.Add(1)
+		if b.usable > 0 {
+			q.emit("quota.credit_retired", "success", "discarded", time.Time{})
+		}
 		b.usable = 0
 	}
 	b.mu.Unlock()
@@ -311,11 +337,17 @@ func (q *Quota) Ensure(ctx context.Context, id string, generation int64) (Result
 
 func (q *Quota) take(ctx context.Context, id string, generation, bytes int64, ensure bool) (Result, error) {
 	var result Result
+	started := time.Now()
+	admitted := false
 	err := q.runtime.WithUnit(ctx, func(unitCtx context.Context) error {
+		admitted = true
 		var workErr error
 		result, workErr = q.takeAdmitted(unitCtx, id, generation, bytes, ensure)
 		return workErr
 	})
+	if !admitted && err != nil {
+		q.emit("quota.funding", "failed", "database_unavailable", started)
+	}
 	if errors.Is(err, database.ErrWorkUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return Result{}, ErrTemporary
 	}
@@ -335,11 +367,13 @@ func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, byt
 		q.clock.mu.Unlock()
 		if shouldProbe {
 			if err := q.Probe(unitCtx); err != nil {
+				q.emit("quota.funding", "failed", "clock_unavailable", time.Now())
 				return Result{}, ErrTemporary
 			}
 		}
 	}
 	if !q.clockOK() {
+		q.emit("quota.funding", "failed", "clock_unavailable", time.Now())
 		return Result{}, ErrTemporary
 	}
 	b := q.acquire(id)
@@ -353,16 +387,25 @@ func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, byt
 	}
 	defer b.mu.Unlock()
 	if unitCtx.Err() != nil || !q.clockOK() {
+		if !q.clockOK() {
+			q.emit("quota.funding", "failed", "clock_unavailable", time.Now())
+		}
 		return Result{}, ErrTemporary
 	}
 	now := q.now()
 	if b.generation != generation {
+		if b.usable > 0 {
+			q.emit("quota.credit_retired", "success", "discarded", time.Time{})
+		}
 		b.usable = 0
 		b.week = time.Time{}
 		b.deadline = time.Time{}
 		b.committed = 0
 		b.generation = generation
 	} else if !b.deadline.IsZero() && !now.Before(b.deadline) {
+		if b.usable > 0 {
+			q.emit("quota.credit_retired", "success", "expired", time.Time{})
+		}
 		b.usable = 0
 		b.week = time.Time{}
 		b.deadline = time.Time{}
@@ -391,7 +434,26 @@ func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, byt
 			b.pendingSequence = 0
 		}
 		epoch := b.epoch.Load()
+		started := time.Now()
 		receipt, err := q.fund(unitCtx, id, generation, b.pending, b.pendingWeek, b.pendingGeneration, b.pendingSequence)
+		if err == nil {
+			q.emit("quota.funding", "success", "none", started)
+		} else {
+			outcome, reason := "failed", "database_unavailable"
+			switch {
+			case errors.Is(err, ErrExhausted):
+				outcome, reason = "refused", "quota_exhausted"
+			case errors.Is(err, errAccountBlocked):
+				outcome, reason = "refused", "account_blocked"
+			case errors.Is(err, errClockUnavailable):
+				reason = "clock_unavailable"
+			case errors.Is(err, errAllocationUnconfirmed):
+				outcome, reason = "uncertain", "allocation_unconfirmed"
+			case errors.Is(err, errExpiredReceipt), errors.Is(err, errStaleOperation):
+				outcome, reason = "uncertain", "allocation_unconfirmed"
+			}
+			q.emit("quota.funding", outcome, reason, started)
+		}
 		if b.pendingWeek.IsZero() && !receipt.week.IsZero() {
 			b.pendingWeek = receipt.week
 		}
@@ -404,6 +466,8 @@ func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, byt
 			}
 			if errors.Is(err, errExpiredReceipt) || errors.Is(err, errStaleOperation) {
 				err = ErrTemporary
+			} else if errors.Is(err, errAccountBlocked) || errors.Is(err, errClockUnavailable) || errors.Is(err, errAllocationUnconfirmed) {
+				err = ErrTemporary
 			}
 			return Result{b.committed, b.usable, b.week}, err
 		}
@@ -413,10 +477,14 @@ func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, byt
 		}
 		installTime := q.now()
 		if unitCtx.Err() != nil || b.epoch.Load() != epoch || receipt.generation != generation || !installTime.Before(receipt.deadline) || !weekStart(installTime).Equal(receipt.week) || !q.clockOK() {
+			q.emit("quota.credit_retired", "success", "discarded", time.Time{})
 			b.clearPending()
 			return Result{}, ErrTemporary
 		}
 		if !b.week.Equal(receipt.week) {
+			if b.usable > 0 {
+				q.emit("quota.credit_retired", "success", "expired", time.Time{})
+			}
 			b.usable = 0
 		}
 		b.week = receipt.week
@@ -443,6 +511,9 @@ type funding struct {
 
 var errExpiredReceipt = errors.New("old-week receipt discarded")
 var errStaleOperation = errors.New("stale quota operation")
+var errAccountBlocked = errors.New("quota account blocked")
+var errClockUnavailable = errors.New("quota clock unavailable")
+var errAllocationUnconfirmed = errors.New("quota allocation unconfirmed")
 
 func (q *Quota) fund(ctx context.Context, id string, generation int64, op string, pendingWeek time.Time, pendingGeneration, pendingSequence int64) (funding, error) {
 	tx, err := q.runtime.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
@@ -456,8 +527,14 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 		q.beforeLock()
 	}
 	err = tx.QueryRow(ctx, `SELECT a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 FOR UPDATE OF a`, id).Scan(&status, &actual, &cap)
-	if err != nil || status != "Active" || actual != generation {
+	if err == pgx.ErrNoRows {
+		return funding{}, errAccountBlocked
+	}
+	if err != nil {
 		return funding{}, ErrTemporary
+	}
+	if status != "Active" || actual != generation {
+		return funding{}, errAccountBlocked
 	}
 	if pendingGeneration != generation {
 		if pendingWeek.IsZero() {
@@ -490,13 +567,13 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 		q.clock.sampled = after
 		q.clock.sampledMono = time.Now()
 		q.clock.mu.Unlock()
-		return funding{}, ErrTemporary
+		return funding{}, errClockUnavailable
 	}
 	week := weekStart(dbTime)
 	end := week.AddDate(0, 0, 7)
 	until := end.Sub(dbTime) - after.Sub(before) - 6*time.Second
 	if until <= 0 {
-		return funding{week: week}, ErrTemporary
+		return funding{week: week}, errClockUnavailable
 	}
 	deadline := after.Add(until)
 	if !pendingWeek.IsZero() && !pendingWeek.Equal(week) {
@@ -558,11 +635,11 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 		}
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return funding{week: week, sequence: pendingSequence}, ErrTemporary
+		return funding{week: week, sequence: pendingSequence}, errAllocationUnconfirmed
 	}
 	if q.afterCommit != nil {
 		if err = q.afterCommit(); err != nil {
-			return funding{week: week, sequence: pendingSequence}, ErrTemporary
+			return funding{week: week, sequence: pendingSequence}, errAllocationUnconfirmed
 		}
 	}
 	var postTime time.Time
@@ -574,11 +651,14 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 	})
 	afterPost := q.now()
 	if err != nil {
-		return funding{week: week, sequence: pendingSequence}, ErrTemporary
+		return funding{week: week, sequence: pendingSequence}, errAllocationUnconfirmed
 	}
 	postTime = q.dbTime(postTime)
-	if !weekStart(postTime).Equal(week) || currentStatus != "Active" || currentGeneration != generation || currentCap < committed {
-		return funding{week: week, sequence: pendingSequence}, ErrTemporary
+	if currentStatus != "Active" || currentGeneration != generation || currentCap < committed {
+		return funding{week: week, sequence: pendingSequence}, errAccountBlocked
+	}
+	if !weekStart(postTime).Equal(week) {
+		return funding{week: week, sequence: pendingSequence}, errClockUnavailable
 	}
 	postUntil := end.Sub(postTime) - afterPost.Sub(beforePost) - 6*time.Second
 	postDeadline := afterPost.Add(postUntil)
@@ -586,7 +666,7 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 		deadline = postDeadline
 	}
 	if !q.now().Before(deadline) {
-		return funding{week: week, sequence: pendingSequence}, ErrTemporary
+		return funding{week: week, sequence: pendingSequence}, errClockUnavailable
 	}
 	return funding{week: week, deadline: deadline, generation: actual, committed: committed, granted: granted, sequence: pendingSequence}, nil
 }

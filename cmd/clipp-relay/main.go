@@ -128,6 +128,7 @@ func run() int {
 		}
 	}
 	credit := quota.NewWithRuntime(db)
+	credit.SetDiagnostics(logger)
 	defer credit.Close()
 	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
 	if err != nil {
