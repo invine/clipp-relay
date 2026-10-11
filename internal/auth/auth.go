@@ -839,10 +839,7 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 	return "", 0, "", "", "", errInvalidSession
 }
 
-type quotaHistory struct {
-	Week      string `json:"week"`
-	Committed int64  `json:"committed"`
-}
+type quotaHistory = portal.QuotaHistoryEntry
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
