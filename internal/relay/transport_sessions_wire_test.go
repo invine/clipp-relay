@@ -30,9 +30,13 @@ type transportClients struct {
 	tlsConfig *tls.Config
 }
 
-func newTransportClients(t *testing.T, a Authority, cap int) *transportClients {
+func newTransportClients(t *testing.T, a Authority, cap int, logs ...DiagnosticSink) *transportClients {
 	t.Helper()
-	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", MaxSessions: cap})
+	var log DiagnosticSink
+	if len(logs) > 0 {
+		log = logs[0]
+	}
+	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", MaxSessions: cap, Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
