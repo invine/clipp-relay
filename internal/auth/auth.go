@@ -66,6 +66,7 @@ func Google() Provider {
 
 type Server struct {
 	diagnostics                        *diagnostic.Logger
+	transitions                        *diagnostic.Transitions
 	Pool                               *pgxpool.Pool
 	db                                 *database.Runtime
 	Origin, ClientID, ClientSecret     string
@@ -668,7 +669,20 @@ type identity struct {
 
 var errProviderUnavailable = errors.New("provider unavailable")
 
-func (s *Server) exchange(ctx context.Context, code, nonce string) (identity, error) {
+func (s *Server) exchange(ctx context.Context, code, nonce string) (result identity, resultErr error) {
+	started := time.Now()
+	tokenOK := false
+	var classificationErr error
+	defer func() {
+		if tokenOK {
+			s.transitions.Dependency("dependency.google_token", nil, ctx, time.Since(started))
+		} else {
+			if classificationErr == nil {
+				classificationErr = resultErr
+			}
+			s.transitions.Dependency("dependency.google_token", classificationErr, ctx, time.Since(started))
+		}
+	}()
 	values := url.Values{"code": {code}, "client_id": {s.ClientID}, "client_secret": {s.ClientSecret}, "grant_type": {"authorization_code"}, "redirect_uri": {s.Origin + "/auth/callback"}}
 	req, e := http.NewRequestWithContext(ctx, "POST", s.provider.TokenURL, strings.NewReader(values.Encode()))
 	if e != nil {
@@ -681,18 +695,24 @@ func (s *Server) exchange(ctx context.Context, code, nonce string) (identity, er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		if resp.StatusCode < 500 {
+			classificationErr = diagnostic.ErrInvalidResponse
+		}
 		return identity{}, errProviderUnavailable
 	}
 	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
 	if e != nil || len(body) > 256<<10 {
+		classificationErr = diagnostic.ErrInvalidResponse
 		return identity{}, errProviderUnavailable
 	}
 	var token struct {
 		IDToken string `json:"id_token"`
 	}
 	if json.Unmarshal(body, &token) != nil || len(token.IDToken) > 256<<10 {
+		classificationErr = diagnostic.ErrInvalidResponse
 		return identity{}, errProviderUnavailable
 	}
+	tokenOK = true
 	return s.verify(ctx, token.IDToken, nonce)
 }
 func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error) {
@@ -740,7 +760,7 @@ func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error
 	}
 	return c, nil
 }
-func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+func (s *Server) key(ctx context.Context, kid string) (result *rsa.PublicKey, resultErr error) {
 	s.keyMu.Lock()
 	defer s.keyMu.Unlock()
 	now := time.Now()
@@ -752,6 +772,14 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	if s.keys[kid] == nil && len(s.keys) > 0 && now.Sub(s.lastKeyFetch) < time.Minute {
 		return nil, errors.New("key unavailable")
 	}
+	started := time.Now()
+	var classificationErr error
+	defer func() {
+		if classificationErr == nil {
+			classificationErr = resultErr
+		}
+		s.transitions.Dependency("dependency.google_jwks", classificationErr, ctx, time.Since(started))
+	}()
 	req, e := http.NewRequestWithContext(ctx, "GET", s.provider.KeysURL, nil)
 	if e != nil {
 		return nil, e
@@ -763,10 +791,14 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		if resp.StatusCode < 500 {
+			classificationErr = diagnostic.ErrInvalidResponse
+		}
 		return nil, errProviderUnavailable
 	}
 	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
 	if e != nil || len(body) > 256<<10 {
+		classificationErr = diagnostic.ErrInvalidResponse
 		return nil, errProviderUnavailable
 	}
 	var jwks struct {
@@ -780,6 +812,7 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 		} `json:"keys"`
 	}
 	if json.Unmarshal(body, &jwks) != nil || len(jwks.Keys) > 32 {
+		classificationErr = diagnostic.ErrInvalidResponse
 		return nil, errors.New("keys invalid")
 	}
 	keys := map[string]*rsa.PublicKey{}
@@ -799,6 +832,7 @@ func (s *Server) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 		keys[j.Kid] = &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(ex)}
 	}
 	if len(keys) == 0 {
+		classificationErr = diagnostic.ErrInvalidResponse
 		return nil, errors.New("keys empty")
 	}
 	age := time.Duration(0)

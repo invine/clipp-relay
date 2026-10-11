@@ -3,12 +3,14 @@ package auth_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"clipp-relay/internal/auth"
@@ -150,6 +152,7 @@ func TestProviderFailureAndVerificationDiagnosticsStayPrivate(t *testing.T) {
 	logger := diagnostic.New(&output)
 	s := auth.New(db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
+	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
 	state, binding := start(t, s, nil)
 	if out := complete(s, state, binding); out.Code != http.StatusUnauthorized {
 		t.Fatalf("signature status %d", out.Code)
@@ -161,6 +164,13 @@ func TestProviderFailureAndVerificationDiagnosticsStayPrivate(t *testing.T) {
 	state, binding = start(t, s, nil)
 	if out := complete(s, state, binding); out.Code != http.StatusUnauthorized {
 		t.Fatalf("provider status %d", out.Code)
+	}
+	provider.mu.Lock()
+	provider.oversizeBody = false
+	provider.mu.Unlock()
+	state, binding = start(t, s, nil)
+	if out := complete(s, state, binding); out.Code != http.StatusSeeOther {
+		t.Fatalf("provider recovery status %d", out.Code)
 	}
 	logger.Close()
 	rows := strings.TrimSpace(output.String())
@@ -179,6 +189,45 @@ func TestProviderFailureAndVerificationDiagnosticsStayPrivate(t *testing.T) {
 		if !found[key] {
 			t.Fatalf("missing %s: %s", key, rows)
 		}
+	}
+	if !strings.Contains(rows, `"event":"dependency.google_token"`) || !strings.Contains(rows, `"outcome":"recovered"`) {
+		t.Fatalf("missing provider dependency recovery: %s", rows)
+	}
+}
+
+func TestJWKSDependencyInvalidResponseAndRecovery(t *testing.T) {
+	c, m, db := fixture(t)
+	provider := newProvider(t)
+	var broken atomic.Bool
+	broken.Store(true)
+	keys := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if broken.Load() {
+			_, _ = w.Write([]byte(`{"keys":[],"secret":"JWKS_BODY_CANARY"}`))
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": provider.keyID, "n": base64.RawURLEncoding.EncodeToString(provider.key.PublicKey.N.Bytes()), "e": "AQAB"}}})
+	}))
+	defer keys.Close()
+	endpoints := provider.endpoints()
+	endpoints.KeysURL = keys.URL
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s := auth.New(db.Pool, c, m, endpoints)
+	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
+	state, binding := start(t, s, nil)
+	if out := complete(s, state, binding); out.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid JWKS status %d", out.Code)
+	}
+	broken.Store(false)
+	state, binding = start(t, s, nil)
+	if out := complete(s, state, binding); out.Code != http.StatusSeeOther {
+		t.Fatalf("recovered JWKS status %d", out.Code)
+	}
+	logger.Close()
+	rows := output.String()
+	if strings.Contains(rows, "JWKS_BODY_CANARY") || !strings.Contains(rows, `"event":"dependency.google_jwks"`) || !strings.Contains(rows, `"reason":"invalid_response"`) || !strings.Contains(rows, `"outcome":"recovered"`) {
+		t.Fatalf("JWKS rows: %s", rows)
 	}
 }
 
