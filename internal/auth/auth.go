@@ -94,6 +94,11 @@ type Server struct {
 	globalRate                         rate
 	accountRates                       map[string]rate
 	beforeProfileRead                  func()
+	beforeAdminDetailsRead             func()
+	beforeAdminRecheck                 func()
+	beforeOwnerSubjectRead             func()
+	beforeAccountActionGuard           func()
+	beforeOwnerRecheck                 func(context.Context, pgx.Tx)
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
 	commitCredential                   func(context.Context, pgx.Tx) error
@@ -127,6 +132,10 @@ func (s *Server) WithServingUnit(ctx context.Context, work func(context.Context)
 // WithAccountGuards orders all local account operations before their SQL row
 // locks. Relay admission holds the same guard through registry installation.
 func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(context.Context)) bool {
+	return s.withAccountGuards(ctx, ids, work) == nil
+}
+
+func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(context.Context)) error {
 	executed := false
 	err := s.db.WithUnit(ctx, func(unitCtx context.Context) error {
 		ordered := append([]string(nil), ids...)
@@ -159,7 +168,13 @@ func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(
 		work(unitCtx)
 		return nil
 	})
-	return err == nil && executed
+	if err != nil {
+		return err
+	}
+	if !executed {
+		return errors.New("account guard work did not execute")
+	}
+	return nil
 }
 
 // CapacitySample is a separate, aggregate live observation. Nil counts mean
@@ -1030,11 +1045,13 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
+		markDiagnostic(r, "refused", "origin_rejected")
 		fail(w, 403)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 400)
 		return
 	}
@@ -1044,10 +1061,16 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e != nil && !errors.Is(e, errInvalidSession) {
+		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return
 	}
 	if e != nil || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		if e != nil {
+			markDiagnostic(r, "refused", "invalid_credentials")
+		} else {
+			markDiagnostic(r, "refused", "csrf_rejected")
+		}
 		fail(w, 403)
 		return
 	}
@@ -1055,6 +1078,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	digest := s.digest(version, "portal-session", c.Value)
 	_, e = s.db.Exec(r.Context(), `DELETE FROM public.portal_sessions WHERE credential_digest=$1`, digest)
 	if e != nil {
+		// The single-statement commit acknowledgement does not prove rollback.
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
 	}
@@ -1064,34 +1089,56 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
+		markDiagnostic(r, "refused", "origin_rejected")
 		fail(w, 403)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 400)
 		return
 	}
 	id, version, _, _, csrf, err := s.session(r)
 	if err != nil {
+		switch {
+		case errors.Is(err, errRateLimit):
+			markAction(r, "")
+		case errors.Is(err, errInvalidSession):
+			markDiagnostic(r, "refused", "invalid_credentials")
+		default:
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 401)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
+		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 403)
 		return
 	}
 	var subject string
+	if s.beforeOwnerSubjectRead != nil {
+		s.beforeOwnerSubjectRead()
+	}
 	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, id).Scan(&subject); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			markDiagnostic(r, "refused", "invalid_credentials")
+		} else {
+			markDiagnostic(r, "failed", "database_unavailable")
+		}
 		fail(w, 503)
 		return
 	}
 	var applied, uncertain bool
 	var closeConnections func()
+	if s.beforeAccountActionGuard != nil {
+		s.beforeAccountActionGuard()
+	}
 	guardEntered := false
 	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 		guardEntered = true
-		if !s.WithAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
+		if guardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
 			tx, e := s.db.Begin(ctx)
 			if e != nil {
 				fail(w, 503)
@@ -1106,8 +1153,17 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var live bool
+			if s.beforeOwnerRecheck != nil {
+				s.beforeOwnerRecheck(ctx, tx)
+			}
 			e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.account_id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp())`, id, s.sessionDigest(r, version), version).Scan(&live)
-			if e != nil || !live {
+			if e != nil {
+				markDiagnostic(r, "failed", "database_unavailable")
+				fail(w, 401)
+				return
+			}
+			if !live {
+				markDiagnostic(r, "refused", "invalid_credentials")
 				fail(w, 401)
 				return
 			}
@@ -1136,12 +1192,14 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
 			}
 			applied, uncertain = true, e != nil
-		}) {
+		}); guardErr != nil {
+			markGuardDiagnostic(r, guardErr)
 			fail(w, 503)
 		}
 		return nil
 	})
 	if guardErr != nil && !guardEntered {
+		markGuardDiagnostic(r, guardErr)
 		fail(w, 503)
 	}
 	if applied {
@@ -1150,6 +1208,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		}
 		cookie(w, sessionCookie, "", -1)
 		if uncertain {
+			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			uncertainResponse(w)
 		} else {
 			http.Redirect(w, r, "/", http.StatusSeeOther)

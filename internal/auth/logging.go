@@ -2,15 +2,18 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
+	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
 )
 
 type diagnosticContextKey struct{}
 type requestDiagnostic struct {
 	event, outcome, reason, client, id string
+	handled                            bool
 }
 
 // SetDiagnostics attaches the serving process's bounded logger before Handler is used.
@@ -45,6 +48,25 @@ func markClient(r *http.Request, client string) {
 		}
 	}
 }
+func markAction(r *http.Request, event string) {
+	if trace := diagnosticFor(r); trace != nil {
+		trace.event, trace.client = event, ""
+		trace.handled = true
+	}
+}
+
+func markGuardDiagnostic(r *http.Request, err error) {
+	switch {
+	case errors.Is(err, database.ErrWorkUnavailable):
+		markAction(r, "http.request_refused")
+		markDiagnostic(r, "refused", "overloaded")
+	case r.Context().Err() != nil:
+		// A caller cancellation cannot prove a database failure.
+		markAction(r, "")
+	default:
+		markDiagnostic(r, "failed", "database_unavailable")
+	}
+}
 func routeEvent(r *http.Request) string {
 	switch {
 	case r.Method == http.MethodGet && (r.URL.Path == "/auth/login" || r.URL.Path == "/auth/callback"):
@@ -55,6 +77,14 @@ func routeEvent(r *http.Request) string {
 		return "oauth.consent"
 	case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
 		return "oauth.code_exchange"
+	case r.Method == http.MethodPost && r.URL.Path == "/auth/logout":
+		return "portal.logout"
+	case r.Method == http.MethodPost && r.URL.Path == "/auth/revoke":
+		return "portal.revoke"
+	case r.Method == http.MethodPost && r.URL.Path == "/auth/delete":
+		return "portal.delete"
+	case r.Method == http.MethodPost && r.URL.Path == "/admin/plans":
+		return "admin.plan_create"
 	}
 	return ""
 }
@@ -88,14 +118,17 @@ func (s *Server) observedRequest(w http.ResponseWriter, r *http.Request, next ht
 	// meaningful activity routes emit a row. No caller value is consulted.
 	event := routeEvent(r)
 	trace := &requestDiagnostic{event: event, client: "unknown", id: logger.NewID()}
-	if event == "portal.login" {
+	if event == "portal.login" || event == "portal.logout" || event == "portal.revoke" || event == "portal.delete" || event == "admin.plan_create" {
 		trace.client = ""
 	}
 	r = r.WithContext(context.WithValue(r.Context(), diagnosticContextKey{}, trace))
 	started := time.Now()
 	out := &diagnosticResponse{ResponseWriter: w}
 	next.ServeHTTP(out, r)
-	if event == "" {
+	if trace.event == "" {
+		if trace.handled {
+			return
+		}
 		var reason string
 		switch out.status {
 		case http.StatusNotFound:
@@ -106,6 +139,15 @@ func (s *Server) observedRequest(w http.ResponseWriter, r *http.Request, next ht
 		if reason != "" {
 			logger.Emit(diagnostic.Event{Event: "http.request_refused", Outcome: "refused", Reason: reason, RequestID: trace.id})
 		}
+		return
+	}
+	if trace.event == "http.request_refused" {
+		logger.Emit(diagnostic.Event{Event: trace.event, Outcome: trace.outcome, Reason: trace.reason, RequestID: trace.id})
+		return
+	}
+	// These action catalogs have no rate-limit tuple; do not feed an invalid
+	// combination into the logger or relabel a session rate limit as overload.
+	if out.status == http.StatusTooManyRequests && trace.event != "portal.login" && trace.event != "oauth.authorize" && trace.event != "oauth.consent" && trace.event != "oauth.code_exchange" && trace.event != "oauth.refresh" {
 		return
 	}
 	if trace.outcome == "" {
