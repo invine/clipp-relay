@@ -1,4 +1,40 @@
-# Service lifecycle rows
+# Relay service logging operator guide
+
+The serving process writes one stream of bounded JSON diagnostic rows to stdout. Read an event as evidence of the stated server-side boundary at its timestamp. A missing row is inconclusive: rate limits, a full queue, a blocked or failed stdout writer, or process exit can discard it. Use the live readiness probe and durable business records when the decision requires current state or proof of a mutation.
+
+## Captured local rows
+
+These rows were captured on 2026-10-11 from `TestIntegratedHTTPRelayAndReadinessRowsMatchCatalog` against the shared logger, and `TestCleanupLogsFailedPassWithoutRoutineSuccessRows` against a disposable PostgreSQL 18 TLS/SCRAM fixture. They are actual local output, not a deployed sample. IDs are short-lived random diagnostics; the fixture's account, credential, Peer ID, URL and body canaries did not appear.
+
+```json
+{"event":"service.readiness","level":"INFO","msg":"service readiness","outcome":"success","reason":"none","time":"2026-10-11T14:06:12.743358Z"}
+{"duration_ms":0,"event":"relay.discovery","level":"INFO","msg":"relay discovery","outcome":"success","reason":"none","request_id":"be8f731127013343abfa8402cb55566e","time":"2026-10-11T14:06:12.743417Z"}
+{"duration_ms":0,"event":"portal.logout","level":"INFO","msg":"portal logout","outcome":"refused","reason":"origin_rejected","request_id":"312a5dd62468a498daf44abdd95bd26a","time":"2026-10-11T14:06:12.743695Z"}
+{"duration_ms":0,"event":"relay.authentication","level":"INFO","msg":"relay authentication","outcome":"success","reason":"none","request_id":"35f1d850556d44c639997305d32161d4","session_id":"c0a4d57237eb3138a15038d0a0ca73f7","time":"2026-10-11T14:06:12.751583Z","transport":"tcp"}
+{"event":"relay.reservation","level":"INFO","msg":"relay reservation","outcome":"success","reason":"none","time":"2026-10-11T14:06:12.752237Z","transport":"unknown"}
+{"event":"log.suppressed","level":"WARN","msg":"diagnostic records suppressed","outcome":"observed","queue_full_count":0,"rate_limited_count":1,"reason":"diagnostic_loss","time":"2026-10-11T14:06:12.752985Z","window_seconds":10}
+{"duration_ms":0,"event":"maintenance.cleanup","level":"WARN","msg":"maintenance cleanup","outcome":"failed","reason":"database_unavailable","time":"2026-10-11T14:05:49.689491Z"}
+```
+
+The fixture drove the HTTP and libp2p operations through their handlers. It observed a portal origin refusal after a readiness and discovery success, then a physical TCP connection's authentication and an aggregate stock reservation callback. The reservation row omits both IDs because that callback cannot identify its physical connection. One hundred concurrent portal refusals produced a best-effort loss summary; the summary's count describes rows omitted in that window, not a complete refusal count. `duration_ms:0` means the measured operation rounded down to less than one millisecond.
+
+The following sections use additional illustrative rows to explain other fixed catalog outcomes. They are examples of interpretation, not a claim that each occurred in the captured fixture.
+
+## Severity, correlation and loss
+
+`INFO` includes meaningful successes and expected credential, quota and per-request Safety Limit refusals. `WARN` includes dependency degradation, stale observations, global overload, uncertain commits and unsuccessful drains. `ERROR` is reserved for fatal startup or listener failure and broken invariants. `reason` is a fixed safe category, never an upstream error message. An `uncertain` commit is not a success or rollback claim; check the durable workflow's separate proof path.
+
+Each admitted HTTP or protocol request receives a fresh random `request_id` when generation succeeds. Headers, OAuth state and cookies cannot supply it. A `session_id` belongs only to one physical Relay Session and expires when that connection ends; it is not a Portal Session, Login Grant, account or Peer ID. Stock reservation and circuit callbacks have aggregate evidence and cannot inherit these IDs. A request ID on one OAuth callback cannot join it to the earlier redirect.
+
+Activity is limited to 20 rows per second with burst 40, and each fixed tuple to one row per second with burst five. Lifecycle, observation, `ERROR` and loss-summary rows have a separate four-per-second, burst-eight budget. One writer uses a non-blocking 256-row queue, each row at most 2 KiB; shutdown waits at most 100 ms for best-effort flush. `log.suppressed` is eligible only after loss, no more than once per 10 seconds, and itself may be lost. Quiet periods emit no heartbeat or recurring gauge. The logger retains only bounded process-local counters for this summary, no durable identity-linked traffic history.
+
+## Relay Discovery and publication
+
+`relay.discovery/success` means the handler authorized the request and wrote the current complete Discovery Document. It does not prove the client received or used it. `refused/invalid_credentials` includes a missing or rejected bearer credential; the current authorization result does not distinguish a blocked account from other invalid access, so the logger does not assert `account_blocked`. `refused/not_published` means the current address snapshot is absent or stale, `refused/draining` means the Relay Instance stopped admission, and `refused/safety_limit` means the global session ceiling was reached. Malformed routes or request shapes have no truthful `relay.discovery` catalog pair and remain quiet. Untyped backend errors return the existing unavailable HTTP response without inventing a database-specific log reason. `service.readiness` and `dependency.publication_api` describe publication availability separately from any one Discovery request.
+
+These Discovery rows carry a request ID and measured handler duration, but no token, account, Peer ID, address, URL, header or response body. Their output shares the same bounded logger and may be suppressed under repeated discovery traffic.
+
+## Service lifecycle rows
 
 These are example stdout JSON rows. The time and schema revision shown are illustrative. Rows contain fixed event, outcome and reason values; raw configuration errors, addresses, credentials and identities are excluded.
 
@@ -152,4 +188,12 @@ The same transition rule covers `dependency.google_token`, `dependency.google_jw
 
 The diagnostic pass runs every 60 seconds with a five-second deadline and one pass in flight. A failed sample immediately invalidates its current value; an unrefreshed successful sample becomes stale after 180 seconds. No value or periodic gauge appears in these rows. Cleanup warning is older than one hour, critical at 12 hours and breach at 24 hours. Pending deletion warning is at 15 minutes and critical at one hour or 820 pending operations (80% of 1,024, rounded up). A threshold row tracks the highest crossed level; a fresh lower sample changes that level, and `recovered/none` clears it. Recovery, full backup, repository retention, certificate and database infrastructure producers remain unavailable and cannot satisfy a recoverability gate. The existing private `/metrics` endpoint and maintenance worker cadence retain their own behavior.
 
+`maintenance.cleanup/failed/database_unavailable` identifies a failed cleanup pass or its accompanying breach observation when database work could not complete. `failed/deadline` identifies an expired pass or observation deadline. A `success/none` row appears only after a prior failed pass and a later complete pass in the same worker lifetime; ordinary successful passes stay quiet. This is per-worker evidence, not a durable proof that every expired row was deleted, nor a substitute for the separate `observation.threshold` cleanup backlog signal. Shutdown cancellation does not create a false database failure row. The worker emits no SQL, account or credential values.
+
 Focused checks: `go test -count=1 ./internal/diagnostic ./internal/database ./internal/publication ./internal/auth -run 'Test(DependencyTransitionsEmitFailureAndProvenRecoveryOnly|MaintenanceObservationTransitionsAndFreshness|MaintenanceObservationHasOneInFlightPass|RuntimeWorkFailureAndRecoveryAreAggregateTransitions|ServiceChangesAndOutagePublishCompleteSnapshot|QualifiedJournalFailureAndRecoveryAreSafeTransitions|CleanupSignalsReportRetentionBreach|OwnerDeletionJournalReconciliationAndFreshPendingAccount)$'`. The last two require a disposable real PostgreSQL fixture; a skip is not a pass. Run the routine and race verification profiles separately.
+
+## Audit, metrics and qualification limits
+
+Structured stdout rows are best-effort operational diagnostics. They contain neither a complete history nor durable proof of an account, grant, quota or deletion mutation. Restricted transactional audit and the existing authoritative SQL or journal records retain those roles. The private `/metrics` endpoint remains a separate existing interface; these logging changes add no metric family, histogram, scrape snapshot, collector or alert route. The loss-summary counts are only logger bookkeeping and cannot be used as exact traffic totals.
+
+Local HTTP, libp2p and disposable PostgreSQL fixtures can prove the documented server boundaries and safety properties at a recorded source revision. They cannot establish browser or device receipt, Direct Connection result, Clip delivery, identity-linked client recovery, deployed network behavior or production capacity. Backup and restore, certificate convergence, repository retention and database infrastructure observations without connected producers remain `unavailable`; a test fixture does not turn them into production measurements. Image publication, deployment, native and live qualification, and the accepted full observability release gates remain separate work.
