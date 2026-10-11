@@ -64,6 +64,9 @@ var errJournalTargetUncommitted = errors.New("journal target event not committed
 // coverage floor. A nil/unqualified journal leaves deletion unavailable.
 func (s *Server) SetDeletionJournal(j DeletionJournal, repository string, floor int64, floorHash string) {
 	s.deletionJournal = j
+	if j != nil && s.transitions != nil {
+		s.deletionJournal = observedJournal{DeletionJournal: j, transitions: s.transitions}
+	}
 	s.deletionRepository = repository
 	s.deletionFloor = floor
 	s.deletionFloorHash = floorHash

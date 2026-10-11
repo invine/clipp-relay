@@ -444,6 +444,18 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	if signals, err := s.SampleDeletionSignals(context.Background()); err != nil || signals.Pending != 1 {
 		t.Fatalf("pending signals %+v %v", signals, err)
 	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.deletion_operations SET admitted_at=clock_timestamp()-interval '16 minutes' WHERE account_id=$1 AND completed_at IS NULL`, oldID); err != nil {
+		t.Fatal(err)
+	}
+	if signals, err := s.SampleDeletionSignals(context.Background()); err != nil || !signals.Warning || signals.Critical {
+		t.Fatalf("pending warning threshold %+v %v", signals, err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.deletion_operations SET admitted_at=clock_timestamp()-interval '61 minutes' WHERE account_id=$1 AND completed_at IS NULL`, oldID); err != nil {
+		t.Fatal(err)
+	}
+	if signals, err := s.SampleDeletionSignals(context.Background()); err != nil || !signals.Critical {
+		t.Fatalf("pending critical threshold %+v %v", signals, err)
+	}
 	statusURL := out.Header().Get("Location")
 	if got := portalRequest(s, "GET", statusURL, owner, nil, ""); got.Code != http.StatusAccepted {
 		t.Fatalf("pending status %d", got.Code)

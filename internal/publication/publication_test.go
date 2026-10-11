@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
 	ma "github.com/multiformats/go-multiaddr"
@@ -36,11 +37,16 @@ func TestServiceChangesAndOutagePublishCompleteSnapshot(t *testing.T) {
 	var mu sync.Mutex
 	ingress := []map[string]string{{"ip": "127.0.0.1"}}
 	broken := false
+	malformed := false
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		if broken {
 			http.Error(w, "unavailable", 503)
+			return
+		}
+		if malformed {
+			_, _ = w.Write([]byte(`{"secret":"PUBLICATION_BODY_CANARY"`))
 			return
 		}
 		if r.URL.Path != "/api/v1/namespaces/clipp/services/relay-tcp" {
@@ -64,6 +70,8 @@ func TestServiceChangesAndOutagePublishCompleteSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var dependencyRows []diagnostic.Event
+	c.SetTransitions(diagnostic.NewTransitions(func(e diagnostic.Event) { dependencyRows = append(dependencyRows, e) }))
 	if err := c.Sync(context.Background()); err != nil || !ready {
 		t.Fatalf("first sync: %v ready=%v", err, ready)
 	}
@@ -146,6 +154,24 @@ func TestServiceChangesAndOutagePublishCompleteSnapshot(t *testing.T) {
 		t.Fatalf("recovery: %v ready=%v", err, ready)
 	}
 	check([]string{"/ip4/127.0.0.1/tcp/4001", "/ip4/127.0.0.2/tcp/4001"})
+	if len(dependencyRows) != 2 || dependencyRows[0].Event != "dependency.publication_api" || dependencyRows[0].Outcome != "failed" || dependencyRows[1].Outcome != "recovered" {
+		t.Fatalf("publication dependency transitions = %+v", dependencyRows)
+	}
+	mu.Lock()
+	malformed = true
+	mu.Unlock()
+	if err := c.Sync(context.Background()); err == nil {
+		t.Fatal("malformed Service response accepted")
+	}
+	mu.Lock()
+	malformed = false
+	mu.Unlock()
+	if err := c.Sync(context.Background()); err != nil {
+		t.Fatalf("Service response recovery: %v", err)
+	}
+	if len(dependencyRows) != 4 || dependencyRows[2].Reason != "invalid_response" || dependencyRows[3].Outcome != "recovered" {
+		t.Fatalf("invalid response transitions = %+v", dependencyRows)
+	}
 }
 
 func TestNamedServiceWatchRepublishesOnEvent(t *testing.T) {
