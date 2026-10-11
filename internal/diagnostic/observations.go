@@ -35,7 +35,7 @@ func (o *Observations) state(signal, state, outcome, reason string) {
 }
 
 func (o *Observations) initialLocked() {
-	for _, signal := range []string{"recovery", "full_backup", "repository_retention", "certificate", "database_resources"} {
+	for _, signal := range []string{"process_cpu", "process_memory", "recovery", "full_backup", "repository_retention", "certificate", "database_resources"} {
 		if _, ok := o.items[signal]; !ok {
 			o.items[signal] = observation{state: "unavailable"}
 			o.state(signal, "unavailable", "observed", "producer_unavailable")

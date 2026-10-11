@@ -231,6 +231,44 @@ func TestJWKSDependencyInvalidResponseAndRecovery(t *testing.T) {
 	}
 }
 
+func TestUnknownTokenKeyDoesNotDegradeHealthyJWKS(t *testing.T) {
+	c, m, db := fixture(t)
+	provider := newProvider(t)
+	provider.mu.Lock()
+	provider.keyID = "SECRET_UNRELATED_KEY"
+	provider.mu.Unlock()
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s.SetDiagnostics(logger)
+	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
+	state, binding := start(t, s, nil)
+	if out := complete(s, state, binding); out.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown token key status %d", out.Code)
+	}
+	logger.Close()
+	rows := strings.TrimSpace(output.String())
+	if strings.Contains(rows, "SECRET_UNRELATED_KEY") {
+		t.Fatalf("provider key ID leaked: %s", rows)
+	}
+	var refused bool
+	for _, line := range strings.Split(rows, "\n") {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if row["event"] == "dependency.google_jwks" {
+			t.Fatalf("healthy JWKS misclassified as degraded: %v", row)
+		}
+		if row["event"] == "portal.login" && row["outcome"] == "refused" && row["reason"] == "verification_failed" && row["level"] == "INFO" {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatalf("missing credential refusal: %s", rows)
+	}
+}
+
 func TestSuccessfulPortalPagesAndAssetsAreQuiet(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)

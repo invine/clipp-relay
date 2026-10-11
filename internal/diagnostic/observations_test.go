@@ -117,6 +117,41 @@ func TestMaintenanceObservationRowsStayCatalogBounded(t *testing.T) {
 	}
 }
 
+func TestUnsupportedProcessObservationsEmitUnavailableRowsOnce(t *testing.T) {
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	o := diagnostic.NewObservations(logger.Emit, nil, nil)
+	o.Tick(context.Background(), time.Now())
+	o.Wait()
+	o.Tick(context.Background(), time.Now().Add(time.Minute))
+	o.Wait()
+	logger.Close()
+	seen := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if row["event"] != "observation.state" {
+			continue
+		}
+		signal, _ := row["signal"].(string)
+		if signal != "process_cpu" && signal != "process_memory" {
+			continue
+		}
+		if row["state"] != "unavailable" || row["outcome"] != "observed" || row["reason"] != "producer_unavailable" || row["level"] != "INFO" {
+			t.Fatalf("unsupported process signal row: %v", row)
+		}
+		if _, ok := row["value"]; ok {
+			t.Fatalf("unsupported process signal has value: %v", row)
+		}
+		seen[signal]++
+	}
+	if seen["process_cpu"] != 1 || seen["process_memory"] != 1 {
+		t.Fatalf("process signal rows = %v; output = %s", seen, output.String())
+	}
+}
+
 func TestQuotaClockObservationDoesNotPromoteOldSafetyProbe(t *testing.T) {
 	var got []diagnostic.Event
 	o := diagnostic.NewObservations(func(e diagnostic.Event) {
