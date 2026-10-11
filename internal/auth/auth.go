@@ -789,8 +789,9 @@ func (s *Server) key(ctx context.Context, kid string) (result *rsa.PublicKey, re
 	}
 	started := time.Now()
 	var classificationErr error
+	var validResponse bool
 	defer func() {
-		if classificationErr == nil {
+		if classificationErr == nil && !validResponse {
 			classificationErr = resultErr
 		}
 		s.transitions.Dependency("dependency.google_jwks", classificationErr, ctx, time.Since(started))
@@ -879,6 +880,7 @@ func (s *Server) key(ctx context.Context, kid string) (result *rsa.PublicKey, re
 	if age > 6*time.Hour {
 		age = 6 * time.Hour
 	}
+	validResponse = true
 	s.keys = keys
 	s.keysUntil = now.Add(age)
 	if k := keys[kid]; k != nil && age > 0 {
