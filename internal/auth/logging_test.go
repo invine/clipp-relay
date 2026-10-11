@@ -200,6 +200,52 @@ func TestSuccessfulPortalPagesAndAssetsAreQuiet(t *testing.T) {
 	}
 }
 
+func TestUnknownRouteAndMethodEmitSafeRequestRefusals(t *testing.T) {
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s := auth.New(nil, config.Config{}, config.Material{}, auth.Provider{})
+	s.SetDiagnostics(logger)
+	for _, tc := range []struct {
+		method, path, body, reason string
+		status                     int
+	}{
+		{http.MethodGet, "/SECRET_PATH_CANARY?token=SECRET_QUERY_CANARY", "", "invalid_route", http.StatusNotFound},
+		{http.MethodPut, "/oauth/token?token=SECRET_QUERY_CANARY", "", "invalid_method", http.StatusMethodNotAllowed},
+	} {
+		r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		r.Header.Set("X-Request-Id", "SECRET_HEADER_CANARY")
+		out := httptest.NewRecorder()
+		s.Handler().ServeHTTP(out, r)
+		if out.Code != tc.status {
+			t.Fatalf("%s %s: status %d, want %d", tc.method, tc.path, out.Code, tc.status)
+		}
+	}
+	logger.Close()
+	rows := strings.TrimSpace(output.String())
+	if strings.Contains(rows, "SECRET_") {
+		t.Fatalf("private request data leaked: %s", rows)
+	}
+	lines := strings.Split(rows, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("refusal rows: got %d, want 2: %s", len(lines), rows)
+	}
+	ids := map[string]bool{}
+	for i, line := range lines {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if len(row) != 7 || row["event"] != "http.request_refused" || row["outcome"] != "refused" || row["reason"] != []string{"invalid_route", "invalid_method"}[i] || row["level"] != "INFO" || row["msg"] != "http request_refused" {
+			t.Fatalf("unexpected catalog row: %v", row)
+		}
+		id, _ := row["request_id"].(string)
+		if len(id) != 32 || ids[id] {
+			t.Fatalf("missing or reused request ID: %v", row)
+		}
+		ids[id] = true
+	}
+}
+
 func TestCodeExchangeLostCommitAcknowledgmentIsUncertain(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
@@ -244,5 +290,55 @@ func TestCodeExchangeLostCommitAcknowledgmentIsUncertain(t *testing.T) {
 	}
 	if !uncertain {
 		t.Fatalf("missing uncertain commit row: %s", rows)
+	}
+}
+
+func TestPortalSessionLostCommitAcknowledgmentIsUncertain(t *testing.T) {
+	c, m, db := fixture(t)
+	provider := newProvider(t)
+	provider.mu.Lock()
+	provider.subject = "SECRET_PORTAL_SUBJECT_CANARY"
+	provider.email = "SECRET_PORTAL_EMAIL_CANARY@example.test"
+	provider.mu.Unlock()
+	var output bytes.Buffer
+	logger := diagnostic.New(&output)
+	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s.SetDiagnostics(logger)
+	state, binding := start(t, s, nil)
+	provider.mu.Lock()
+	provider.nonce = strings.Split(state, "|")[1]
+	provider.mu.Unlock()
+	s.SetPortalCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("SECRET_LOST_ACK_CANARY")
+	})
+	out := complete(s, state, binding)
+	if out.Code != http.StatusServiceUnavailable || sessionFrom(out) != nil {
+		t.Fatalf("ambiguous portal response: status %d, cookie %v", out.Code, sessionFrom(out))
+	}
+	s.SetPortalCommitHookForTest(nil)
+	var persisted int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE a.subject=$1`, "SECRET_PORTAL_SUBJECT_CANARY").Scan(&persisted); err != nil || persisted != 1 {
+		t.Fatalf("portal commit persistence: %d %v", persisted, err)
+	}
+	logger.Close()
+	rows := output.String()
+	if strings.Contains(rows, "SECRET_") {
+		t.Fatalf("private material leaked: %s", rows)
+	}
+	var uncertain bool
+	for _, line := range strings.Split(strings.TrimSpace(rows), "\n") {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if row["event"] == "portal.login" && row["outcome"] == "uncertain" && row["reason"] == "commit_unconfirmed" && row["level"] == "WARN" {
+			uncertain = true
+		}
+	}
+	if !uncertain {
+		t.Fatalf("missing uncertain portal commit row: %s", rows)
 	}
 }

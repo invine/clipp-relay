@@ -83,13 +83,22 @@ func (s *Server) observedRequest(w http.ResponseWriter, r *http.Request, next ht
 		trace.client = ""
 	}
 	r = r.WithContext(context.WithValue(r.Context(), diagnosticContextKey{}, trace))
-	if event == "" {
-		next.ServeHTTP(w, r)
-		return
-	}
 	started := time.Now()
 	out := &diagnosticResponse{ResponseWriter: w}
 	next.ServeHTTP(out, r)
+	if event == "" {
+		var reason string
+		switch out.status {
+		case http.StatusNotFound:
+			reason = "invalid_route"
+		case http.StatusMethodNotAllowed:
+			reason = "invalid_method"
+		}
+		if reason != "" {
+			logger.Emit(diagnostic.Event{Event: "http.request_refused", Outcome: "refused", Reason: reason, RequestID: trace.id})
+		}
+		return
+	}
 	if trace.outcome == "" {
 		switch {
 		case out.status >= 200 && out.status < 400:

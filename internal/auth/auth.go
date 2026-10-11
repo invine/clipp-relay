@@ -54,6 +54,12 @@ func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx
 	s.commitCredential = commit
 }
 
+// SetPortalCommitHookForTest injects a lost portal-session commit acknowledgment.
+// Production leaves this unset.
+func (s *Server) SetPortalCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
+	s.commitPortal = commit
+}
+
 func Google() Provider {
 	return Provider{AuthorizationURL: "https://accounts.google.com/o/oauth2/v2/auth", TokenURL: "https://oauth2.googleapis.com/token", KeysURL: "https://www.googleapis.com/oauth2/v3/certs"}
 }
@@ -90,6 +96,7 @@ type Server struct {
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
 	commitCredential                   func(context.Context, pgx.Tx) error
+	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
@@ -628,8 +635,13 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	if e = tx.Commit(ctx); e != nil {
-		// The portal catalog has no uncertain pair; never claim issuance here.
+	if s.commitPortal != nil {
+		e = s.commitPortal(ctx, tx)
+	} else {
+		e = tx.Commit(ctx)
+	}
+	if e != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
 	}

@@ -178,6 +178,10 @@
           "internal_failure"
         ],
         [
+          "uncertain",
+          "commit_unconfirmed"
+        ],
+        [
           "started",
           "none"
         ]
@@ -1914,7 +1918,7 @@
     "failed",
     "stale"
   ],
-  "log_tuple_count": 498,
+  "log_tuple_count": 499,
   "scope": "structured logging only; metric endpoints and collectors excluded",
   "control_events": [
     {
