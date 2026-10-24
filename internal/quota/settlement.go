@@ -89,13 +89,14 @@ func (q *Quota) releaseSettlement(key settlementKey, s *settlementState) {
 // Settle atomically records all observed bytes, even above the allowance or
 // after authorization changes. Only final deletion or week retirement seals it.
 // An ambiguous commit blocks successors until the identical batch is reconciled.
-func (q *Quota) Settle(ctx context.Context, batch Settlement) (RecordedUsage, error) {
-	var result RecordedUsage
+func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUsage, err error) {
+	started := time.Now()
+	defer func() { q.accountingDiagnostic("quota.settlement", err, started) }()
 	if batch.AccountID == "" || batch.OperationID == "" || batch.DeltaBytes <= 0 || batch.Sequence <= 0 || !batch.WeekStart.Equal(weekStart(batch.WeekStart)) {
 		return result, ErrSettlementConflict
 	}
 	batch.WeekStart = batch.WeekStart.UTC()
-	err := q.runtime.WithUnit(ctx, func(unitCtx context.Context) error {
+	err = q.runtime.WithUnit(ctx, func(unitCtx context.Context) error {
 		if q.settlementProtection == nil {
 			return ErrTemporary
 		}

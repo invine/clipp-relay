@@ -12,7 +12,6 @@ import (
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/quota"
-	"clipp-relay/internal/relay"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -29,7 +28,7 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 		{name: "finalization-before-late-acknowledgement", expected: 12345, late: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+			p := protectedPortalFixture(t)
 			client := protectedClient(t, p)
 			requireProtectedAuthentication(t, client, p, `"ok":true`)
 			zero := strings.Repeat("0", 64)

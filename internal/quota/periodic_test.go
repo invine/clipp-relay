@@ -150,7 +150,7 @@ func TestPeriodicConcurrentObservationsRemainAccountScopedAfterRevocation(t *tes
 	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET status='Suspended',credential_generation=credential_generation+1 WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
-	q.Invalidate(id)
+	q.ApplyAccountingPolicy(id, 1<<30, true)
 	if err := q.FlushAccounting(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -499,5 +499,99 @@ func TestQuotaCloseIsBoundedWithUnresponsiveAccounting(t *testing.T) {
 	case <-q.periodic.done:
 	case <-time.After(time.Second):
 		t.Fatal("released worker did not exit")
+	}
+}
+
+func TestSuccessfulSettlementCannotConcealUnsafeClock(t *testing.T) {
+	for _, kind := range []string{"unsafe", "stale", "regression"} {
+		t.Run(kind, func(t *testing.T) {
+			q, id, _ := fixture(t)
+			q.SetSettlementProtection(settlementTestProtection{})
+			ctx := context.Background()
+			closed := make(chan ClosureOutcome, 1)
+			q.periodic.close = func(out ClosureOutcome) { closed <- out }
+			first, err := q.Eligibility(ctx, id, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = q.Observe(id, 12345); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "unsafe":
+				q.clock.mu.Lock()
+				q.clock.safe = false
+				q.clock.mu.Unlock()
+			case "stale":
+				q.clock.mu.Lock()
+				q.clock.sampledMono = q.clock.sampledMono.Add(-6 * time.Minute)
+				q.clock.mu.Unlock()
+			case "regression":
+				q.adjustTime = func(v time.Time) time.Time { return v.Add(-6 * time.Second) }
+			}
+			if err = q.FlushAccounting(ctx, id); err != nil {
+				t.Fatalf("already observed bytes must settle: %v", err)
+			}
+			q.CheckAccountingHealth()
+			select {
+			case out := <-closed:
+				if out.Reason != "clock_unavailable" || !q.ClosureCurrent(out) {
+					t.Fatalf("closure %+v", out)
+				}
+			default:
+				t.Fatal("successful settlement concealed unsafe clock")
+			}
+			if q.AccountingCurrent(id, first.Revision) {
+				t.Fatal("old admission retained authority")
+			}
+			if err = q.Observe(id, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err = q.FlushAccounting(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			if q.AccountingCurrent(id, first.Revision+1) {
+				t.Fatal("later successful write revived clock-blocked authority")
+			}
+
+			if _, err = q.Eligibility(ctx, id, 0); err != ErrTemporary {
+				t.Fatalf("unsafe readmission %v", err)
+			}
+		})
+	}
+}
+
+func TestSmallBackwardStepAcrossMondayCannotRestoreOldWeekAuthority(t *testing.T) {
+	q, id, _ := fixture(t)
+	ctx := context.Background()
+	boundary := weekStart(time.Now()).AddDate(0, 0, 7)
+	shift := boundary.Add(time.Second).Sub(time.Now())
+	q.adjustTime = func(v time.Time) time.Time { return v.Add(shift) }
+	q.clock.mu.Lock()
+	q.clock.sampled = q.clock.sampled.Add(shift)
+	q.clock.mu.Unlock()
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan ClosureOutcome, 1)
+	q.periodic.close = func(out ClosureOutcome) { closed <- out }
+	shift -= 2 * time.Second
+	if safe, _, _ := q.ClockHealth(); !safe {
+		t.Fatal("test must remain within ordinary skew threshold")
+	}
+	if q.AccountingReady(id) {
+		t.Fatal("Monday permission authorized Sunday")
+	}
+	if _, err := q.Eligibility(ctx, id, 0); err != ErrTemporary {
+		t.Fatalf("regression reauthorized past week: %v", err)
+	}
+	q.CheckAccountingHealth()
+	select {
+	case out := <-closed:
+		if out.Reason != "clock_unavailable" {
+			t.Fatalf("closure %+v", out)
+		}
+	default:
+		t.Fatal("already admitted circuit survived week regression")
 	}
 }

@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"clipp-relay/internal/auth"
+	"clipp-relay/internal/portal"
+	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -22,7 +25,7 @@ import (
 func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
 	for _, mode := range []string{"complete", "blocked-final", "forced-active", "forced-after-accounting-cutoff"} {
 		t.Run(mode, func(t *testing.T) {
-			p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+			p := protectedPortalFixture(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 			defer cancel()
 			create := func() host.Host {
@@ -160,6 +163,41 @@ func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
 				if e != nil || usage.RecordedBytes < before+8192 {
 					t.Fatalf("final=%+v before=%d %v", usage, before, e)
 				}
+				// Fresh production components load the confirmed total and receipt without
+				// reconstructing process-local traffic or inheriting physical sessions.
+				material, e := p.config.ReadMaterial()
+				if e != nil {
+					t.Fatal(e)
+				}
+				restartedAuth := auth.New(p.auth.Pool, p.config, material, p.provider.endpoints())
+				restartedQuota := quota.New(p.auth.Pool)
+				defer restartedQuota.Close()
+				restartedRelay, e := relay.NewProtected(restartedAuth, restartedQuota, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer restartedRelay.Close()
+				if restartedRelay.Host.ID() == p.relay.Host.ID() || restartedRelay.AccountSessions(p.account) != 0 {
+					t.Fatal("restart inherited relay identity or sessions")
+				}
+				got, e := restartedQuota.Eligibility(ctx, p.account, 0)
+				if e != nil || got.RecordedBytes != usage.RecordedBytes || got.EffectiveBytes != usage.RecordedBytes {
+					t.Fatalf("restart accounting %+v %v", got, e)
+				}
+				receipt, e := restartedQuota.RecordedUsage(ctx, p.account, week)
+				if e != nil || receipt != usage {
+					t.Fatalf("restart altered receipt: %+v %+v %v", receipt, usage, e)
+				}
+				view := portalRequest(restartedAuth, "GET", "/", p.owner, nil, "")
+				if view.Code != 200 || !strings.Contains(view.Body.String(), "Recorded Relay Usage: "+portal.FormatBytes(usage.RecordedBytes)) {
+					t.Fatalf("restart portal: %d %s", view.Code, view.Body.String())
+				}
+				restarted := p
+				restarted.auth = restartedAuth
+				restarted.quota = restartedQuota
+				restarted.relay = restartedRelay
+				requireProtectedAuthentication(t, protectedClient(t, restarted), restarted, `"ok":true`)
+
 			}
 		})
 	}

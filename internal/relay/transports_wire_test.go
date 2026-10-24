@@ -30,7 +30,7 @@ func TestTransportOnlyListenersRequireRelayAuth(t *testing.T) {
 		{"webrtc-direct", Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"}, "/webrtc-direct", "/webrtc-direct/certhash/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := New(wireAuthority{}, wireCredit{}, tc.opts)
+			s, err := New(wireAuthority{}, wireAccounting{}, tc.opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,7 +94,7 @@ func TestTransportOnlyRenewalExpiryAndReplacement(t *testing.T) {
 		{"webrtc-direct", Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := New(lifecycleAuthority{}, wireCredit{}, tc.opts)
+			s, err := New(lifecycleAuthority{}, wireAccounting{}, tc.opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -185,9 +185,9 @@ func TestTransportOnlyCircuitsTransferAndChargeBothDirections(t *testing.T) {
 		{"webrtc-direct", Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			credit := runOpaqueCircuit(t, twoAuthority{}, tc.opts, tc.name)
-			if credit.count("a") < int64(len("opaque relayed bytes")+len("return bytes")) || credit.count("b") < int64(len("opaque relayed bytes")+len("return bytes")) {
-				t.Fatalf("missing endpoint charges: a=%d b=%d", credit.count("a"), credit.count("b"))
+			accounting := runOpaqueCircuit(t, twoAuthority{}, tc.opts, tc.name)
+			if accounting.count("a") < int64(len("opaque relayed bytes")+len("return bytes")) || accounting.count("b") < int64(len("opaque relayed bytes")+len("return bytes")) {
+				t.Fatalf("missing endpoint charges: a=%d b=%d", accounting.count("a"), accounting.count("b"))
 			}
 		})
 	}
@@ -202,11 +202,11 @@ func TestTransportOnlySameAccountChargesBothEndpoints(t *testing.T) {
 		{"webrtc-direct", Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			credit := runOpaqueCircuit(t, sameAccountAuthority{}, tc.opts, tc.name)
-			if got := credit.count("a"); got < int64(2*(len("opaque relayed bytes")+len("return bytes"))) {
+			accounting := runOpaqueCircuit(t, sameAccountAuthority{}, tc.opts, tc.name)
+			if got := accounting.count("a"); got < int64(2*(len("opaque relayed bytes")+len("return bytes"))) {
 				t.Fatalf("same-account charged %d bytes", got)
 			}
-			if got := credit.count("b"); got != 0 {
+			if got := accounting.count("b"); got != 0 {
 				t.Fatalf("other account charged %d bytes", got)
 			}
 		})
@@ -222,7 +222,7 @@ func TestTransportMemoryPressureRejectsAndRecovers(t *testing.T) {
 		{"webrtc-direct", Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := New(wireAuthority{}, wireCredit{}, tc.opts)
+			s, err := New(wireAuthority{}, wireAccounting{}, tc.opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -293,7 +293,7 @@ func TestWebSocketNegotiationTimeoutAndStockWebRTCInFlightBound(t *testing.T) {
 	if libp2pwebrtc.DefaultMaxInFlightConnections != 128 {
 		t.Fatalf("stock WebRTC pending setup bound = %d", libp2pwebrtc.DefaultMaxInFlightConnections)
 	}
-	s, err := New(wireAuthority{}, wireCredit{}, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws"})
 	if err != nil {
 		t.Fatal(err)
 	}

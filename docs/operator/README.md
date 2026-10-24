@@ -52,3 +52,5 @@ context and closes remaining sessions; uncertain/unpersisted observations may be
 lost. Quota cleanup cancels workers and bounds its wait at 100 ms even when a
 faulty dependency ignores cancellation. Confirmed totals and compact receipts
 survive restart; restart never reconstructs lost observations or live sessions.
+
+Offline accounting schema transitions: [observed accounting cutover](accounting-migration.md).

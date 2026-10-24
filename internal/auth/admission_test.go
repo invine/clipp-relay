@@ -16,8 +16,8 @@ func TestOneServingBudgetCoversAccountQuotaAndCleanup(t *testing.T) {
 	c, m, db := fixture(t)
 	account := auth.NewWithRuntime(db, c, m, auth.Google())
 	account.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
-	credit := quota.NewWithRuntime(db)
-	defer credit.Close()
+	accounting := quota.NewWithRuntime(db)
+	defer accounting.Close()
 	id, err := quota.NewOperationID()
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +27,7 @@ func TestOneServingBudgetCoversAccountQuotaAndCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.weekly_quota_usage WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, id)
+		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.weekly_relay_usage WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, id)
 	})
 
 	entered := make(chan struct{}, 64)
@@ -54,16 +54,16 @@ func TestOneServingBudgetCoversAccountQuotaAndCleanup(t *testing.T) {
 	for range 63 {
 		<-entered
 	}
-	var funded quota.Result
+	var funded quota.AccountingEligibility
 	var fundingErr error
 	guarded := false
 	admitted := account.WithServingUnit(context.Background(), func(unitCtx context.Context) {
 		guarded = account.WithAccountGuards(unitCtx, []string{id}, func(guardCtx context.Context) {
-			funded, fundingErr = credit.Ensure(guardCtx, id, 0)
+			funded, fundingErr = accounting.Eligibility(guardCtx, id, 0)
 		})
 	})
-	if !admitted || !guarded || fundingErr != nil || funded.Usable != quota.BlockBytes {
-		t.Fatalf("nested serving-to-account-to-quota funding reacquired a unit: admitted=%t guarded=%t result=%+v err=%v", admitted, guarded, funded, fundingErr)
+	if !admitted || !guarded || fundingErr != nil || funded.EffectiveBytes != 0 {
+		t.Fatalf("nested serving-to-account-to-quota eligibility reacquired a unit: admitted=%t guarded=%t result=%+v err=%v", admitted, guarded, funded, fundingErr)
 	}
 	startGuard(63)
 	<-entered
@@ -73,7 +73,7 @@ func TestOneServingBudgetCoversAccountQuotaAndCleanup(t *testing.T) {
 	}) {
 		t.Fatal("account guard admitted beyond budget")
 	}
-	if _, err := credit.Ensure(context.Background(), id, 0); !errors.Is(err, quota.ErrTemporary) {
+	if _, err := accounting.Eligibility(context.Background(), id, 0); !errors.Is(err, quota.ErrTemporary) {
 		t.Fatalf("quota admitted beyond budget: %v", err)
 	}
 	if _, err := account.SampleCleanupSignals(context.Background()); err == nil {

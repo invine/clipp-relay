@@ -29,7 +29,7 @@ The period from Monday at 00:00 UTC until the following Monday at 00:00 UTC duri
 _Avoid_: Billing period, rolling week
 
 **Quota Committed**:
-The prepaid measure of a Relay Account's weekly allowance committed to relay-use credit, including both spent and still-unused reserved credit. It is distinct from observed traffic and Recorded Relay Usage; ordinary operation does not refund it.
+The historical, retired prepaid measure of a Relay Account's weekly allowance committed to relay-use credit, including both spent and still-unused reserved credit. It is distinct from observed traffic and Recorded Relay Usage; it is no longer the serving accounting model.
 _Avoid_: Charged Relay Traffic, exact transferred bytes
 
 **Recorded Relay Usage**:

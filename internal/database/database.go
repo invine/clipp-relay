@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 12
+const ExpectedRevision = 13
 
 type migration struct {
 	revision int
@@ -277,7 +277,9 @@ CREATE TABLE public.recovery_runs (
  journal_head jsonb NOT NULL,
  completed_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
-REVOKE ALL ON public.recovery_runs FROM PUBLIC;`}}
+REVOKE ALL ON public.recovery_runs FROM PUBLIC;`}, {13, `DROP TABLE public.weekly_quota_usage;
+DELETE FROM public.retained_quota_usage;
+ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
@@ -433,6 +435,9 @@ func VerifySchema(ctx context.Context, p *pgxpool.Pool) error {
 	return verifySchema(ctx, conn)
 }
 func verifySchema(ctx context.Context, conn *pgxpool.Conn) error {
+	return verifySchemaHistory(ctx, conn, migrations)
+}
+func verifySchemaHistory(ctx context.Context, conn *pgxpool.Conn, expected []migration) error {
 	rows, err := conn.Query(ctx, "SELECT revision, checksum FROM public.schema_migrations ORDER BY revision")
 	if err != nil {
 		return errors.New("schema revision unavailable")
@@ -446,11 +451,11 @@ func verifySchema(ctx context.Context, conn *pgxpool.Conn) error {
 			return errors.New("schema revision unavailable")
 		}
 		count++
-		if revision != count || count > len(migrations) || hash != checksum(migrations[count-1].sql) {
+		if revision != count || count > len(expected) || hash != checksum(expected[count-1].sql) {
 			return errors.New("schema revision or checksum mismatch")
 		}
 	}
-	if rows.Err() != nil || count != ExpectedRevision {
+	if rows.Err() != nil || count != len(expected) {
 		return errors.New("schema revision mismatch")
 	}
 	return nil

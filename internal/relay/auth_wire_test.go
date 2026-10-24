@@ -31,13 +31,10 @@ func (a failingAuthority) AuthenticateRelay(context.Context, string) (auth.Relay
 	return auth.RelayCredential{}, a.err
 }
 
-type failingCredit struct{ err error }
+type failingAccounting struct{ err error }
 
-func (c failingCredit) Ensure(context.Context, string, int64) (quota.Result, error) {
-	return quota.Result{}, c.err
-}
-func (c failingCredit) Take(context.Context, string, int64, int64) (quota.Result, error) {
-	return quota.Result{}, c.err
+func (c failingAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+	return quota.AccountingEligibility{}, c.err
 }
 
 func authResponse(t *testing.T, ctx context.Context, h host.Host, id peer.ID, token string) string {
@@ -52,7 +49,7 @@ func readSize(r io.Reader) (uint64, error) { return binary.ReadUvarint(byteReade
 
 func TestDrainRejectsAuthBeforeAuthorityCall(t *testing.T) {
 	a := &countingAuthority{}
-	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(a, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +78,7 @@ func TestDrainRejectsAuthBeforeAuthorityCall(t *testing.T) {
 }
 
 func TestDelayedExtraAuthFrameIsRejected(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +113,7 @@ func TestDelayedExtraAuthFrameIsRejected(t *testing.T) {
 }
 
 func TestRelayAuthConnectionRateRejectsAndRecovers(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,13 +146,13 @@ func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		a    Authority
-		c    Credit
+		c    Accounting
 		code string
 	}{
-		{"invalid token", failingAuthority{auth.ErrInvalidAccess}, wireCredit{}, "authentication_failed"},
-		{"database outage", failingAuthority{errors.New("database unavailable")}, wireCredit{}, "temporarily_unavailable"},
-		{"exhausted allowance", wireAuthority{}, failingCredit{quota.ErrExhausted}, "quota_exhausted"},
-		{"uncertain funding", wireAuthority{}, failingCredit{quota.ErrTemporary}, "temporarily_unavailable"},
+		{"invalid token", failingAuthority{auth.ErrInvalidAccess}, wireAccounting{}, "authentication_failed"},
+		{"database outage", failingAuthority{errors.New("database unavailable")}, wireAccounting{}, "temporarily_unavailable"},
+		{"exhausted allowance", wireAuthority{}, failingAccounting{quota.ErrExhausted}, "quota_exhausted"},
+		{"uncertain accounting", wireAuthority{}, failingAccounting{quota.ErrTemporary}, "temporarily_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := New(tc.a, tc.c, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
@@ -190,7 +187,7 @@ func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 }
 
 func TestFailedRenewalAndAccountChangePreservePriorSession(t *testing.T) {
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,3 +220,11 @@ func TestFailedRenewalAndAccountChangePreservePriorSession(t *testing.T) {
 		t.Fatalf("old permission lost after failed renewal: %v", err)
 	}
 }
+
+func (c failingAccounting) Observe(string, int64) error              { return c.err }
+func (c failingAccounting) AccountingFailed(string)                  {}
+func (c failingAccounting) AccountingReady(string) bool              { return true }
+func (c failingAccounting) AccountingCurrent(string, uint64) bool    { return true }
+func (c failingAccounting) AccountingSessions(string, int)           {}
+func (c failingAccounting) ClosureCurrent(quota.ClosureOutcome) bool { return true }
+func (c failingAccounting) FlushAllAccounting(context.Context) error { return nil }

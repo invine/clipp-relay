@@ -57,7 +57,7 @@ func (a *policyAuthority) change(active bool, cap int, s *Server) {
 
 func TestLiveSessionCapReductionClosesAllAndReconnectsWithinCap(t *testing.T) {
 	a := &policyAuthority{active: true, cap: 2}
-	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(a, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestLiveSessionCapReductionClosesAllAndReconnectsWithinCap(t *testing.T) {
 
 func TestSecurityMutationFencesInFlightRelayAuthentication(t *testing.T) {
 	a := &policyAuthority{active: true, cap: 1, seen: make(chan struct{}, 1)}
-	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(a, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}

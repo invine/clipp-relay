@@ -102,7 +102,7 @@ func TestEveryEnabledScopeMatchesAcceptedFixedLimits(t *testing.T) {
 }
 
 func TestRelayEnablesOnlyRequiredTCPProtocols(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestRelayEnablesOnlyRequiredTCPProtocols(t *testing.T) {
 }
 
 func TestCustomStreamsChargeAndReleaseServiceBuffers(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestCustomStreamsChargeAndReleaseServiceBuffers(t *testing.T) {
 }
 
 func TestResourceManagerDoesNotApplyStockIPBuckets(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestResourceManagerDoesNotApplyStockIPBuckets(t *testing.T) {
 }
 
 func TestTransientConnectionScopeRejectsAtLimitAndRecovers(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestTransientConnectionScopeRejectsAtLimitAndRecovers(t *testing.T) {
 }
 
 func TestUnknownResourceScopesBlockAtRuntime(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}

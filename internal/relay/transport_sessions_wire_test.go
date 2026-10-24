@@ -36,7 +36,7 @@ func newTransportClients(t *testing.T, a Authority, cap int, logs ...DiagnosticS
 	if len(logs) > 0 {
 		log = logs[0]
 	}
-	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", MaxSessions: cap, Diagnostics: log})
+	s, err := New(a, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", MaxSessions: cap, Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}

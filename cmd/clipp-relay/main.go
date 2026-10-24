@@ -83,6 +83,7 @@ func run() int {
 		if err = database.Migrate(startup, pool); err != nil {
 			return fail("database_unavailable")
 		}
+		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "success", Reason: "none", SchemaRevision: database.ExpectedRevision})
 		return 0
 	}
 	if *command == "serve" {
@@ -152,13 +153,13 @@ func run() int {
 			return fail("journal_unavailable")
 		}
 	}
-	credit := quota.NewWithRuntime(db)
-	credit.SetDiagnostics(logger)
-	if err := credit.ConfigureAccountingFailureDeadline(c.AccountingDeadline()); err != nil {
-		credit.Close()
+	accounting := quota.NewWithRuntime(db)
+	accounting.SetDiagnostics(logger)
+	if err := accounting.ConfigureAccountingFailureDeadline(c.AccountingDeadline()); err != nil {
+		accounting.Close()
 		return fail("configuration_rejected")
 	}
-	defer credit.Close()
+	defer accounting.Close()
 	observations := diagnostic.NewObservations(logger.Emit, func(ctx context.Context) (string, error) {
 		sample, err := portal.SampleCleanupSignals(ctx)
 		if err != nil {
@@ -188,7 +189,7 @@ func run() int {
 			return "none", nil
 		}
 	})
-	dataPlane, err := relay.NewProtected(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
+	dataPlane, err := relay.NewProtected(portal, accounting, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
 	if err != nil {
 		logger.Emit(diagnostic.Event{Event: "service.serving", Outcome: "failed", Reason: "listener_failed"})
 		return 1
@@ -238,7 +239,7 @@ func run() int {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
-			safe, _, sampled := credit.ClockHealth()
+			safe, _, sampled := accounting.ClockHealth()
 			observations.Clock(safe, sampled, time.Now())
 			select {
 			case <-ctx.Done():

@@ -117,7 +117,7 @@ func rvExchange(t *testing.T, ctx context.Context, h host.Host, relayID peer.ID,
 func protocolID(s string) protocol.ID { return protocol.ID(s) }
 
 func TestRendezvousV2RegisterV1CrossAccountLookupAndUnregister(t *testing.T) {
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestRendezvousV2RegisterV1CrossAccountLookupAndUnregister(t *testing.T) {
 }
 
 func TestDrainRetainsLookupAndUnregisterButRejectsRegister(t *testing.T) {
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestDrainRetainsLookupAndUnregisterButRejectsRegister(t *testing.T) {
 }
 
 func TestRendezvousRegistrationRequiresReservationAndValidReachability(t *testing.T) {
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestRendezvousRegistrationRequiresReservationAndValidReachability(t *testin
 }
 
 func TestRendezvousStrictRequestsAndV1NumericBytes(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestRendezvousStrictRequestsAndV1NumericBytes(t *testing.T) {
 }
 
 func TestRendezvousConnectionRateRejectsAndRecovers(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestRendezvousConnectionRateRejectsAndRecovers(t *testing.T) {
 }
 
 func TestRendezvousV1AnswersLegacyOpenWriteStream(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestRendezvousV1AnswersLegacyOpenWriteStream(t *testing.T) {
 }
 
 func TestRendezvousV1RegistrationV2LookupPreservesEnvelope(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestRendezvousV1RegistrationV2LookupPreservesEnvelope(t *testing.T) {
 }
 
 func TestRendezvousRejectsUnauthenticatedPhysicalConnection(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestRendezvousRejectsUnauthenticatedPhysicalConnection(t *testing.T) {
 }
 
 func TestRendezvousRejectsOversizeAndExtraFrames(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func (shortRVAuthority) AuthenticateRelay(_ context.Context, token string) (auth
 }
 
 func TestRendezvousLeaseEndsAtSessionDeadline(t *testing.T) {
-	s, err := New(shortRVAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(shortRVAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestRendezvousLeaseEndsAtSessionDeadline(t *testing.T) {
 }
 
 func TestRendezvousNewSessionReplacesOldOwner(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestRendezvousNewSessionReplacesOldOwner(t *testing.T) {
 }
 
 func TestRendezvousV2RejectsQueuedSecondFrame(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestRendezvousV2RejectsQueuedSecondFrame(t *testing.T) {
 }
 
 func TestRendezvousNegotiationFallsBackOnlyWhenV2Unsupported(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +573,7 @@ func TestRendezvousNegotiationFallsBackOnlyWhenV2Unsupported(t *testing.T) {
 }
 
 func TestRendezvousLeaseAndReservationSurviveSameConnectionRenewal(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +639,7 @@ func rvNegotiatedErrorRequest(t *testing.T, ctx context.Context, h host.Host, re
 
 func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 	t.Run("authentication", func(t *testing.T) {
-		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -660,7 +660,7 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 		}
 	})
 	t.Run("quota", func(t *testing.T) {
-		s, err := New(wireAuthority{}, failingCredit{quota.ErrExhausted}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		s, err := New(wireAuthority{}, failingAccounting{quota.ErrExhausted}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -696,7 +696,7 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 		}
 	})
 	t.Run("timeout", func(t *testing.T) {
-		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -726,7 +726,7 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 		}
 	})
 	t.Run("server", func(t *testing.T) {
-		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -743,7 +743,7 @@ func TestRendezvousNoV1FallbackForAuthQuotaTimeoutOrServerError(t *testing.T) {
 }
 
 func TestRendezvousV2AnswersCompleteFrameWithWriteSideOpen(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}

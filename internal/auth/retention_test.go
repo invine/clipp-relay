@@ -33,13 +33,13 @@ VALUES($1,'https://accounts.google.com','retention-boundary','boundary@example.t
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id=$1`, id)
 	for _, offset := range []int{0, 12, 13} {
-		_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes)
+		_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes)
 VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*$2,10,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f',10)`, id, offset)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_quota_usage WHERE account_id=$1`, id)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id=$1`, id)
 	_, err = db.Pool.Exec(ctx, `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,current_refresh_generation,created_at,last_used_at,idle_expires_at,absolute_expires_at)
 VALUES($1,$2,0,'electron',2,clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '7 days',clock_timestamp()+interval '30 days')`, grant, id)
 	if err != nil {
@@ -52,7 +52,7 @@ VALUES(decode(repeat('ab',32),'hex'),$1,$2,1,clock_timestamp()-interval '2 days'
 		t.Fatal(err)
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.refresh_generations WHERE grant_id=$1`, grant)
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,decode(repeat('cd',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7,10),
 ($1,decode(repeat('ef',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,10)`, s.CurrentPepper)
 	if err != nil {
@@ -73,7 +73,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var oldHistory, oldRetained, oldAudit int
-		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-91`, id).Scan(&oldHistory)
+		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-91`, id).Scan(&oldHistory)
 		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('cd',32),'hex')`).Scan(&oldRetained)
 		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id='2d41eb9e-c19a-4dcf-9094-f64123115573'`).Scan(&oldAudit)
 		if oldHistory == 0 && oldRetained == 0 && oldAudit == 0 {
@@ -82,7 +82,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 		time.Sleep(50 * time.Millisecond)
 	}
 	var history, retained, expiredRetained, liveHash, account, oldAudit, currentAudit int
-	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_quota_usage WHERE account_id=$1`, id).Scan(&history); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1`, id).Scan(&history); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('ef',32),'hex')`).Scan(&retained); err != nil {
@@ -133,12 +133,12 @@ VALUES($1,clock_timestamp()-interval '2 hours','account_deleted',$2)`, audit, id
 		t.Fatal(err)
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.audit_events WHERE id=$1`, audit)
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes)
 VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,8,1,'506d5f55-fd80-48a5-bd4e-c99db74b8389',8)`, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_quota_usage WHERE account_id=$1`, id)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id=$1`, id)
 	maintainCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { s.Maintain(maintainCtx); close(done) }()
@@ -161,7 +161,7 @@ VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,8,1,'506
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.deletion_operations WHERE id=$1`, op).Scan(&operation); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_quota_usage WHERE account_id=$1`, id).Scan(&quota); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1`, id).Scan(&quota); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id=$1 AND account_id=$2`, audit, id).Scan(&auditCount); err != nil {
@@ -178,7 +178,7 @@ func TestRetainedUsagePreventsPrematurePepperRetirement(t *testing.T) {
 	d.subject = "pepper-missing-registration"
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	ctx := context.Background()
-	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES(993,decode(repeat('fa',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,100)`)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestCleanupErrorDoesNotStarveLaterRetentionClass(t *testing.T) {
 	c, m, db := fixture(t)
 	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
-	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,decode(repeat('da',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7,1)`, s.CurrentPepper)
 	if err != nil {
 		t.Fatal(err)
@@ -291,7 +291,7 @@ func TestDuplicateLogicalRetainedUsageFailsRegistration(t *testing.T) {
 	s.Peppers[993] = make([]byte, 32)
 	ctx := context.Background()
 	for _, version := range []uint64{s.CurrentPepper, 993} {
-		_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+		_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,100)`, version, retainedDigest(s.Peppers[version], d.subject))
 		if err != nil {
 			t.Fatal(err)
@@ -330,7 +330,7 @@ func concurrentRegistrationImportsRetainedUsageOnce(t *testing.T, db *database.R
 	t.Helper()
 	ctx := context.Background()
 	t.Cleanup(func() {
-		for _, table := range []string{"portal_sessions", "weekly_quota_usage", "audit_events"} {
+		for _, table := range []string{"portal_sessions", "weekly_relay_usage", "audit_events"} {
 			_, err := db.Pool.Exec(ctx, `DELETE FROM public.`+table+` WHERE account_id IN (SELECT id FROM public.accounts WHERE subject=$1)`, d.subject)
 			if err != nil {
 				t.Errorf("clean up %s: %v", table, err)
@@ -341,7 +341,7 @@ func concurrentRegistrationImportsRetainedUsageOnce(t *testing.T, db *database.R
 		}
 	})
 	digest := retainedDigest(s.Peppers[s.CurrentPepper], d.subject)
-	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`, s.CurrentPepper, digest)
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&accounts); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Pool.QueryRow(ctx, `SELECT u.committed_bytes,u.sequence FROM public.weekly_quota_usage u JOIN public.accounts a ON a.id=u.account_id WHERE a.subject=$1 AND u.week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`, d.subject).Scan(&committed, &sequence); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT u.recorded_bytes,u.sequence FROM public.weekly_relay_usage u JOIN public.accounts a ON a.id=u.account_id WHERE a.subject=$1 AND u.week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`, d.subject).Scan(&committed, &sequence); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=$1`, digest).Scan(&remaining); err != nil {

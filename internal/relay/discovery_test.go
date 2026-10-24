@@ -16,7 +16,7 @@ import (
 )
 
 func TestDiscoveryPublishesOnlyCurrentPeerAddresses(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestDiscoveryPublishesOnlyCurrentPeerAddresses(t *testing.T) {
 }
 
 func TestDiscoverySortsAndDeduplicatesCompleteSnapshot(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestDiscoverySortsAndDeduplicatesCompleteSnapshot(t *testing.T) {
 
 func TestDrainingDiscoveryWithdrawsBeforeBackendAuth(t *testing.T) {
 	a := &countingAuthority{}
-	s, err := New(a, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(a, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func (zeroCapAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCr
 }
 
 func TestDiscoverySeparatesAccountQuotaFromPublicationAndGlobalCapacity(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

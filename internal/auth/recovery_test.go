@@ -21,7 +21,6 @@ import (
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/quota"
-	"clipp-relay/internal/relay"
 )
 
 func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t *testing.T) {
@@ -135,7 +134,7 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 }
 
 func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t *testing.T) {
-	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	p := protectedPortalFixture(t)
 	ctx := context.Background()
 	mc, err := config.Load(os.Getenv("CLIPP_TEST_MIGRATION_CONFIG"))
 	if err != nil {

@@ -87,7 +87,7 @@ func localTLSProxyCertificate(t *testing.T, internal ma.Multiaddr, name string) 
 
 func TestWSSCertificateAndNoiseIdentityBeforeToken(t *testing.T) {
 	a := &observedAuthority{}
-	s, err := New(a, wireCredit{}, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebSocketHostname: "relay.example.test"})
+	s, err := New(a, wireAccounting{}, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebSocketHostname: "relay.example.test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestWSSCertificateAndNoiseIdentityBeforeToken(t *testing.T) {
 
 func TestWebRTCStaleCerthashAndPeerIDBeforeToken(t *testing.T) {
 	a := &observedAuthority{}
-	s, err := New(a, wireCredit{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
+	s, err := New(a, wireAccounting{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestWebRTCStaleCerthashAndPeerIDBeforeToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := New(wireAuthority{}, wireCredit{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
+	other, err := New(wireAuthority{}, wireAccounting{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,8 +199,8 @@ func TestWebRTCStaleCerthashAndPeerIDBeforeToken(t *testing.T) {
 }
 
 func TestWSSOnlyCircuitTransfersAndChargesBothDirections(t *testing.T) {
-	credit := &recordingCredit{counts: map[string]int64{}}
-	s, err := New(twoAuthority{}, credit, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebSocketHostname: "relay.example.test"})
+	accounting := &recordingAccounting{counts: map[string]int64{}}
+	s, err := New(twoAuthority{}, accounting, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebSocketHostname: "relay.example.test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestWSSOnlyCircuitTransfersAndChargesBothDirections(t *testing.T) {
 			t.Fatalf("relay initiated outbound peer connection: %s", conn.RemoteMultiaddr())
 		}
 	}
-	if credit.count("a") < int64(len("through WSS")+len("back over WSS")) || credit.count("b") < int64(len("through WSS")+len("back over WSS")) {
-		t.Fatalf("charges a=%d b=%d", credit.count("a"), credit.count("b"))
+	if accounting.count("a") < int64(len("through WSS")+len("back over WSS")) || accounting.count("b") < int64(len("through WSS")+len("back over WSS")) {
+		t.Fatalf("charges a=%d b=%d", accounting.count("a"), accounting.count("b"))
 	}
 }

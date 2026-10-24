@@ -7,15 +7,15 @@ import (
 	"time"
 )
 
-// QuotaHistoryEntry is one account-week observation of committed quota.
+// QuotaHistoryEntry is one account-week confirmed recorded usage total.
 type QuotaHistoryEntry struct {
-	Week      string `json:"week"`
-	Committed int64  `json:"committed"`
+	Week     string `json:"week"`
+	Recorded int64  `json:"recorded"`
 }
 
 type historyBar struct {
 	Week, Label, Value string
-	Committed          int64
+	Recorded           int64
 	X, CenterX, Y      float64
 	Height, ValueY     float64
 	Current            bool
@@ -42,7 +42,7 @@ func quotaHistogram(history []QuotaHistoryEntry) historyHistogram {
 	chart.Right = chart.Width - 16
 	var peak int64
 	for _, week := range weeks {
-		peak = max(peak, week.Committed)
+		peak = max(peak, week.Recorded)
 	}
 	// Binary tick spacing keeps labels in the same units as quota displays.
 	// Saturate before doubling to preserve very large integer-byte allowances.
@@ -62,10 +62,10 @@ func quotaHistogram(history []QuotaHistoryEntry) historyHistogram {
 		if date, err := time.Parse("2006-01-02", week.Week); err == nil {
 			label = date.Format("Jan 2")
 		}
-		height := float64(week.Committed) / float64(scale) * 190
+		height := float64(week.Recorded) / float64(scale) * 190
 		center := 64 + slot*(float64(index)+0.5)
 		chart.Bars = append(chart.Bars, historyBar{
-			Week: week.Week, Label: label, Value: FormatBytes(week.Committed), Committed: week.Committed,
+			Week: week.Week, Label: label, Value: FormatBytes(week.Recorded), Recorded: week.Recorded,
 			X: center - 18, CenterX: center, Y: 218 - height, Height: height, ValueY: 210 - height,
 			Current: index == len(weeks)-1,
 		})

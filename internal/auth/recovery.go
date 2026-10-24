@@ -197,7 +197,7 @@ func (s *Server) recoverDeletedAccount(ctx context.Context, tx pgx.Tx, id string
 		for v := range s.Peppers {
 			candidate := s.digest(v, "retained-quota", googleIssuer+"\x00"+*subject)
 			var amount int64
-			found := tx.QueryRow(ctx, `SELECT committed_bytes FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3 FOR UPDATE`, v, candidate, week).Scan(&amount)
+			found := tx.QueryRow(ctx, `SELECT recorded_bytes FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3 FOR UPDATE`, v, candidate, week).Scan(&amount)
 			if errors.Is(found, pgx.ErrNoRows) {
 				continue
 			}
@@ -210,7 +210,7 @@ func (s *Server) recoverDeletedAccount(ctx context.Context, tx pgx.Tx, id string
 		if matches > 1 {
 			return errors.New("duplicate logical retained usage")
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes) VALUES($1,$2,$3,$4) ON CONFLICT(pepper_version,identity_digest,week_start) DO UPDATE SET committed_bytes=GREATEST(retained_quota_usage.committed_bytes,EXCLUDED.committed_bytes)`, version, digest, week, recorded); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes) VALUES($1,$2,$3,$4) ON CONFLICT(pepper_version,identity_digest,week_start) DO UPDATE SET recorded_bytes=GREATEST(retained_quota_usage.recorded_bytes,EXCLUDED.recorded_bytes)`, version, digest, week, recorded); err != nil {
 			return err
 		}
 	}
