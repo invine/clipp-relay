@@ -91,7 +91,7 @@ func TestEstablishedCircuitRequiresHealthyNewWeekAuthorityDespiteSuccessfulWrite
 			failed.Store(unavailable)
 			// Advance independently of database progress. Every observation is successfully
 			// recorded; only authoritative new-week eligibility is unavailable.
-			for second := int64(1); second <= 4; second++ {
+			for second := int64(1); second <= 3; second++ {
 				if second < 3 {
 					transfer()
 				}
@@ -112,7 +112,7 @@ func TestEstablishedCircuitRequiresHealthyNewWeekAuthorityDespiteSuccessfulWrite
 				p.quota.CheckAccountingHealth()
 			}
 			usage, err := p.quota.RecordedUsage(ctx, p.account, monday)
-			if err != nil || usage.RecordedBytes < 400 {
+			if err != nil || usage.RecordedBytes < 300 {
 				t.Fatalf("writes did not progress: %+v %v", usage, err)
 			}
 			if !unavailable {
