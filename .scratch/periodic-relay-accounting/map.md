@@ -20,6 +20,8 @@ All eight tickets requested on 2026-10-24. See [run](run.md) for local implement
 
 - [06](issues/06-deletion-and-retained-usage.md): retirement, bounded final settlement and serialized capture/seal/import integrated; isolated PG18/race passed.
 
+- [07](issues/07-drain-restart-and-recovery.md): bounded lifecycle/restart and concrete local recovery safeguards integrated; forced-drain correction verified with original mixed/race tests.
+
 ## Fog
 
 No product decision remains open. Native/live acceptance is outside local implementation.

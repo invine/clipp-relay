@@ -4,7 +4,7 @@
 
 **Blocked by:** 04 — Enforce configurable accounting health and policy changes; 05 — Complete weekly accounting and usage presentation; 07 — Preserve accounting through drain, restart and recovery.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Parent: [Relay, Quota and Auth specification](../spec.md), especially I8 and Testing Decisions. User stories: 43; integrated acceptance of all 43 stories. Breakdown approved 2026-10-24.
 
