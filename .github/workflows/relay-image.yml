@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.1-bookworm@sha256:[0-9a-f]{64}$ ]]
+          [[ "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.3-bookworm@sha256:[0-9a-f]{64}$ ]]
 
       - name: Check image build and digest contracts
         shell: bash
@@ -90,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$IMAGE_REPOSITORY" =~ ^ghcr\.io/[a-z0-9._-]+/[a-z0-9._/-]+$ ]]
-          [[ "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.1-bookworm@sha256:[0-9a-f]{64}$ ]]
+          [[ "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.3-bookworm@sha256:[0-9a-f]{64}$ ]]
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

@@ -49,6 +49,14 @@ if bash "$root/scripts/build-relay-image.sh" --local arm64 'bad image'; then
 fi
 test ! -e "$FAKE_DOCKER_ARGS"
 
+# Reject the retired vulnerable builder before invoking Docker.
+if GO_BUILDER_IMAGE="golang:1.27.1-bookworm@sha256:$(printf 'a%.0s' {1..64})" \
+  bash "$root/scripts/build-relay-image.sh" --push ghcr.io/invine/clipp-relay:run "$tmp/result.json"; then
+  echo 'retired Go builder was accepted' >&2
+  exit 1
+fi
+test ! -e "$FAKE_DOCKER_ARGS"
+
 # CI supplies a real builder pin; this negative case must clear it explicitly.
 if GO_BUILDER_IMAGE='' bash "$root/scripts/build-relay-image.sh" --push iad.ocir.io/ns/clipp-relay:run "$tmp/result.json"; then
   echo 'push without pinned builder was accepted' >&2
@@ -56,15 +64,15 @@ if GO_BUILDER_IMAGE='' bash "$root/scripts/build-relay-image.sh" --push iad.ocir
 fi
 test ! -e "$FAKE_DOCKER_ARGS"
 
-GO_BUILDER_IMAGE="golang:1.27.1-bookworm@sha256:$(printf 'a%.0s' {1..64})" \
+GO_BUILDER_IMAGE="golang:1.27.3-bookworm@sha256:$(printf 'a%.0s' {1..64})" \
   bash "$root/scripts/build-relay-image.sh" --push iad.ocir.io/ns/clipp-relay:run "$tmp/result.json"
 assert_arg '--platform=linux/amd64,linux/arm64'
 assert_arg '--push'
 assert_arg "--metadata-file=$tmp/result.json"
-assert_arg '--build-arg=GO_BUILDER_IMAGE=golang:1.27.1-bookworm@sha256:'"$(printf 'a%.0s' {1..64})"
+assert_arg '--build-arg=GO_BUILDER_IMAGE=golang:1.27.3-bookworm@sha256:'"$(printf 'a%.0s' {1..64})"
 reject_arg '--load'
 
-GO_BUILDER_IMAGE="golang:1.27.1-bookworm@sha256:$(printf 'a%.0s' {1..64})" \
+GO_BUILDER_IMAGE="golang:1.27.3-bookworm@sha256:$(printf 'a%.0s' {1..64})" \
   bash "$root/scripts/build-relay-image.sh" --push ghcr.io/invine/clipp-relay:run "$tmp/result.json"
 assert_arg 'ghcr.io/invine/clipp-relay:run'
 assert_arg '--platform=linux/amd64,linux/arm64'
