@@ -49,6 +49,7 @@ func (b *balance) clearPending() {
 }
 
 type Quota struct {
+	periodic             periodicAccounting
 	settlementProtection SettlementProtection
 	settlementMu         sync.Mutex
 	settlements          map[settlementKey]*settlementState
@@ -130,7 +131,17 @@ func NewWithRuntime(runtime *database.Runtime) *Quota {
 	go q.probeLoop()
 	return q
 }
-func (q *Quota) Close() { close(q.stop); <-q.done }
+func (q *Quota) Close() {
+	q.periodic.mu.Lock()
+	cancel, done := q.periodic.cancel, q.periodic.done
+	q.periodic.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
+	close(q.stop)
+	<-q.done
+}
 
 // NewOperationID produces a cryptographically random stable operation identifier.
 func NewOperationID() (string, error) {

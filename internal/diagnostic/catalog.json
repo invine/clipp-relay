@@ -1142,6 +1142,14 @@
         [
           "ended",
           "clock_unavailable"
+        ],
+        [
+          "ended",
+          "accounting_unavailable"
+        ],
+        [
+          "ended",
+          "quota_exhausted"
         ]
       ],
       "transports": [
