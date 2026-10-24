@@ -12,7 +12,7 @@ import (
 func TestOwnerProfileShowsCommittedUsageAndAbsoluteHistory(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "quota-profile", "quota-profile@example.test", "")
 	var id string
 	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject='quota-profile'`).Scan(&id); err != nil {

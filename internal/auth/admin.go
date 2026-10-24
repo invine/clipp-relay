@@ -461,7 +461,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	update := func(unitCtx context.Context) {
 		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
-		if applied != nil && s.accountChanged != nil {
+		if applied != nil {
 			closeConnections = s.accountChanged(*applied)
 		}
 	}
@@ -680,8 +680,8 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		}
 		s.uncertainAccounts.Store(target, uncertainMutation{revision: actual + 1, generation: newGeneration, status: newStatus})
 	}
-	// The caller performs local invalidation and connection I/O after releasing
-	// the identity and account guards, before sending success or uncertainty.
+	// Auth invalidates under account protection after SQL completion, then runs
+	// the returned connection-close I/O after releasing the logical guards.
 	closeAll := security || committed > weeklyBytes || commitErr != nil
 	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, DiscardCredit: security || committed > weeklyBytes || commitErr != nil}
 	*uncertain = commitErr != nil

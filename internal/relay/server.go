@@ -41,6 +41,8 @@ const AuthProtocol protocol.ID = "/clipp/relay-auth/1.0.0"
 const hopProtocol protocol.ID = "/libp2p/circuit/relay/0.2.0/hop"
 
 type Authority interface {
+	WithServingUnit(context.Context, func(context.Context)) bool
+	WithAccountGuards(context.Context, []string, func(context.Context)) bool
 	AuthenticateRelay(context.Context, string) (auth.RelayCredential, error)
 }
 type Credit interface {
@@ -207,9 +209,25 @@ func hopStatus(s network.Stream, status pbv2.Status) {
 	}
 }
 
+// NewProtected is the production composition used by the executable and
+// HTTP/libp2p acceptance tests. Required Auth protection is connected before
+// any protected protocol handlers are installed.
+func NewProtected(a *auth.Server, credit *quota.Quota, opts Options) (*Server, error) {
+	if a == nil || credit == nil {
+		return nil, errors.New("relay authority and quota required")
+	}
+	return newServer(a, credit, opts, func(s *Server) error {
+		return a.ConfigureRelayProtection(credit, s)
+	})
+}
+
 // New starts an inbound-only, Noise-authenticated relay with a new in-RAM
-// identity. It returns only after the listener and fixed resource profile exist.
+// identity. Controlled authority adapters must provide all admission operations.
 func New(a Authority, credit Credit, opts Options) (*Server, error) {
+	return newServer(a, credit, opts, nil)
+}
+
+func newServer(a Authority, credit Credit, opts Options, installProtection func(*Server) error) (*Server, error) {
 	if opts.ListenAddress == "" && opts.WebSocketListenAddress == "" && opts.WebRTCListenAddress == "" {
 		return nil, errors.New("relay listener required")
 	}
@@ -258,6 +276,13 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 		return nil, err
 	}
 	s.Host = h
+	if installProtection != nil {
+		if err := installProtection(s); err != nil {
+			_ = h.Close()
+			_ = manager.Close()
+			return nil, err
+		}
+	}
 	h.Network().Notify(&network.NotifyBundle{ConnectedF: s.connected, DisconnectedF: s.disconnected})
 	h.SetStreamHandler(AuthProtocol, s.handleAuth)
 	h.SetStreamHandler(RendezvousV1Protocol, s.handleRendezvous)
@@ -556,14 +581,7 @@ func (s *Server) authenticateObserved(ctx context.Context, c network.Conn, raw s
 	admit := func(unitCtx context.Context) {
 		deadline, renew, code, oldToClose, installed = s.authenticateSerial(unitCtx, c, raw, &reason)
 	}
-	unitOK := true
-	if bounded, ok := s.authority.(interface {
-		WithServingUnit(context.Context, func(context.Context)) bool
-	}); ok {
-		unitOK = bounded.WithServingUnit(ctx, admit)
-	} else {
-		admit(ctx)
-	}
+	unitOK := s.authority.WithServingUnit(ctx, admit)
 	if (!unitOK || code != "") && installed != nil {
 		s.mu.Lock()
 		owned := s.byConn[c] == installed
@@ -646,15 +664,9 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 			s.mu.Unlock()
 		}
 	}
-	if guarded, ok := s.authority.(interface {
-		WithAccountGuards(context.Context, []string, func(context.Context)) bool
-	}); ok {
-		if !guarded.WithAccountGuards(ctx, accounts, admit) {
-			*reason = admissionFailure(ctx)
-			return time.Time{}, 0, "temporarily_unavailable", oldToClose, installed
-		}
-	} else {
-		admit(ctx)
+	if !s.authority.WithAccountGuards(ctx, accounts, admit) {
+		*reason = admissionFailure(ctx)
+		return time.Time{}, 0, "temporarily_unavailable", oldToClose, installed
 	}
 	return deadline, renew, code, oldToClose, installed
 }

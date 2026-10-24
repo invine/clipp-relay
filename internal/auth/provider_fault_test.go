@@ -9,15 +9,13 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"clipp-relay/internal/auth"
 )
 
 func TestProviderOutagePreservesIndependentGrant(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	session := loginAs(t, s, d, "provider-outage-grant", "grant@example.test", "")
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
 		t.Fatal(err)
@@ -55,7 +53,7 @@ func TestCancelledSlowTokenExchangeIsNotRetried(t *testing.T) {
 	var release sync.Once
 	releaseToken := func() { release.Do(func() { close(d.tokenGate) }) }
 	defer releaseToken()
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
 	parts := strings.Split(state, "|")
 	ctx, cancel := context.WithCancel(context.Background())

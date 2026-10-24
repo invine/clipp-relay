@@ -96,7 +96,7 @@ func TestAccountSecurityActionsThroughPortal(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	admin := loginAs(t, s, d, "security-admin", "security@gmail.com", "")
 	adminCSRF := csrfFrom(t, s, admin)
 	subject := "security-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -161,9 +161,9 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	var changes []auth.AccountChange
-	s.SetAccountChanged(func(change auth.AccountChange) func() { changes = append(changes, change); return nil })
+	s.SetAccountChangedForTest(func(change auth.AccountChange) func() { changes = append(changes, change); return nil })
 	admin := loginAs(t, s, d, "quota-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "quota-admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	subject := "quota-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -227,25 +227,14 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
-	credit := quota.New(db.Pool)
+	s := auth.NewWithRuntime(db, c, m, d.endpoints())
+	credit := quota.NewWithRuntime(db)
 	defer credit.Close()
-	dataPlane, err := relay.New(s, credit, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	dataPlane, err := relay.NewProtected(s, credit, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dataPlane.Close()
-	s.SetAccountChanged(func(change auth.AccountChange) func() {
-		if change.DiscardCredit {
-			credit.Invalidate(change.AccountID)
-		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
-			change.CloseAll = true
-		}
-		if change.CloseAll || dataPlane.AccountSessions(change.AccountID) > change.SessionLimit {
-			return dataPlane.DetachAccount(change.AccountID)
-		}
-		return nil
-	})
 	admin := loginAs(t, s, d, "wire-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "wire-admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	subject := "wire-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -366,9 +355,9 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	}
 	write(`{"revision":1,"emails":["admin@gmail.com"]}`)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	var accountChanges []auth.AccountChange
-	s.SetAccountChanged(func(change auth.AccountChange) func() { accountChanges = append(accountChanges, change); return nil })
+	s.SetAccountChangedForTest(func(change auth.AccountChange) func() { accountChanges = append(accountChanges, change); return nil })
 	admin := loginAs(t, s, d, "admin-test", "Admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	workspace := portalRequest(s, "GET", "/admin", admin, nil, "")
@@ -611,7 +600,7 @@ func TestPlanMutationRechecksGoogleAgeAfterActorLockWait(t *testing.T) {
 		t.Fatal(e)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	admin := loginAs(t, s, d, "lock-admin-test", "lock-admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	var actorID string

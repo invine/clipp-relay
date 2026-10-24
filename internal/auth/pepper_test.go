@@ -5,13 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"clipp-relay/internal/auth"
 	"clipp-relay/internal/diagnostic"
 )
 
 func TestPepperRetirementRequiresCredentialCoverage(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.authorization_transactions(id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at) VALUES('868d6764-6d30-4c82-8bb9-93e039dc1101',decode(repeat('ab',32),'hex'),decode(repeat('cd',32),'hex'),decode(repeat('ef',32),'hex'),992,clock_timestamp(),clock_timestamp()+interval '5 minutes')`)
 	if err != nil {
@@ -44,7 +43,7 @@ func TestPepperRetirementRequiresCredentialCoverage(t *testing.T) {
 
 func TestCleanupSignalsReportRetentionBreach(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,plan_id,reason,actor_email) VALUES('66f8011d-64fb-4988-9211-933188310914',clock_timestamp()-interval '182 days','plan_created','6dd09395-51a0-451c-96b3-716e6038e870','routine_administration','operator@example.test')`)
 	if err != nil {
@@ -109,7 +108,7 @@ func TestCleanupSignalsReportRetentionBreach(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	restarted := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	restarted := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	persisted, err := restarted.SampleCleanupSignals(ctx)
 	if err != nil || persisted.BreachEpisodes <= baseline {
 		t.Fatalf("breach episode lost across restart: %+v %v", persisted, err)

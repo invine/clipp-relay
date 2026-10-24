@@ -15,6 +15,7 @@ import (
 func TestOneServingBudgetCoversAccountQuotaAndCleanup(t *testing.T) {
 	c, m, db := fixture(t)
 	account := auth.NewWithRuntime(db, c, m, auth.Google())
+	account.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
 	credit := quota.NewWithRuntime(db)
 	defer credit.Close()
 	id, err := quota.NewOperationID()
@@ -94,6 +95,7 @@ func TestOneServingBudgetCoversAccountQuotaAndCleanup(t *testing.T) {
 func TestAccountGuardWaitObeysParentAndThreeSecondUnitDeadline(t *testing.T) {
 	c, m, db := fixture(t)
 	account := auth.NewWithRuntime(db, c, m, auth.Google())
+	account.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})

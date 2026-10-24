@@ -162,33 +162,13 @@ func run() int {
 			return "none", nil
 		}
 	})
-	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
+	dataPlane, err := relay.NewProtected(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
 	if err != nil {
 		logger.Emit(diagnostic.Event{Event: "service.serving", Outcome: "failed", Reason: "listener_failed"})
 		return 1
 	}
 	defer dataPlane.Close()
 	srv.SetRendezvousMetrics(dataPlane.RendezvousCountV1, dataPlane.RendezvousCountV2)
-	portal.SetAccountChanged(func(change auth.AccountChange) func() {
-		if change.DiscardCredit {
-			credit.Invalidate(change.AccountID)
-		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
-			change.CloseAll = true
-		}
-		if change.CloseAll || dataPlane.AccountSessions(change.AccountID) > change.SessionLimit {
-			return dataPlane.DetachAccount(change.AccountID)
-		}
-		return nil
-	})
-	portal.SetCapacitySampler(func(ctx context.Context, account string) (auth.CapacitySample, error) {
-		sample, err := portal.SampleActiveGrants(ctx, account)
-		if err != nil {
-			return sample, err
-		}
-		count := dataPlane.AccountSessions(account)
-		sample.LiveSessions = &count
-		return sample, nil
-	})
 	decode := func(values []string) []ma.Multiaddr {
 		addresses := make([]ma.Multiaddr, 0, len(values))
 		for _, value := range values {

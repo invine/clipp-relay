@@ -97,7 +97,7 @@ func (j *deletionJournalFixture) ReplaceHead(_ context.Context, old string, head
 func TestDeletionUploadAloneCannotCompleteOrFreeIdentity(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}, failBeforeHeadOnce: true}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -156,7 +156,7 @@ func TestDeletionUploadAloneCannotCompleteOrFreeIdentity(t *testing.T) {
 func TestDeletionRejectsWrongJournalAndStaleGoogleAuth(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "unexpected", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "expected", 0, zero)
@@ -185,7 +185,7 @@ func TestDeletionRejectsWrongJournalAndStaleGoogleAuth(t *testing.T) {
 func TestOwnerDeletionAllAccountStatesAndCapacityGate(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -231,7 +231,7 @@ func TestOwnerDeletionAllAccountStatesAndCapacityGate(t *testing.T) {
 func TestAmbiguousDeletionAdmissionRollbackAllowsFreshLogin(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -260,7 +260,7 @@ func TestAmbiguousDeletionAdmissionRollbackAllowsFreshLogin(t *testing.T) {
 func TestDeletionReleasesDatabaseLockDuringJournalIO(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -303,7 +303,7 @@ func TestDeletionReleasesDatabaseLockDuringJournalIO(t *testing.T) {
 func TestCommittedDeletionRecoversAfterHeadAdvancesAndValidatesCoverage(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -366,7 +366,7 @@ func TestCommittedDeletionRecoversAfterHeadAdvancesAndValidatesCoverage(t *testi
 func TestUncommittedUploadLosesSequenceAndRebasesWithoutBlockingStartup(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}, failBeforeHeadOnce: true}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -415,7 +415,7 @@ func TestUncommittedUploadLosesSequenceAndRebasesWithoutBlockingStartup(t *testi
 func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: "0000000000000000000000000000000000000000000000000000000000000000", Sequence: 0, Hash: "0000000000000000000000000000000000000000000000000000000000000000", Format: 1}, etag: "initial", events: map[string][]byte{}, failHeadOnce: true}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, j.head.CoverageHash)
 	s.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {

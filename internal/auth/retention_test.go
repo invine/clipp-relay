@@ -22,7 +22,7 @@ func retainedDigest(key []byte, subject string) []byte {
 
 func TestMaintenanceKeepsLiveGrantAndRetentionBoundaries(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	id := "5f3d87a7-8f7b-478f-8a4b-8adcfde941d7"
 	grant := "bfca2164-f32b-40a9-bb1f-cd0d51c682a9"
@@ -110,7 +110,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 
 func TestCompletedDeletionPurgesHiddenAccountButKeepsDetachedAudit(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	id := "3184eac8-27c9-4308-9a32-031103e84a4a"
 	op := "458c6c6d-a0d2-4d93-b092-f969e17c8cd0"
@@ -176,7 +176,7 @@ func TestRetainedUsagePreventsPrematurePepperRetirement(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "pepper-missing-registration"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	ctx := context.Background()
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
 VALUES(993,decode(repeat('fa',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,100)`)
@@ -211,7 +211,7 @@ VALUES(993,decode(repeat('fa',32),'hex'),date_trunc('week',clock_timestamp() AT 
 
 func TestCleanupErrorDoesNotStarveLaterRetentionClass(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
 VALUES($1,decode(repeat('da',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7,1)`, s.CurrentPepper)
@@ -263,7 +263,7 @@ VALUES('80975492-9579-4df7-8aa6-1ce9757be7ca',clock_timestamp()-interval '181 da
 	if err := lock.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	restarted := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	restarted := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	restartCtx, stopRestart := context.WithCancel(ctx)
 	restartDone := make(chan struct{})
 	go func() { restarted.Maintain(restartCtx); close(restartDone) }()
@@ -287,7 +287,7 @@ func TestDuplicateLogicalRetainedUsageFailsRegistration(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "duplicate-retained-usage"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	s.Peppers[993] = make([]byte, 32)
 	ctx := context.Background()
 	for _, version := range []uint64{s.CurrentPepper, 993} {
@@ -318,7 +318,7 @@ func TestConcurrentRegistrationImportsRetainedUsageOnce(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "concurrent-retained-usage"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	for attempt := range 2 {
 		t.Run(fmt.Sprintf("attempt-%d", attempt), func(t *testing.T) {
 			concurrentRegistrationImportsRetainedUsageOnce(t, db, d, s)
@@ -384,7 +384,7 @@ VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`
 
 func TestHiddenAccountBatchDoesNotMonopolizeOtherAccounts(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	oldID := "042d4989-6695-4b1f-901b-2e9defb53903"
 	newID := "c9d3edce-e472-4a0d-b8ed-e45e20b753c1"
@@ -432,7 +432,7 @@ VALUES(decode(lpad(to_hex(5001),64,'0'),'hex'),$1,$2,0,decode(repeat('cd',32),'h
 
 func TestHiddenAccountCursorPagesAcrossMoreThanOneBatch(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at)
 SELECT gen_random_uuid(),'https://accounts.google.com','fair-page-'||n,'page@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '91 days'

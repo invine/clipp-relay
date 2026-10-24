@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"clipp-relay/internal/auth"
 )
 
 // Maintenance is observed at the account interface: an abandoned Pending
@@ -15,7 +13,7 @@ func TestAbandonedPendingExpiresWithoutIdentityOrJournal(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "abandoned-pending"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	flow, binding := start(t, s, nil)
 	w := complete(s, flow, binding)
 	if w.Code != 303 {
