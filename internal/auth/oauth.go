@@ -167,7 +167,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	defer tx.Rollback(r.Context())
 	var status string
 	var generation int64
-	if e = tx.QueryRow(r.Context(), `SELECT status,credential_generation FROM public.accounts WHERE id=$1 FOR UPDATE`, account).Scan(&status, &generation); e != nil {
+	if e = tx.QueryRow(r.Context(), `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); e != nil {
 		s.dropConsent(id)
 		s.oauthError(w, 503)
 		return
@@ -308,7 +308,7 @@ func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, account strin
 	defer tx.Rollback(r.Context())
 	var status string
 	var generation int64
-	e = tx.QueryRow(r.Context(), `SELECT status,credential_generation FROM public.accounts WHERE id=$1 FOR UPDATE`, account).Scan(&status, &generation)
+	e = tx.QueryRow(r.Context(), `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation)
 	if e != nil {
 		s.oauthError(w, 503)
 		return
@@ -360,7 +360,7 @@ type tokenResponse struct {
 func (s *Server) lockCredentialAccount(ctx context.Context, tx pgx.Tx, account string) (string, int64, error) {
 	var status, subject string
 	var generation int64
-	if e := tx.QueryRow(ctx, `SELECT status,credential_generation,subject FROM public.accounts WHERE id=$1 FOR UPDATE`, account).Scan(&status, &generation, &subject); e != nil {
+	if e := tx.QueryRow(ctx, `SELECT status,credential_generation,subject FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation, &subject); e != nil {
 		return "", 0, e
 	}
 	if !s.allowAccount(subject) {
@@ -678,7 +678,7 @@ func (s *Server) AuthenticateAccess(ctx context.Context, raw string) (string, ti
 		var account, status string
 		var tokenGeneration, accountGeneration int64
 		var until time.Time
-		e := s.db.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,t.expires_at FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp() AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&account, &status, &tokenGeneration, &accountGeneration, &until)
+		e := s.db.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,t.expires_at FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE NOT a.recovery_review_hold AND t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp() AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&account, &status, &tokenGeneration, &accountGeneration, &until)
 		if e == nil {
 			if status != "Active" || tokenGeneration != accountGeneration {
 				return "", time.Time{}, errInvalidSession

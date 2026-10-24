@@ -339,15 +339,26 @@ func (s *Server) ValidateDeletionJournal(ctx context.Context) error {
 // at the same sequence. Only a hash-linked path ending at the head is proof.
 // OCI pages and the reachable set are bounded; the caller bounds total work.
 func (s *Server) verifyCommittedChain(ctx context.Context, head JournalHead, targetSeq int64, targetHash string) error {
+	_, err := s.committedDeletionAccounts(ctx, head, targetSeq, targetHash, false)
+	return err
+}
+
+type deletionProof struct {
+	account  string
+	parent   *deletionProof
+	included bool
+}
+
+func (s *Server) committedDeletionAccounts(ctx context.Context, head JournalHead, targetSeq int64, targetHash string, collect bool) ([]string, error) {
 	if head.Sequence == head.CoverageFloor {
 		if targetSeq != 0 {
-			return errJournalTargetUncommitted
+			return nil, errJournalTargetUncommitted
 		}
-		return nil
+		return nil, nil
 	}
 	expected := head.CoverageFloor + 1
-	reachable := map[string]bool{head.CoverageHash: false}
-	current := map[string]bool{}
+	reachable := map[string]*deletionProof{head.CoverageHash: {}}
+	current := map[string]*deletionProof{}
 	cursor := ""
 	lastName := ""
 scan:
@@ -356,17 +367,17 @@ scan:
 		names, next, err := s.deletionJournal.ListEvents(bounded, cursor)
 		stop()
 		if err != nil || len(names) > 250 {
-			return errors.New("journal coverage unavailable")
+			return nil, errors.New("journal coverage unavailable")
 		}
 		for _, name := range names {
 			if !strings.HasPrefix(name, "journal/events/") || name <= lastName {
-				return errors.New("journal event name invalid")
+				return nil, errors.New("journal event name invalid")
 			}
 			lastName = name
 			key := strings.TrimPrefix(name, "journal/")
 			var sequence int64
 			if _, err := fmt.Sscanf(strings.TrimPrefix(key, "events/"), "%020d-", &sequence); err != nil {
-				return errors.New("journal event sequence invalid")
+				return nil, errors.New("journal event sequence invalid")
 			}
 			if sequence <= head.CoverageFloor {
 				continue
@@ -376,13 +387,13 @@ scan:
 			}
 			if sequence > expected {
 				if sequence != expected+1 || len(current) == 0 {
-					return errors.New("journal coverage gap or conflict")
+					return nil, errors.New("journal coverage gap or conflict")
 				}
-				reachable, current = current, map[string]bool{}
+				reachable, current = current, map[string]*deletionProof{}
 				expected = sequence
 			}
 			if sequence != expected {
-				return errors.New("journal coverage gap or conflict")
+				return nil, errors.New("journal coverage gap or conflict")
 			}
 			bounded, stop := context.WithTimeout(ctx, 5*time.Second)
 			data, readErr := s.deletionJournal.ReadEvent(bounded, key)
@@ -402,9 +413,14 @@ scan:
 				continue
 			}
 			if included, ok := reachable[event.PreviousHash]; ok {
-				current[event.Hash] = included || sequence == targetSeq && event.Hash == targetHash
+				node := &deletionProof{included: included.included || sequence == targetSeq && event.Hash == targetHash}
+				if collect {
+					node.account = event.AccountID
+					node.parent = included
+				}
+				current[event.Hash] = node
 				if len(current) > 2048 {
-					return errors.New("journal event fanout exceeds bound")
+					return nil, errors.New("journal event fanout exceeds bound")
 				}
 			}
 		}
@@ -412,18 +428,24 @@ scan:
 			break
 		}
 		if next <= cursor {
-			return errors.New("journal cursor did not advance")
+			return nil, errors.New("journal cursor did not advance")
 		}
 		cursor = next
 	}
 	included, ok := current[head.Hash]
 	if !ok || expected != head.Sequence {
-		return errors.New("journal head hash not covered")
+		return nil, errors.New("journal head hash not covered")
 	}
-	if targetSeq != 0 && !included {
-		return errJournalTargetUncommitted
+	if targetSeq != 0 && !included.included {
+		return nil, errJournalTargetUncommitted
 	}
-	return nil
+	accounts := []string{}
+	for node := included; node != nil; node = node.parent {
+		if node.account != "" {
+			accounts = append(accounts, node.account)
+		}
+	}
+	return accounts, nil
 }
 
 func (s *Server) eventFor(ctx context.Context, x pendingDeletion, h JournalHead) (deletionEvent, []byte, error) {

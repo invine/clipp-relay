@@ -110,6 +110,7 @@ type Server struct {
 	commitCredential                   func(context.Context, pgx.Tx) error
 	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
+	commitRecovery                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
 	observedPolicy                     bool
@@ -1040,6 +1041,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var status, email string
+	var recoveryHeld bool
 	var weeklyBytes *int64
 	var sessions *int
 	var verified bool
@@ -1052,6 +1054,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 		profile, err := s.ownerUsageProfile(r, id, version)
 		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
+		recoveryHeld = profile.RecoveryHeld
 		weeklyBytes, sessions, committed, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
 		if err == pgx.ErrNoRows {
 			e = errInvalidSession
@@ -1071,6 +1074,9 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	description := map[string]string{"Pending": "Your account is waiting for approval.", "Active": "Your account is active.", "Suspended": "Your account is temporarily unavailable.", "Denied": "Your account is not approved."}[status]
+	if recoveryHeld {
+		description = "Recovery Review Hold: an administrator must review your status and quota assignments before relay use."
+	}
 	var bytesValue int64
 	var sessionsValue int
 	if weeklyBytes != nil {
@@ -1129,6 +1135,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		Status, Description, Email, CSRF       string
 		DiscoveryURL                           string
 		Active, Admin                          bool
+		RecoveryHeld                           bool
 		WeeklyBytes                            int64
 		Sessions                               int
 		Committed, Percent                     int64
@@ -1136,7 +1143,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		History                                []quotaHistory
 		LiveSessions, ActiveGrants, GrantLimit int
 		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{s.recordedUsagePresentation, e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
+	}{s.recordedUsagePresentation, e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active" && !recoveryHeld, admin, recoveryHeld, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {

@@ -90,6 +90,7 @@
 </span> <span class="muted fine-print">Revision {{.Revision}}
 </span>
 </p>
+{{if .RecoveryHeld}}<p>Recovery Review Hold: relay use is blocked until explicit administrator review of status and quota assignments.</p>{{end}}
 {{with .Usage}}<p>Recorded Relay Usage: {{bytes .Recorded}} · Remaining allowance: {{bytes .Remaining}}</p>
 <p class="muted fine-print">Periodic confirmation lag means recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for one account; control traffic may count. History retains the current week + twelve preceding weeks as absolute totals.</p>
 <details><summary>Recorded Relay Usage history</summary><table><thead><tr><th>Week starting UTC</th><th>Confirmed usage</th></tr></thead><tbody>{{range .History}}<tr><td>{{.Week}}</td><td>{{bytes .Committed}}</td></tr>{{end}}</tbody></table></details>{{end}}
@@ -101,6 +102,7 @@
 <option value="suspend">Suspend</option>
 <option value="reactivate">Reactivate</option>
 <option value="deny">Deny</option>
+{{if .RecoveryHeld}}<option value="recovery-review">Complete recovery review of status and quotas</option>{{end}}
 <option value="review">Return to pending review</option>
 <option value="revoke">Revoke credentials</option>
 <option value="assign">Assign replacement plan</option>

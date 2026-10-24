@@ -103,7 +103,7 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (A
 	var status string
 	var actual int64
 	var now time.Time
-	err := q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &status, &actual, &result.CapBytes)
+	err := q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND NOT a.recovery_review_hold AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &status, &actual, &result.CapBytes)
 	if err != nil || status != "Active" || actual != generation {
 		return result, ErrTemporary
 	}
@@ -205,6 +205,60 @@ func (q *Quota) AccountingCurrent(id string, revision uint64) bool {
 // failed batch remains queued for the same retry, independent of session life.
 func (q *Quota) FlushAccounting(ctx context.Context, id string) error {
 	return q.flushAccounting(ctx, id, false)
+}
+
+// FlushAllAccounting reconciles every outstanding original-week batch, including
+// disconnected or revoked accounts. The caller supplies the entire remaining
+// shutdown budget. Four workers bound work even if a faulty driver ignores it.
+func (q *Quota) FlushAllAccounting(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		jobs := make(chan string)
+		var workers sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for id := range jobs {
+					_ = q.FlushAccounting(ctx, id)
+				}
+			}()
+		}
+		defer workers.Wait()
+		defer close(jobs)
+		for {
+			q.periodic.mu.Lock()
+			ids := make([]string, 0)
+			for id, a := range q.periodic.accounts {
+				if !a.retiring && (a.busy || hasObserved(a)) {
+					ids = append(ids, id)
+				}
+			}
+			q.periodic.mu.Unlock()
+			if len(ids) == 0 {
+				return
+			}
+			for _, id := range ids {
+				select {
+				case jobs <- id:
+				case <-ctx.Done():
+					return
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // FlushDeletionAccounting stops competing scheduled flushes before its bounded

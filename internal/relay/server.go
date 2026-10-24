@@ -607,7 +607,13 @@ func (s *Server) Drain(ctx context.Context) error {
 		pending := s.hopHandlers
 		s.mu.Unlock()
 		if pending == 0 && s.tracer.active.Load() == 0 {
-			return s.Close()
+			err := s.Close()
+			if s.accounting != nil && ctx.Err() == nil {
+				if flushErr := s.accounting.FlushAllAccounting(ctx); err == nil {
+					err = flushErr
+				}
+			}
+			return err
 		}
 		select {
 		case <-ctx.Done():

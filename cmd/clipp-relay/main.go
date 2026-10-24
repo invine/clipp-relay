@@ -35,10 +35,13 @@ func run() int {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: reason})
 		return 1
 	}
-	command := flag.String("command", "", "migrate or serve")
+	command := flag.String("command", "", "migrate, recover or serve")
 	path := flag.String("config", "", "absolute path to versioned non-secret configuration (accounting_failure_deadline defaults to 3s, minimum 1s; restart to change)")
+	recoveryRun := flag.String("recovery-run", "", "stable UUID identifying one offline recovery")
+	recoverySource := flag.String("recovery-source", "", "immutable source backup identity")
+	recoveryTarget := flag.String("recovery-target", "", "explicit isolated restored database name")
 	flag.Parse()
-	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "serve") {
+	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "recover" && *command != "serve") {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: "configuration_rejected"})
 		return 2
 	}
@@ -46,9 +49,9 @@ func run() int {
 	if err != nil {
 		return fail("configuration_rejected")
 	}
-	maintenance := *command == "migrate"
+	maintenance := *command != "serve"
 	var material config.Material
-	if maintenance {
+	if *command == "migrate" {
 		material, err = c.ReadDatabaseMaterial()
 	} else {
 		material, err = c.ReadMaterial()
@@ -76,14 +79,33 @@ func run() int {
 	}
 	startup, cancel := context.WithTimeout(ctx, startupLimit)
 	defer cancel()
-	if maintenance {
+	if *command == "migrate" {
 		if err = database.Migrate(startup, pool); err != nil {
 			return fail("database_unavailable")
 		}
 		return 0
 	}
-	if err = database.VerifyServing(startup, pool); err != nil {
-		return fail("database_unavailable")
+	if *command == "serve" {
+		if err = database.VerifyServing(startup, pool); err != nil {
+			return fail("database_unavailable")
+		}
+	}
+	if *command == "recover" {
+		portal := auth.New(pool, c, material, auth.Google())
+		journal, journalErr := auth.NewOCIJournal(auth.OCIJournalOptions{
+			Endpoint:  "https://objectstorage." + c.Journal.Region + ".oraclecloud.com",
+			Namespace: c.Journal.Namespace, Bucket: c.Journal.Bucket,
+			TenancyOCID: c.Journal.TenancyOCID, UserOCID: c.Journal.UserOCID, Fingerprint: c.Journal.Fingerprint,
+			PrivateKeyPEM: material.JournalSigningKey,
+		})
+		if journalErr != nil {
+			return fail("configuration_rejected")
+		}
+		portal.SetDeletionJournal(journal, c.Journal.RepositoryID, c.Journal.CoverageFloor, c.Journal.CoverageHash)
+		if err = portal.RecoverOffline(startup, auth.RecoveryRequest{RunID: *recoveryRun, Source: *recoverySource, Target: *recoveryTarget}); err != nil {
+			return fail("recovery_unconfirmed")
+		}
+		return 0
 	}
 	debug.SetMemoryLimit(1536 << 20)
 	var rlimit unix.Rlimit

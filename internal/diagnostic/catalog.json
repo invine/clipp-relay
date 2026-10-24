@@ -23,6 +23,10 @@
         [
           "failed",
           "resource_limit"
+        ],
+        [
+          "failed",
+          "recovery_unconfirmed"
         ]
       ],
       "transports": [

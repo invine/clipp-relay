@@ -422,3 +422,82 @@ func TestPeriodicPolicyCapUsesUncertainBatchExactlyOnce(t *testing.T) {
 		t.Fatal("reconciliation lost pending successor")
 	}
 }
+
+func TestFinalFlushSettlesRevokedAccountAndWaitsForActiveBatch(t *testing.T) {
+	q, id, pool := fixture(t)
+	q.SetSettlementProtection(settlementTestProtection{})
+	ctx := context.Background()
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatal(err)
+	}
+	q.Observe(id, 80)
+	entered, release := make(chan struct{}), make(chan struct{})
+	q.SetSettlementHooksForTest(nil, func(context.Context) error { close(entered); <-release; return ErrSettlementUncertain })
+	done := make(chan error, 1)
+	go func() { done <- q.FlushAccounting(ctx, id) }()
+	<-entered
+	q.Observe(id, 60)
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	final := make(chan error, 1)
+	bounded, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	go func() { final <- q.FlushAllAccounting(bounded) }()
+	q.SetSettlementHooksForTest(nil, nil)
+	close(release)
+	<-done
+	q.SetSettlementHooksForTest(nil, nil)
+	if err := <-final; err != nil {
+		t.Fatal(err)
+	}
+	got, err := q.RecordedUsage(ctx, id, weekStart(time.Now()))
+	if err != nil || got.RecordedBytes != 140 {
+		t.Fatalf("final=%+v %v", got, err)
+	}
+}
+
+func TestQuotaCloseIsBoundedWithUnresponsiveAccounting(t *testing.T) {
+	_, id, pool := fixture(t)
+	q := New(pool)
+	q.SetSettlementProtection(settlementTestProtection{})
+	ctx := context.Background()
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		q.Close()
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	q.SetSettlementHooksForTest(nil, func(context.Context) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return ErrSettlementUncertain
+	})
+	if err := q.StartAccounting(func(ClosureOutcome) {}); err != nil {
+		q.Close()
+		t.Fatal(err)
+	}
+	if err := q.Observe(id, 123); err != nil {
+		q.Close()
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		q.Close()
+		t.Fatal("periodic write did not reach boundary")
+	}
+	started := time.Now()
+	q.Close()
+	if time.Since(started) > 300*time.Millisecond {
+		close(release)
+		t.Fatal("unresponsive accounting blocked close")
+	}
+	close(release)
+	select {
+	case <-q.periodic.done:
+	case <-time.After(time.Second):
+		t.Fatal("released worker did not exit")
+	}
+}
