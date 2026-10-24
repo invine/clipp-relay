@@ -206,3 +206,31 @@ Other checks: `gofmt -l cmd internal`, `go vet ./...`, `go test ./...`.
 
 For local Linux ARM64/AMD64 image builds and the manual GHCR publication workflow,
 see [Relay image build](docs/image-build.md).
+
+### Recorded usage query and weekly retention
+
+The staged observed-accounting composition displays **Recorded Relay Usage**:
+confirmed durable traffic observations, with periodic confirmation lag. Recent
+pending traffic does not appear as confirmed. HOP and STOP endpoint observations
+count independently (including twice for one account), and control bytes may
+count; this is a conservative traffic measure, not exact application payload.
+Owner and administrator usage views each snapshot account policy and usage in
+one database statement. Separate live capacity samples are not frozen with that
+snapshot and presentation reads grant no Relay Authentication authority.
+
+Weekly Quota Windows begin Monday at 00:00 UTC. A session keeps its fixed
+credential expiry across Monday; new HOP/STOP use waits for authoritative
+eligibility in the new week, without a new sign-in. The fixed accounting workers
+refresh continuing accounts on the one-second target cadence. Existing admitted
+stock circuits retain the accounting failure deadline while a new-week read is
+unavailable: this is a soft allowance, with no hard boundary byte guarantee.
+Observations retain their processing week through lock waits and lost replies.
+
+History retains the current week and twelve preceding weeks as absolute totals,
+not percentages of today's allowance. Remaining allowance is clamped to zero
+after overrun. Weekly totals and their latest retry receipts expire together;
+bounded cleanup also removes hidden account children fairly. Local unresolved
+work stays attached to its original week until settlement or authoritative
+retirement. Ordinary disconnects and revocation do not discard pending usage;
+expired weeks cannot be recreated or charged to a newer week by a stale retry.
+The executable remains on prepaid accounting until the final cutover ticket.

@@ -467,3 +467,40 @@ FROM public.accounts WHERE subject LIKE 'fair-page-%'`, s.CurrentPepper)
 		t.Fatalf("cursor did not visit all 257 eligible accounts: %d remain", remaining)
 	}
 }
+
+func TestMaintenanceRetainsThirteenRecordedWindowsAndRemovesHiddenChildren(t *testing.T) {
+	c, m, db := fixture(t)
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
+	ctx := context.Background()
+	id := "c573732c-18d0-4ca3-835f-a2bd2cd07b54"
+	hidden := "c573732c-18d0-4ca3-835f-a2bd2cd07b55"
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at,status,plan_id) VALUES($1,'https://accounts.google.com','recorded-retention','recorded@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp(),'Active','6dd09395-51a0-451c-96b3-716e6038e870'),($2,'https://accounts.google.com','recorded-hidden','hidden@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '91 days','Pending',NULL)`, id, hidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id IN ($1,$2)`, id, hidden)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id IN ($1,$2)`, id, hidden)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) SELECT $1::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*n,10,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f'::uuid,10 FROM generate_series(0,13) n UNION ALL SELECT $2::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,20,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f',20`, id, hidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintain, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.Maintain(maintain); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var retained, hiddenCount int
+		err = db.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1),(SELECT count(*) FROM public.accounts WHERE id=$2)`, id, hidden).Scan(&retained, &hiddenCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if retained == 13 && hiddenCount == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recorded retention: windows=%d hidden=%d", retained, hiddenCount)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

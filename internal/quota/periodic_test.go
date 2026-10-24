@@ -169,6 +169,8 @@ func TestPeriodicPriorWeekPendingCannotBeHiddenByNewWeekRead(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	q.periodic.monotonicNow = func() time.Time { return now }
+	closed := make(chan ClosureOutcome, 1)
+	q.periodic.close = func(out ClosureOutcome) { closed <- out }
 	if _, err := q.Eligibility(ctx, id, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -179,9 +181,21 @@ func TestPeriodicPriorWeekPendingCannotBeHiddenByNewWeekRead(t *testing.T) {
 	// Move both authoritative and processing clocks, while monotonic elapsed
 	// reaches the cutoff. The prior week's original pending state must survive.
 	q.adjustTime = func(t time.Time) time.Time { return t.AddDate(0, 0, 7) }
+	q.clock.mu.Lock()
+	q.clock.sampled = q.clock.sampled.AddDate(0, 0, 7)
+	q.clock.mu.Unlock()
 	now = now.Add(DefaultAccountingFailureDeadline)
 	if _, err := q.Eligibility(ctx, id, 0); err != ErrTemporary {
 		t.Fatalf("new week masked old pending=%v", err)
+	}
+	q.CheckAccountingHealth()
+	select {
+	case out := <-closed:
+		if out.Reason != "accounting_unavailable" {
+			t.Fatal(out)
+		}
+	default:
+		t.Fatal("new week failure did not close at monotonic deadline")
 	}
 	if err := q.FlushAccounting(ctx, id); err != nil {
 		t.Fatal(err)
@@ -193,6 +207,80 @@ func TestPeriodicPriorWeekPendingCannotBeHiddenByNewWeekRead(t *testing.T) {
 	current, err := q.RecordedUsage(ctx, id, prior.AddDate(0, 0, 7))
 	if err != nil || current.RecordedBytes != 0 {
 		t.Fatalf("new week=%+v %v", current, err)
+	}
+}
+
+func TestPeriodicRetiredPendingCannotBlockCurrentWeek(t *testing.T) {
+	q, id, _ := fixture(t)
+	q.SetSettlementProtection(settlementTestProtection{})
+	ctx := context.Background()
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Observe(id, 71); err != nil {
+		t.Fatal(err)
+	}
+	q.afterCommit = func() error { return ErrSettlementUncertain }
+	if err := q.FlushAccounting(ctx, id); err != ErrSettlementUncertain {
+		t.Fatal(err)
+	}
+	q.afterCommit = nil
+	q.adjustTime = func(now time.Time) time.Time { return now.AddDate(0, 0, 91) }
+	q.clock.mu.Lock()
+	q.clock.sampled = q.clock.sampled.AddDate(0, 0, 91)
+	q.clock.mu.Unlock()
+	if err := q.FlushAccounting(ctx, id); err != nil {
+		t.Fatalf("retired work prevented bounded cleanup: %v", err)
+	}
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatalf("retired work hid current allowance: %v", err)
+	}
+	if err := q.Observe(id, 19); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.FlushAccounting(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := q.RecordedUsage(ctx, id, weekStart(q.now()))
+	if err != nil || usage.RecordedBytes != 19 {
+		t.Fatalf("retired bytes crossed weeks: %+v %v", usage, err)
+	}
+}
+
+func TestPeriodicMondayRequiresFreshEligibilityWithoutNewGeneration(t *testing.T) {
+	q, id, pool := fixture(t)
+	q.SetSettlementProtection(settlementTestProtection{})
+	ctx := context.Background()
+	monday := weekStart(time.Now()).AddDate(0, 0, 7)
+	shift := monday.Add(-time.Second).Sub(time.Now())
+	q.adjustTime = func(now time.Time) time.Time { return now.Add(shift) }
+	q.clock.mu.Lock()
+	q.clock.sampled = q.clock.sampled.Add(shift)
+	q.clock.mu.Unlock()
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !q.AccountingReady(id) {
+		t.Fatal("old week eligibility unavailable")
+	}
+	shift += 2 * time.Second
+	q.clock.mu.Lock()
+	q.clock.sampled = q.clock.sampled.Add(2 * time.Second)
+	q.clock.mu.Unlock()
+	if q.AccountingReady(id) {
+		t.Fatal("old week eligibility authorized new week")
+	}
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !q.AccountingReady(id) {
+		t.Fatal("fresh new week read required reauthentication")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=0 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Eligibility(ctx, id, 0); err != ErrExhausted {
+		t.Fatalf("new week policy not authoritative: %v", err)
 	}
 }
 
@@ -279,8 +367,8 @@ func TestPeriodicPolicyInvalidationFencesLateSettlement(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if q.AccountingCurrent(id, initial.Revision) {
-		t.Fatal("late settlement restored revoked assessment")
+	if q.AccountingCurrent(id, initial.Revision) || q.AccountingReady(id) {
+		t.Fatal("late settlement restored revoked assessment or ongoing relay use")
 	}
 	if _, err := q.Eligibility(ctx, id, 0); err != ErrTemporary {
 		t.Fatalf("old generation recovered: %v", err)

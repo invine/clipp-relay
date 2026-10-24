@@ -69,6 +69,7 @@ func Google() Provider {
 }
 
 type Server struct {
+	recordedUsagePresentation          bool
 	diagnostics                        *diagnostic.Logger
 	transitions                        *diagnostic.Transitions
 	Pool                               *pgxpool.Pool
@@ -1044,18 +1045,9 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		if s.beforeProfileRead != nil {
 			s.beforeProfileRead()
 		}
-		err := s.db.QueryRow(r.Context(), `WITH current_week AS MATERIALIZED (SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date AS monday)
-SELECT a.status,a.email,a.email_verified,a.hosted_domain,COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions),
-COALESCE((SELECT u.committed_bytes FROM public.weekly_quota_usage u WHERE u.account_id=a.id AND u.week_start=(SELECT monday FROM current_week)),0),
-(SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'committed',COALESCE(u.committed_bytes,0)) ORDER BY w.week_start DESC)
- FROM (SELECT ((SELECT monday FROM current_week)-7*n)::date AS week_start FROM generate_series(0,12) n) w
- LEFT JOIN public.weekly_quota_usage u ON u.account_id=a.id AND u.week_start=w.week_start)
-FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id
-LEFT JOIN public.quota_plans p ON p.id=a.plan_id
-WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
-AND ps.credential_generation=a.credential_generation
-AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()
-AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, id, s.sessionDigest(r, version), version).Scan(&status, &email, &verified, &hd, &weeklyBytes, &sessions, &committed, &historyJSON)
+		profile, err := s.ownerUsageProfile(r, id, version)
+		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
+		weeklyBytes, sessions, committed, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
 		if err == pgx.ErrNoRows {
 			e = errInvalidSession
 		} else if err != nil {
@@ -1119,8 +1111,15 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 		percent = int64(float64(committed) * 100 / float64(bytesValue))
 		usageState = "Remaining allowance: " + portal.FormatBytes(bytesValue-committed) + "."
 	}
+	if s.recordedUsagePresentation {
+		usageState = "Remaining allowance: " + portal.FormatBytes(max(0, bytesValue-committed)) + "."
+		if committed > bytesValue {
+			usageState += " Recorded Relay Usage exceeds the current allowance."
+		}
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	portal.Render(w, http.StatusOK, "account", struct {
+		Recorded                               bool
 		SignedIn                               bool
 		Status, Description, Email, CSRF       string
 		DiscoveryURL                           string
@@ -1132,7 +1131,7 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 		History                                []quotaHistory
 		LiveSessions, ActiveGrants, GrantLimit int
 		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
+	}{s.recordedUsagePresentation, e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
