@@ -283,3 +283,142 @@ func TestPeriodicMondayRequiresFreshEligibilityWithoutNewGeneration(t *testing.T
 		t.Fatalf("new week policy not authoritative: %v", err)
 	}
 }
+
+func TestPeriodicConfiguredDeadlineAndIdleRefresh(t *testing.T) {
+	q, id, _ := fixture(t)
+	q.SetSettlementProtection(settlementTestProtection{})
+	ctx := context.Background()
+	now := time.Now()
+	q.periodic.monotonicNow = func() time.Time { return now }
+	for _, invalid := range []time.Duration{0, -time.Second, time.Second - time.Nanosecond} {
+		if q.ConfigureAccountingFailureDeadline(invalid) == nil {
+			t.Fatalf("accepted deadline %v", invalid)
+		}
+	}
+	if err := q.ConfigureAccountingFailureDeadline(5 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := q.Eligibility(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(4 * time.Second)
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatalf("idle refresh: %v", err)
+	}
+	usage, err := q.RecordedUsage(ctx, id, initial.WeekStart)
+	if err != nil || usage.Sequence != 0 || usage.RecordedBytes != 0 {
+		t.Fatalf("idle read debited usage: %+v %v", usage, err)
+	}
+	if err := q.Observe(id, 41); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(4 * time.Second)
+	q.CheckAccountingHealth()
+	if !q.AccountingCurrent(id, initial.Revision) {
+		t.Fatal("configured deadline ignored")
+	}
+	now = now.Add(time.Second)
+	if _, err := q.Eligibility(ctx, id, 0); err != ErrTemporary {
+		t.Fatalf("read masked pending write at deadline: %v", err)
+	}
+	q.CheckAccountingHealth()
+	if q.AccountingCurrent(id, initial.Revision) {
+		t.Fatal("deadline retained admission authority")
+	}
+	if err := q.FlushAccounting(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := q.Eligibility(ctx, id, 0)
+	if err != nil || recovered.RecordedBytes != 41 {
+		t.Fatalf("recovery: %+v %v", recovered, err)
+	}
+	if err := q.StartAccounting(func(ClosureOutcome) {}); err != nil {
+		t.Fatal(err)
+	}
+	if q.ConfigureAccountingFailureDeadline(time.Second) == nil {
+		t.Fatal("changed restart-scoped policy after serving")
+	}
+}
+
+func TestPeriodicPolicyInvalidationFencesLateSettlement(t *testing.T) {
+	q, id, pool := fixture(t)
+	q.SetSettlementProtection(settlementTestProtection{})
+	ctx := context.Background()
+	initial, err := q.Eligibility(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Observe(id, 71); err != nil {
+		t.Fatal(err)
+	}
+	committed, release := make(chan struct{}), make(chan struct{})
+	releaseAck := sync.OnceFunc(func() { close(release) })
+	defer releaseAck()
+	q.afterCommit = func() error { close(committed); <-release; return nil }
+	done := make(chan error, 1)
+	go func() { done <- q.FlushAccounting(ctx, id) }()
+	<-committed
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET credential_generation=1 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	q.ApplyAccountingPolicy(id, 1000, true)
+	releaseAck()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if q.AccountingCurrent(id, initial.Revision) || q.AccountingReady(id) {
+		t.Fatal("late settlement restored revoked assessment or ongoing relay use")
+	}
+	if _, err := q.Eligibility(ctx, id, 0); err != ErrTemporary {
+		t.Fatalf("old generation recovered: %v", err)
+	}
+	recovered, err := q.Eligibility(ctx, id, 1)
+	if err != nil || recovered.EffectiveBytes != 71 {
+		t.Fatalf("new generation lost pending usage: %+v %v", recovered, err)
+	}
+}
+
+func TestPeriodicPolicyCapUsesUncertainBatchExactlyOnce(t *testing.T) {
+	q, id, _ := fixture(t)
+	q.SetSettlementProtection(settlementTestProtection{})
+	ctx := context.Background()
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Observe(id, 80); err != nil {
+		t.Fatal(err)
+	}
+	committed, release := make(chan struct{}), make(chan struct{})
+	releaseAck := sync.OnceFunc(func() { close(release) })
+	defer releaseAck()
+	q.afterCommit = func() error { close(committed); <-release; return ErrSettlementUncertain }
+	done := make(chan error, 1)
+	go func() { done <- q.FlushAccounting(ctx, id) }()
+	<-committed
+	if err := q.Observe(id, 60); err != nil {
+		t.Fatal(err)
+	}
+	// The authoritative read already includes the 80-byte flight. The pending
+	// 60-byte successor must remain counted without adding the flight twice.
+	if _, err := q.Eligibility(ctx, id, 0); err != nil {
+		t.Fatal(err)
+	}
+	if q.ApplyAccountingPolicy(id, 141, false) {
+		t.Fatal("uncertain committed batch counted twice")
+	}
+	if !q.ApplyAccountingPolicy(id, 140, false) {
+		t.Fatal("equality did not exhaust recorded plus pending usage")
+	}
+	releaseAck()
+	if err := <-done; err != ErrSettlementUncertain {
+		t.Fatalf("ack=%v", err)
+	}
+	q.afterCommit = nil
+	if err := q.FlushAccounting(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if !q.ApplyAccountingPolicy(id, 140, false) {
+		t.Fatal("reconciliation lost pending successor")
+	}
+}

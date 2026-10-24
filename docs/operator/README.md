@@ -30,3 +30,11 @@ wizard or a direct clip transfer does not establish forced relay-only transfer.
 
 For application startup, readiness and drain diagnostics, see the
 [service lifecycle row examples](service-logging.md).
+
+Review `accounting.failureDeadline` in the private chart values before rendering
+or resuming the wizard. It maps to runtime `accounting_failure_deadline`, defaults
+to `"3s"`, accepts whole seconds of at least `"1s"`, and requires relay restart.
+The wizard copies that default from the bundled example and preserves edits to
+existing private values. It does not add an environment or flag policy override.
+The cutoff is independent of blocked persistence: unresolved writes close all
+affected sessions at the deadline and temporarily deny admission until recovery.

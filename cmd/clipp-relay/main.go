@@ -36,7 +36,7 @@ func run() int {
 		return 1
 	}
 	command := flag.String("command", "", "migrate or serve")
-	path := flag.String("config", "", "absolute path to versioned non-secret configuration")
+	path := flag.String("config", "", "absolute path to versioned non-secret configuration (accounting_failure_deadline defaults to 3s, minimum 1s; restart to change)")
 	flag.Parse()
 	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "serve") {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: "configuration_rejected"})
@@ -132,6 +132,10 @@ func run() int {
 	}
 	credit := quota.NewWithRuntime(db)
 	credit.SetDiagnostics(logger)
+	if err := credit.ConfigureAccountingFailureDeadline(c.AccountingDeadline()); err != nil {
+		credit.Close()
+		return fail("configuration_rejected")
+	}
 	defer credit.Close()
 	observations := diagnostic.NewObservations(logger.Emit, func(ctx context.Context) (string, error) {
 		sample, err := portal.SampleCleanupSignals(ctx)

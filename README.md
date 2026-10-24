@@ -62,6 +62,17 @@ The single non-secret JSON configuration is versioned. No environment or flag
 overrides affect policy. Unknown and duplicate fields are rejected. Serving
 requires at least one of `relay_tcp.listen`, `relay_websocket.listen`, or
 `relay_webrtc_direct.listen`; migration does not start a relay listener.
+`accounting_failure_deadline` is an optional Go duration string, defaults to
+`"3s"`, and must be at least the one-second accounting cadence. Explicit null,
+empty, zero, negative, nonfinite and overflowing values are rejected. It takes
+effect on restart. With unsettled observations, successful balance reads do not
+hide failed writes; the monotonic deadline closes all affected account sessions
+and denies admission until accounting recovers. Idle accounts refresh through
+authoritative reads without empty debits. This is a soft allowance, without a
+fixed byte-overrun bound. Policy cap edits retain recorded and pending usage;
+equality is exhausted. Suspension, account-wide revocation and session-cap
+reductions below the live count apply immediately through protected mutation.
+
 Every enabled transport needs a complete public address source for discovery
 and readiness. WSS addresses are configured. TCP and WebRTC Direct use either
 explicit `public_addresses` overrides or a named Kubernetes Service in
@@ -80,6 +91,7 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
 ```json
 {
   "version": 1,
+  "accounting_failure_deadline": "3s",
   "portal_origin": "https://portal.example.com",
   "wss_hostname": "wss.example.com",
   "public_clients": {

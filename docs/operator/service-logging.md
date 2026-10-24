@@ -202,3 +202,14 @@ Focused checks: `go test -count=1 ./internal/diagnostic ./internal/database ./in
 Structured stdout rows are best-effort operational diagnostics. They contain neither a complete history nor durable proof of an account, grant, quota or deletion mutation. Restricted transactional audit and the existing authoritative SQL or journal records retain those roles. The private `/metrics` endpoint remains a separate existing interface; these logging changes add no metric family, histogram, scrape snapshot, collector or alert route. The loss-summary counts are only logger bookkeeping and cannot be used as exact traffic totals.
 
 Local HTTP, libp2p and disposable PostgreSQL fixtures can prove the documented server boundaries and safety properties at a recorded source revision. They cannot establish browser or device receipt, Direct Connection result, Clip delivery, identity-linked client recovery, deployed network behavior or production capacity. Backup and restore, certificate convergence, repository retention and database infrastructure observations without connected producers remain `unavailable`; a test fixture does not turn them into production measurements. Image publication, deployment, native and live qualification, and the accepted full observability release gates remain separate work.
+
+Periodic observed accounting distinguishes `quota_exhausted` (confirmed recorded
+plus pending consumption leaves no positive allowance) from
+`accounting_unavailable` (the configured monotonic accounting failure deadline
+expired, or local observation cannot be preserved). Both end all affected
+account sessions; temporary accounting failure is not evidence of exhaustion.
+Successful balance reads cannot refresh write health while any week remains
+pending or unresolved. Idle authoritative reads can refresh health without a
+zero-byte settlement. `accounting_failure_deadline` defaults to `"3s"`, requires
+at least `"1s"`, and takes effect on restart. Existing clock diagnostics retain
+their conservative independent policy; a clock sample is not accounting progress.

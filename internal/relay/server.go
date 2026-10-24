@@ -237,7 +237,7 @@ func NewObservedProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server
 		return nil, errors.New("relay authority and quota required")
 	}
 	return newServer(a, q, opts, func(s *Server) error {
-		if err := a.ConfigureRelayProtection(q, s); err != nil {
+		if err := a.ConfigureObservedRelayProtection(q, s); err != nil {
 			return err
 		}
 		a.EnableRecordedUsagePresentation()

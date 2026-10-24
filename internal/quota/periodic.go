@@ -36,6 +36,7 @@ type observedAccount struct {
 	healthy      time.Time
 	revision     uint64
 	blocked      bool
+	invalidated  bool
 	reason       string
 	busy         bool
 }
@@ -116,6 +117,7 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (A
 		return result, ErrTemporary
 	}
 	a.generation = generation
+	a.invalidated = false
 	for week, v := range a.weeks {
 		if week != result.WeekStart && v.pending == 0 && v.flight == nil {
 			delete(a.weeks, week)
@@ -171,7 +173,7 @@ func (q *Quota) AccountingReady(id string) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[id]
-	return a != nil && !a.blocked && a.eligibleWeek.Equal(weekStart(q.now())) && q.accountingNow().Sub(a.healthy) < q.accountingDeadlineLocked()
+	return a != nil && !a.blocked && !a.invalidated && a.eligibleWeek.Equal(weekStart(q.now())) && q.accountingNow().Sub(a.healthy) < q.accountingDeadlineLocked()
 }
 func hasObserved(a *observedAccount) bool {
 	for _, w := range a.weeks {
@@ -194,7 +196,7 @@ func (q *Quota) AccountingCurrent(id string, revision uint64) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[id]
-	return a != nil && !a.blocked && a.revision == revision
+	return a != nil && !a.blocked && !a.invalidated && a.revision == revision
 }
 
 // FlushAccounting attempts each original observation week once. An immutable
@@ -442,3 +444,50 @@ func (q *Quota) AccountingSessions(id string, count int) {
 // AccountingFailed fences reporter counter failures through the same immediate
 // closure path as background health failure, without connection I/O.
 func (q *Quota) AccountingFailed(id string) { q.cutoff(id, "accounting_unavailable") }
+
+// ConfigureAccountingFailureDeadline installs restart-scoped policy before workers
+// start. Invalid durations never disable the independent cutoff.
+func (q *Quota) ConfigureAccountingFailureDeadline(deadline time.Duration) error {
+	q.periodic.mu.Lock()
+	defer q.periodic.mu.Unlock()
+	if deadline < AccountingCadence || q.periodic.started {
+		return errors.New("accounting failure deadline must be at least 1s and configured before serving")
+	}
+	q.periodic.deadline = deadline
+	return nil
+}
+
+// ApplyAccountingPolicy runs under Auth account protection after a policy
+// mutation. It fences prior assessments and preserves every observed byte.
+// The caller owns synchronous physical detachment and deferred connection I/O.
+func (q *Quota) ApplyAccountingPolicy(id string, cap int64, invalidate bool) bool {
+	q.periodic.mu.Lock()
+	defer q.periodic.mu.Unlock()
+	a := q.periodic.accounts[id]
+	if a == nil {
+		return cap <= 0
+	}
+	a.revision++
+	a.invalidated = a.invalidated || invalidate
+	exhausted := cap <= 0
+	if w := a.weeks[weekStart(q.now())]; w != nil {
+		effective := w.recorded.RecordedBytes
+		extra := w.pending
+		if w.flight != nil && !(w.recorded.OperationID == w.flight.OperationID && w.recorded.Sequence == w.flight.Sequence) {
+			if w.flight.DeltaBytes > math.MaxInt64-extra {
+				exhausted = true
+			} else {
+				extra += w.flight.DeltaBytes
+			}
+		}
+		exhausted = exhausted || extra > math.MaxInt64-effective || effective+extra >= cap
+	}
+	if exhausted {
+		a.blocked = true
+		a.reason = "quota_exhausted"
+	} else if a.reason == "quota_exhausted" {
+		a.blocked = false
+		a.reason = ""
+	}
+	return exhausted
+}

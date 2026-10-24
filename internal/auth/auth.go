@@ -112,6 +112,7 @@ type Server struct {
 	commitDeletion                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
+	observedPolicy                     bool
 	deletionJournal                    DeletionJournal
 	deletionRepository                 string
 	deletionFloor                      int64
@@ -237,6 +238,37 @@ func (s *Server) ConfigureRelayProtection(credit QuotaProtection, sessions Relay
 			change.CloseAll = true
 		}
 		if change.CloseAll || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
+			return sessions.DetachAccount(change.AccountID)
+		}
+		return nil
+	}
+	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
+		sample, err := s.SampleActiveGrants(ctx, account)
+		if err != nil {
+			return sample, err
+		}
+		count := sessions.AccountSessions(account)
+		sample.LiveSessions = &count
+		return sample, nil
+	})
+	return nil
+}
+
+// ObservedQuotaProtection applies current policy without discarding observations.
+type ObservedQuotaProtection interface {
+	ApplyAccountingPolicy(string, int64, bool) bool
+}
+
+// ConfigureObservedRelayProtection installs the staged complete observed policy
+// operation. Policy collaboration is independent of presentation queries.
+func (s *Server) ConfigureObservedRelayProtection(accounting ObservedQuotaProtection, sessions RelaySessions) error {
+	if accounting == nil || sessions == nil {
+		return errors.New("relay account protection requires quota and sessions")
+	}
+	s.observedPolicy = true
+	s.accountChanged = func(change AccountChange) func() {
+		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.DiscardCredit)
+		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
 			return sessions.DetachAccount(change.AccountID)
 		}
 		return nil
