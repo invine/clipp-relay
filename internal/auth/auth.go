@@ -48,6 +48,10 @@ func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, pgx.Tx
 	s.commitAccount = commit
 }
 
+// SetRelayCredentialHookForTest controls the gap after a credential observation
+// and before protected admission. Production leaves this unset.
+func (s *Server) SetRelayCredentialHookForTest(hook func()) { s.relayCredentialHook = hook }
+
 // SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
 // Production leaves this unset.
 func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
@@ -101,6 +105,7 @@ type Server struct {
 	beforeOwnerRecheck                 func(context.Context, pgx.Tx)
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
+	relayCredentialHook                func()
 	commitCredential                   func(context.Context, pgx.Tx) error
 	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
@@ -136,6 +141,9 @@ func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(
 }
 
 func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(context.Context)) error {
+	if s.accountChanged == nil {
+		return errors.New("relay account protection not configured")
+	}
 	executed := false
 	err := s.db.WithUnit(ctx, func(unitCtx context.Context) error {
 		ordered := append([]string(nil), ids...)
@@ -185,10 +193,9 @@ func (s *Server) SetCapacitySampler(sample func(context.Context, string) (Capaci
 	s.capacitySampler = sample
 }
 
-// SetAccountChanged installs the in-process invalidation path for committed
-// account policy changes. The callback fences credit and detaches registry
-// entries under the account guard, then returns connection-close I/O to run
-// outside all logical guards. It must be set before serving HTTP requests.
+// AccountChange describes the authoritative policy outcome of a protected
+// Auth command. Local invalidation runs under account protection; connection
+// close I/O is deferred until all logical guards have been released.
 type AccountChange struct {
 	AccountID     string
 	WeeklyBytes   int64
@@ -197,7 +204,53 @@ type AccountChange struct {
 	DiscardCredit bool
 }
 
-func (s *Server) SetAccountChanged(changed func(AccountChange) func()) { s.accountChanged = changed }
+// SetAccountChangedForTest installs a controlled invalidation adapter. Production
+// must use ConfigureRelayProtection, which owns the complete policy operation.
+func (s *Server) SetAccountChangedForTest(changed func(AccountChange) func()) {
+	s.accountChanged = changed
+}
+
+// QuotaProtection invalidates prepaid authority without changing durable usage.
+// It is replaced by periodic accounting in the accounting implementation ticket.
+type QuotaProtection interface {
+	Invalidate(string)
+	InvalidateAbove(string, int64) bool
+}
+
+// RelaySessions exposes physical operations, not account policy decisions.
+type RelaySessions interface {
+	AccountSessions(string) int
+	DetachAccount(string) func()
+}
+
+// ConfigureRelayProtection connects required collaborators before serving. Auth
+// owns the policy decision; Relay only detaches authority and defers close I/O.
+func (s *Server) ConfigureRelayProtection(credit QuotaProtection, sessions RelaySessions) error {
+	if credit == nil || sessions == nil {
+		return errors.New("relay account protection requires quota and sessions")
+	}
+	s.accountChanged = func(change AccountChange) func() {
+		if change.DiscardCredit {
+			credit.Invalidate(change.AccountID)
+		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
+			change.CloseAll = true
+		}
+		if change.CloseAll || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
+			return sessions.DetachAccount(change.AccountID)
+		}
+		return nil
+	}
+	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
+		sample, err := s.SampleActiveGrants(ctx, account)
+		if err != nil {
+			return sample, err
+		}
+		count := sessions.AccountSessions(account)
+		sample.LiveSessions = &count
+		return sample, nil
+	})
+	return nil
+}
 
 // SampleActiveGrants reads only an aggregate live count, separately from the
 // profile's policy and quota snapshot. The portal treats a failed sample as
@@ -433,6 +486,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && s.accountChanged == nil {
+			fail(w, http.StatusServiceUnavailable)
+			return
+		}
 		s.observedRequest(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) }))
 	})
 }
@@ -1190,9 +1247,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
 			}
-			if s.accountChanged != nil {
-				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
-			}
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {
 			markGuardDiagnostic(r, guardErr)

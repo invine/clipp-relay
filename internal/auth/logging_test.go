@@ -22,7 +22,7 @@ import (
 func TestCredentialRefusalsHaveIndependentSafeRequestDiagnostics(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(nil, config.Config{}, config.Material{}, auth.Provider{})
+	s := newTestServer(t, nil, config.Config{}, config.Material{}, auth.Provider{})
 	s.SetDiagnostics(logger)
 	for _, path := range []string{"/auth/callback?state=SECRET_STATE_CANARY&code=SECRET_CODE_CANARY", "/auth/callback?state=SECRET_STATE_CANARY&code=SECRET_CODE_CANARY"} {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
@@ -78,7 +78,7 @@ func TestPortalAndOAuthDiagnosticsDescribeCommittedCredentials(t *testing.T) {
 	provider.mu.Unlock()
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	session := loginAs(t, s, provider, "SECRET_SUBJECT_CANARY", "SECRET_EMAIL_CANARY@example.test", "")
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='SECRET_SUBJECT_CANARY'`); err != nil {
@@ -150,7 +150,7 @@ func TestProviderFailureAndVerificationDiagnosticsStayPrivate(t *testing.T) {
 	provider.mu.Unlock()
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
 	state, binding := start(t, s, nil)
@@ -213,7 +213,7 @@ func TestJWKSDependencyInvalidResponseAndRecovery(t *testing.T) {
 	endpoints.KeysURL = keys.URL
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, endpoints)
+	s := newTestServer(t, db.Pool, c, m, endpoints)
 	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
 	state, binding := start(t, s, nil)
 	if out := complete(s, state, binding); out.Code != http.StatusUnauthorized {
@@ -239,7 +239,7 @@ func TestUnknownTokenKeyDoesNotDegradeHealthyJWKS(t *testing.T) {
 	provider.mu.Unlock()
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
 	state, binding := start(t, s, nil)
@@ -272,7 +272,7 @@ func TestUnknownTokenKeyDoesNotDegradeHealthyJWKS(t *testing.T) {
 func TestSuccessfulPortalPagesAndAssetsAreQuiet(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(nil, config.Config{PortalOrigin: "https://relay.example.test"}, config.Material{}, auth.Provider{})
+	s := newTestServer(t, nil, config.Config{PortalOrigin: "https://relay.example.test"}, config.Material{}, auth.Provider{})
 	s.SetDiagnostics(logger)
 	for _, path := range []string{"/", "/assets/portal.css", "/assets/portal.js"} {
 		out := httptest.NewRecorder()
@@ -290,7 +290,7 @@ func TestSuccessfulPortalPagesAndAssetsAreQuiet(t *testing.T) {
 func TestUnknownRouteAndMethodEmitSafeRequestRefusals(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(nil, config.Config{}, config.Material{}, auth.Provider{})
+	s := newTestServer(t, nil, config.Config{}, config.Material{}, auth.Provider{})
 	s.SetDiagnostics(logger)
 	for _, tc := range []struct {
 		method, path, body, reason string
@@ -339,7 +339,7 @@ func TestCodeExchangeLostCommitAcknowledgmentIsUncertain(t *testing.T) {
 	provider := newProvider(t)
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	session := loginAs(t, s, provider, "diagnostic-uncertain-account", "private@example.test", "")
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='diagnostic-uncertain-account'`); err != nil {
@@ -389,7 +389,7 @@ func TestPortalSessionLostCommitAcknowledgmentIsUncertain(t *testing.T) {
 	provider.mu.Unlock()
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	state, binding := start(t, s, nil)
 	provider.mu.Lock()

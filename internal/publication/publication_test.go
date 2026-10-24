@@ -382,3 +382,12 @@ func TestServiceHostnameKeepsDNSAddressFamilyOpen(t *testing.T) {
 		t.Fatalf("family-bound hostname: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func (testAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
+	work(ctx)
+	return ctx.Err() == nil
+}
+func (testAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
+	work(ctx)
+	return ctx.Err() == nil
+}

@@ -38,6 +38,9 @@ func (s *Server) AuthenticateRelay(ctx context.Context, raw string) (RelayCreden
 			AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&result.AccountID, &status, &grantGeneration, &result.Generation, &result.SessionLimit, &result.ExpiresAt, &dbNow)
 		after := time.Now()
 		if err == nil {
+			if s.relayCredentialHook != nil {
+				s.relayCredentialHook()
+			}
 			if _, uncertain := s.uncertainAccounts.Load(result.AccountID); uncertain {
 				// Wait for a still-in-flight Commit to release the account row, then
 				// re-read authority. A failed reconciliation keeps admission closed.
