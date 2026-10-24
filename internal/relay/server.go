@@ -240,6 +240,7 @@ func NewObservedProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server
 		if err := a.ConfigureRelayProtection(q, s); err != nil {
 			return err
 		}
+		a.EnableRecordedUsagePresentation()
 		q.SetSettlementProtection(a)
 		s.accounting = q
 		s.accountingCloses = make(chan struct{}, 1)
@@ -547,6 +548,9 @@ func (s *Server) permitted(st network.Stream) (bool, string) {
 	if v == nil || !time.Now().Before(v.deadline) {
 		return false, "authentication_required"
 	}
+	if s.accounting != nil && !s.accounting.AccountingReady(v.account) {
+		return false, "accounting_unavailable"
+	}
 	s.hopHandlers++
 	return true, ""
 }
@@ -619,6 +623,9 @@ func (s *Server) authoritativeConn(id peer.ID) network.Conn {
 	defer s.mu.Unlock()
 	v := s.byPeer[id]
 	if s.closing || v == nil || !time.Now().Before(v.deadline) || v.conn.IsClosed() {
+		return nil
+	}
+	if s.accounting != nil && !s.accounting.AccountingReady(v.account) {
 		return nil
 	}
 	return v.conn

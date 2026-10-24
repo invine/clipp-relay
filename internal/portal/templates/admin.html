@@ -90,6 +90,9 @@
 </span> <span class="muted fine-print">Revision {{.Revision}}
 </span>
 </p>
+{{with .Usage}}<p>Recorded Relay Usage: {{bytes .Recorded}} · Remaining allowance: {{bytes .Remaining}}</p>
+<p class="muted fine-print">Periodic confirmation lag means recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for one account; control traffic may count. History retains the current week + twelve preceding weeks as absolute totals.</p>
+<details><summary>Recorded Relay Usage history</summary><table><thead><tr><th>Week starting UTC</th><th>Confirmed usage</th></tr></thead><tbody>{{range .History}}<tr><td>{{.Week}}</td><td>{{bytes .Committed}}</td></tr>{{end}}</tbody></table></details>{{end}}
 <form class="form-stack" method="post" action="/admin/accounts/{{.ID}}">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <input type="hidden" name="revision" value="{{.Revision}}">

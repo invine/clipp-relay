@@ -29,14 +29,15 @@ type observedWeek struct {
 	initialized bool
 }
 type observedAccount struct {
-	sessions   int
-	weeks      map[time.Time]*observedWeek
-	generation int64
-	healthy    time.Time
-	revision   uint64
-	blocked    bool
-	reason     string
-	busy       bool
+	sessions     int
+	weeks        map[time.Time]*observedWeek
+	generation   int64
+	eligibleWeek time.Time
+	healthy      time.Time
+	revision     uint64
+	blocked      bool
+	reason       string
+	busy         bool
 }
 type periodicAccounting struct {
 	monotonicNow func() time.Time
@@ -157,7 +158,20 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (A
 	if a.blocked || q.accountingNow().Sub(a.healthy) >= q.accountingDeadlineLocked() {
 		return result, ErrTemporary
 	}
+	a.eligibleWeek = result.WeekStart
 	return result, nil
+}
+
+// AccountingReady gates continuing session use without changing its credentials.
+// A new observation week requires a successful authoritative eligibility read.
+func (q *Quota) AccountingReady(id string) bool {
+	if !q.clockOK() {
+		return false
+	}
+	q.periodic.mu.Lock()
+	defer q.periodic.mu.Unlock()
+	a := q.periodic.accounts[id]
+	return a != nil && !a.blocked && a.eligibleWeek.Equal(weekStart(q.now())) && q.accountingNow().Sub(a.healthy) < q.accountingDeadlineLocked()
 }
 func hasObserved(a *observedAccount) bool {
 	for _, w := range a.weeks {
@@ -213,6 +227,12 @@ func (q *Quota) FlushAccounting(ctx context.Context, id string) error {
 		q.periodic.mu.Unlock()
 		if !initialized {
 			usage, err := q.RecordedUsage(ctx, id, week)
+			if errors.Is(err, ErrUsageRetired) {
+				q.periodic.mu.Lock()
+				delete(a.weeks, week)
+				q.periodic.mu.Unlock()
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -238,6 +258,12 @@ func (q *Quota) FlushAccounting(ctx context.Context, id string) error {
 		batch := *w.flight
 		q.periodic.mu.Unlock()
 		usage, err := q.Settle(ctx, batch)
+		if errors.Is(err, ErrUsageRetired) {
+			q.periodic.mu.Lock()
+			delete(a.weeks, week)
+			q.periodic.mu.Unlock()
+			continue
+		}
 		if err != nil {
 			return err
 		}
