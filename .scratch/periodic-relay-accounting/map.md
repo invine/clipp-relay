@@ -14,6 +14,8 @@ All eight tickets requested on 2026-10-24. See [run](run.md) for local implement
 
 - [03](issues/03-periodic-live-traffic-accounting.md): bounded periodic observations and independent cutoff integrated; composed PG18 and race checks passed.
 
+- [05](issues/05-weekly-accounting-and-presentation.md): weekly readiness,13-window retention and confirmed query models integrated; focused PG18/race evidence passed.
+
 ## Fog
 
 No product decision remains open. Native/live acceptance is outside local implementation.

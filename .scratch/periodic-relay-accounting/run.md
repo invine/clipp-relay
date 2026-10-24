@@ -23,3 +23,5 @@ Authorization: user requested all eight tickets with implement-spec on 2026-10-2
 
 - 05 source `8c45148d62236e587c21b0fde3f2907056eae409` merged at `1742988e6fcb19faf5edf50d1b7cb34933dcf3fc`; integration verification in progress. Implementer work complete; 04 incorporates combined invalidation/week gate.
 - 06 claimed by deletion-06 (03 resolved, implementation slot free). Approved I4/I7: immediate deletion invalidation, bounded best-effort final flush outside logical protection, account-row serialized durable capture/seal, privacy-minimal exact-once retained import; independent journal prerequisites remain mandatory.
+
+- 05 resolved after integrated PG18 periodic/presentation/retention passed; focused review no issues. Artifacts `clipp-periodic-05-{handoff,integration}.md`. Full final fresh DB acceptance remains08.
