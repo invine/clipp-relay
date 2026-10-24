@@ -37,6 +37,11 @@ type protectedPortal struct {
 
 func protectedPortalFixture(t *testing.T) protectedPortal {
 	t.Helper()
+	return protectedPortalFixtureWithAccounting(t, nil)
+}
+
+func protectedPortalFixtureWithAccounting(t *testing.T, configure func(*quota.Quota)) protectedPortal {
+	t.Helper()
 	c, m, db := fixture(t)
 	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
 	if err := os.WriteFile(c.Secrets.AdminAllowlistFile, []byte(`{"revision":1,"emails":["protected-admin@gmail.com"]}`), 0600); err != nil {
@@ -45,6 +50,9 @@ func protectedPortalFixture(t *testing.T) protectedPortal {
 	d := newProvider(t)
 	s := auth.NewWithRuntime(db, c, m, d.endpoints())
 	q := quota.NewWithRuntime(db)
+	if configure != nil {
+		configure(q)
+	}
 	t.Cleanup(q.Close)
 	r, err := relay.NewProtected(s, q, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {

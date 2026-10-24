@@ -78,8 +78,9 @@ requires at least one of `relay_tcp.listen`, `relay_websocket.listen`, or
 `"3s"`, and must be at least the one-second accounting cadence. Explicit null,
 empty, zero, negative, nonfinite and overflowing values are rejected. It takes
 effect on restart. With unsettled observations, successful balance reads do not
-hide failed writes; the monotonic deadline closes all affected account sessions
-and denies admission until accounting recovers. Idle accounts refresh through
+hide failed writes. Successful settlement cannot hide unavailable authoritative
+eligibility. Each has an independent monotonic health deadline that closes all
+affected account sessions and denies admission until accounting recovers. Idle accounts refresh through
 authoritative reads without empty debits. This is a soft allowance, without a
 fixed byte-overrun bound. Policy cap edits retain recorded and pending usage;
 equality is exhausted. Suspension, account-wide revocation and session-cap
@@ -235,7 +236,8 @@ credential expiry across Monday; new HOP/STOP use waits for authoritative
 eligibility in the new week, without a new sign-in. The fixed accounting workers
 refresh continuing accounts on the one-second target cadence. Existing admitted
 stock circuits retain the accounting failure deadline while a new-week read is
-unavailable: this is a soft allowance, with no hard boundary byte guarantee.
+unavailable, even when settlement writes succeed. This is a soft allowance,
+with no hard boundary byte guarantee.
 Observations retain their processing week through lock waits and lost replies.
 
 History retains the current week and twelve preceding weeks as absolute totals,

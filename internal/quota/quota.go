@@ -33,8 +33,23 @@ type Quota struct {
 	done                 chan struct{}
 	settlementBefore     func(context.Context, pgx.Tx) error
 	settlementAfter      func(context.Context) error
+	eligibilityBoundary  func(context.Context) error
 	adjustTime           func(time.Time) time.Time
 	probeQuery           func(context.Context) (time.Time, error)
+}
+
+// SetAccountingBoundariesForTest controls clock and authority availability at the
+// composed HTTP/libp2p test seam. Configure once before serving; callbacks must
+// synchronize any later changes. Settlement still uses real PostgreSQL.
+func (q *Quota) SetAccountingBoundariesForTest(adjust func(time.Time) time.Time, monotonic func() time.Time, eligibility func(context.Context) error) {
+	q.clock.mu.Lock()
+	if adjust != nil && !q.clock.sampled.IsZero() {
+		q.clock.sampled = adjust(q.clock.sampled)
+	}
+	q.adjustTime = adjust
+	q.clock.mu.Unlock()
+	q.periodic.monotonicNow = monotonic
+	q.eligibilityBoundary = eligibility
 }
 
 // SetDiagnostics connects the process-wide, bounded application logger.

@@ -29,18 +29,19 @@ type observedWeek struct {
 	initialized bool
 }
 type observedAccount struct {
-	sessions     int
-	weeks        map[time.Time]*observedWeek
-	generation   int64
-	eligibleWeek time.Time
-	healthy      time.Time
-	revision     uint64
-	blocked      bool
-	invalidated  bool
-	reason       string
-	busy         bool
-	retiring     bool
-	flushCancel  context.CancelFunc
+	sessions           int
+	weeks              map[time.Time]*observedWeek
+	generation         int64
+	eligibleWeek       time.Time
+	healthy            time.Time
+	eligibilityHealthy time.Time
+	revision           uint64
+	blocked            bool
+	invalidated        bool
+	reason             string
+	busy               bool
+	retiring           bool
+	flushCancel        context.CancelFunc
 }
 type periodicAccounting struct {
 	monotonicNow func() time.Time
@@ -100,6 +101,11 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (r
 	defer func() { q.accountingDiagnostic("quota.eligibility", err, started) }()
 	if !q.clockOK() {
 		return result, ErrTemporary
+	}
+	if q.eligibilityBoundary != nil {
+		if err := q.eligibilityBoundary(ctx); err != nil {
+			return result, err
+		}
 	}
 	var status string
 	var actual int64
@@ -163,7 +169,14 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (r
 	if result.EffectiveBytes >= result.CapBytes {
 		return result, ErrExhausted
 	}
-	if a.blocked || q.accountingNow().Sub(a.healthy) >= q.accountingDeadlineLocked() {
+	// Authority freshness is independent of settlement progress. A successful
+	// read may restore authority while pending observations still require healthy writes.
+	a.eligibilityHealthy = q.accountingNow()
+	if a.reason == "accounting_unavailable" && q.accountingNow().Sub(a.healthy) < q.accountingDeadlineLocked() {
+		a.blocked = false
+		a.reason = ""
+	}
+	if a.blocked || q.accountingExpiredLocked(a) {
 		return result, ErrTemporary
 	}
 	a.eligibleWeek = result.WeekStart
@@ -179,8 +192,17 @@ func (q *Quota) AccountingReady(id string) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[id]
-	return a != nil && !a.blocked && !a.invalidated && a.eligibleWeek.Equal(weekStart(q.now())) && q.accountingNow().Sub(a.healthy) < q.accountingDeadlineLocked()
+	return a != nil && !a.blocked && !a.invalidated && a.eligibleWeek.Equal(weekStart(q.now())) && !q.accountingExpiredLocked(a)
 }
+
+// accountingExpiredLocked checks write progress and authoritative assessments
+// separately: neither successful operation can conceal failure of the other.
+func (q *Quota) accountingExpiredLocked(a *observedAccount) bool {
+	now := q.accountingNow()
+	deadline := q.accountingDeadlineLocked()
+	return !a.healthy.IsZero() && now.Sub(a.healthy) >= deadline || !a.eligibilityHealthy.IsZero() && now.Sub(a.eligibilityHealthy) >= deadline
+}
+
 func hasObserved(a *observedAccount) bool {
 	for _, w := range a.weeks {
 		if w.pending != 0 || w.flight != nil {
@@ -401,7 +423,7 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 			a.healthy = q.accountingNow()
 			// Persisting valid observations never restores continuing permission
 			// while the independent clock check is unsafe.
-			if q.clockOK() && !weekStart(q.now()).Before(a.eligibleWeek) {
+			if q.clockOK() && weekStart(q.now()).Equal(a.eligibleWeek) && !q.accountingExpiredLocked(a) {
 				a.blocked = false
 				a.reason = ""
 			}
@@ -511,7 +533,7 @@ func (q *Quota) CheckAccountingHealth() {
 		}
 		if !safeClock || currentWeek.Before(a.eligibleWeek) {
 			reasons[id] = "clock_unavailable"
-		} else if !a.healthy.IsZero() && q.accountingNow().Sub(a.healthy) >= q.accountingDeadlineLocked() {
+		} else if q.accountingExpiredLocked(a) {
 			reasons[id] = "accounting_unavailable"
 		}
 	}
@@ -524,7 +546,7 @@ func (q *Quota) cutoff(id, reason string) { q.cutoffChecked(id, reason, false) }
 func (q *Quota) cutoffChecked(id, reason string, expiredOnly bool) {
 	q.periodic.mu.Lock()
 	a := q.periodic.accounts[id]
-	if a == nil || a.blocked || expiredOnly && (a.healthy.IsZero() || q.accountingNow().Sub(a.healthy) < q.accountingDeadlineLocked()) {
+	if a == nil || a.blocked || expiredOnly && !q.accountingExpiredLocked(a) {
 		q.periodic.mu.Unlock()
 		return
 	}
