@@ -9,16 +9,28 @@ Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
 Owner deletion uses a separate OCI deletion journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
-Current-week Quota Committed follows a fresh Pending registration by keyed
+Confirmed current-week Recorded Relay Usage follows a fresh Pending registration by keyed
 digest; old account state, plan, credentials, and presentation do not.
-The Quota operation commits at most 64 KiB of account-week credit per block
-before making it locally usable. Callers must split larger reporter counts and
-consume any smaller remaining local balance before requesting another block.
-Committed credit is retained in PostgreSQL across restart and never refunded;
-unused process-local credit is not restored. The owner profile shows Quota
-committed and 12 completed weekly totals. Its capacity table distinguishes
-configured limits from separately sampled live counts. Active Login Grants are
-sampled from PostgreSQL; live Relay Sessions are sampled from this process.
+With periodic accounting, deletion first invalidates credentials and physically
+closes sessions. After mandatory Recovery Journal proof, it attempts a bounded
+best-effort final settlement outside account protection and database row locks.
+A failed or unresolved flush alone cannot delay finalization. Finalization locks
+the old account while capturing confirmed current-week usage and sealing further
+settlements in one transaction. A committed batch with a lost reply is included;
+late work cannot charge a replacement account. Re-registration imports only that
+current-week total once, as an opening total without a settlement receipt.
+Quota aggregates observed account-week traffic across sessions and settles nonempty
+immutable batches on a one-second target cadence. The confirmed total and latest
+retry receipt commit atomically; lost replies reconcile the identical operation
+once. Eligibility counts confirmed and locally unsettled usage once. The allowance
+is soft: full attributable overrun is recorded, and observations not persisted
+before a crash may be lost. No historical settlement replay or multi-instance
+writer coordination is supported. The accounting failure deadline defaults to
+three seconds and closes affected sessions independently of blocked SQL workers.
+The owner profile shows confirmed Recorded Relay Usage and twelve preceding
+weekly totals. Its capacity table distinguishes configured limits from separately
+sampled live counts. Active Login Grants are sampled from PostgreSQL; live Relay
+Sessions are sampled from this process.
 `/readyz` is `200 ok` only after every enabled relay listener and a complete
 public address snapshot are available; otherwise it is `503 unavailable`. `/livez` is
 `200 ok` while the process runs. Public relay discovery is withdrawn during
@@ -62,6 +74,18 @@ The single non-secret JSON configuration is versioned. No environment or flag
 overrides affect policy. Unknown and duplicate fields are rejected. Serving
 requires at least one of `relay_tcp.listen`, `relay_websocket.listen`, or
 `relay_webrtc_direct.listen`; migration does not start a relay listener.
+`accounting_failure_deadline` is an optional Go duration string, defaults to
+`"3s"`, and must be at least the one-second accounting cadence. Explicit null,
+empty, zero, negative, nonfinite and overflowing values are rejected. It takes
+effect on restart. With unsettled observations, successful balance reads do not
+hide failed writes. Successful settlement cannot hide unavailable authoritative
+eligibility. Each has an independent monotonic health deadline that closes all
+affected account sessions and denies admission until accounting recovers. Idle accounts refresh through
+authoritative reads without empty debits. This is a soft allowance, without a
+fixed byte-overrun bound. Policy cap edits retain recorded and pending usage;
+equality is exhausted. Suspension, account-wide revocation and session-cap
+reductions below the live count apply immediately through protected mutation.
+
 Every enabled transport needs a complete public address source for discovery
 and readiness. WSS addresses are configured. TCP and WebRTC Direct use either
 explicit `public_addresses` overrides or a named Kubernetes Service in
@@ -80,6 +104,7 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
 ```json
 {
   "version": 1,
+  "accounting_failure_deadline": "3s",
   "portal_origin": "https://portal.example.com",
   "wss_hostname": "wss.example.com",
   "public_clients": {
@@ -194,3 +219,44 @@ Other checks: `gofmt -l cmd internal`, `go vet ./...`, `go test ./...`.
 
 For local Linux ARM64/AMD64 image builds and the manual GHCR publication workflow,
 see [Relay image build](docs/image-build.md).
+
+### Recorded usage query and weekly retention
+
+The service displays **Recorded Relay Usage**:
+confirmed durable traffic observations, with periodic confirmation lag. Recent
+pending traffic does not appear as confirmed. HOP and STOP endpoint observations
+count independently (including twice for one account), and control bytes may
+count; this is a conservative traffic measure, not exact application payload.
+Owner and administrator usage views each snapshot account policy and usage in
+one database statement. Separate live capacity samples are not frozen with that
+snapshot and presentation reads grant no Relay Authentication authority.
+
+Weekly Quota Windows begin Monday at 00:00 UTC. A session keeps its fixed
+credential expiry across Monday; new HOP/STOP use waits for authoritative
+eligibility in the new week, without a new sign-in. The fixed accounting workers
+refresh continuing accounts on the one-second target cadence. Existing admitted
+stock circuits retain the accounting failure deadline while a new-week read is
+unavailable, even when settlement writes succeed. This is a soft allowance,
+with no hard boundary byte guarantee.
+Observations retain their processing week through lock waits and lost replies.
+
+History retains the current week and twelve preceding weeks as absolute totals,
+not percentages of today's allowance. Remaining allowance is clamped to zero
+after overrun. Weekly totals and their latest retry receipts expire together;
+bounded cleanup also removes hidden account children fairly. Local unresolved
+work stays attached to its original week until settlement or authoritative
+retirement. Ordinary disconnects and revocation do not discard pending usage;
+expired weeks cannot be recreated or charged to a newer week by a stale retry.
+
+### Offline accounting migration and compatibility
+
+Schema revision **13** makes observed accounting the sole serving behavior. Stop
+and fence the old process before running the migration with the maintenance role;
+then start the new binary with its restricted serving role. There is no accounting
+mode switch and no mixed-version serving. See [offline accounting cutover](docs/operator/accounting-migration.md).
+The explicit migration drops obsolete prepaid totals and allocation receipts and
+clears test retained usage before renaming its amount to `recorded_bytes`. It
+preserves accounts, plans, credentials, audit, Recovery Journal/recovery state,
+and already confirmed observed totals and receipts. Migration reruns and ordinary
+restart never reset new usage. Exact schema/checksum verification rejects the old
+binary against revision13 and the new binary against unmigrated schemas.

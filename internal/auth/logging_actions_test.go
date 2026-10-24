@@ -52,7 +52,7 @@ func requireActionRow(t *testing.T, rows []map[string]any, event, outcome, reaso
 func TestOwnerActionOriginRefusalIsSafe(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(nil, config.Config{PortalOrigin: "https://portal.example.test"}, config.Material{}, auth.Provider{})
+	s := newTestServer(t, nil, config.Config{PortalOrigin: "https://portal.example.test"}, config.Material{}, auth.Provider{})
 	s.SetDiagnostics(logger)
 	for _, path := range []string{"/auth/logout", "/auth/revoke"} {
 		r := httptest.NewRequest(http.MethodPost, path+"?secret=SECRET_QUERY_CANARY", strings.NewReader("csrf=SECRET_CSRF_CANARY"))
@@ -78,7 +78,7 @@ func TestOwnerAndAdminMutationDiagnosticsFollowHTTPCommitProof(t *testing.T) {
 	provider := newProvider(t)
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	owner := loginAs(t, s, provider, "SECRET_OWNER_SUBJECT_CANARY", "SECRET_OWNER_EMAIL_CANARY@example.test", "")
 	csrf := csrfFrom(t, s, owner)
@@ -100,7 +100,7 @@ func TestOwnerAndAdminMutationDiagnosticsFollowHTTPCommitProof(t *testing.T) {
 	}
 	// A new serving process has no conservative in-memory uncertainty fence;
 	// the rolled-back database state still permits a fresh login.
-	s = auth.New(db.Pool, c, m, provider.endpoints())
+	s = newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	owner = loginAs(t, s, provider, "SECRET_OWNER_SUBJECT_CANARY", "SECRET_OWNER_EMAIL_CANARY@example.test", "")
 	form.Set("csrf", csrfFrom(t, s, owner))
@@ -122,7 +122,7 @@ func TestOwnerDeletionLogsAcceptanceAndProvenCompletion(t *testing.T) {
 	provider := newProvider(t)
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}, failBeforeHeadOnce: true}
@@ -207,7 +207,7 @@ func TestDeletionPreparationSQLFailureLogsRetryWithoutCompletion(t *testing.T) {
 	provider := newProvider(t)
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, provider.endpoints())
+	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
@@ -267,7 +267,7 @@ func TestCanceledDeletionWorkerDoesNotClaimDependencyFailure(t *testing.T) {
 	c, m, db := fixture(t)
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
-	s := auth.New(db.Pool, c, m, auth.Provider{})
+	s := newTestServer(t, db.Pool, c, m, auth.Provider{})
 	s.SetDiagnostics(logger)
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}

@@ -48,6 +48,10 @@ func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, pgx.Tx
 	s.commitAccount = commit
 }
 
+// SetRelayCredentialHookForTest controls the gap after a credential observation
+// and before protected admission. Production leaves this unset.
+func (s *Server) SetRelayCredentialHookForTest(hook func()) { s.relayCredentialHook = hook }
+
 // SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
 // Production leaves this unset.
 func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
@@ -101,11 +105,14 @@ type Server struct {
 	beforeOwnerRecheck                 func(context.Context, pgx.Tx)
 	commitPlan                         func(context.Context, pgx.Tx) error
 	commitAccount                      func(context.Context, pgx.Tx) error
+	relayCredentialHook                func()
 	commitCredential                   func(context.Context, pgx.Tx) error
 	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
+	commitRecovery                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
+	deletionAccounting                 QuotaProtection
 	deletionJournal                    DeletionJournal
 	deletionRepository                 string
 	deletionFloor                      int64
@@ -136,6 +143,9 @@ func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(
 }
 
 func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(context.Context)) error {
+	if s.accountChanged == nil {
+		return errors.New("relay account protection not configured")
+	}
 	executed := false
 	err := s.db.WithUnit(ctx, func(unitCtx context.Context) error {
 		ordered := append([]string(nil), ids...)
@@ -185,19 +195,62 @@ func (s *Server) SetCapacitySampler(sample func(context.Context, string) (Capaci
 	s.capacitySampler = sample
 }
 
-// SetAccountChanged installs the in-process invalidation path for committed
-// account policy changes. The callback fences credit and detaches registry
-// entries under the account guard, then returns connection-close I/O to run
-// outside all logical guards. It must be set before serving HTTP requests.
+// AccountChange describes the authoritative policy outcome of a protected
+// Auth command. Local invalidation runs under account protection; connection
+// close I/O is deferred until all logical guards have been released.
 type AccountChange struct {
-	AccountID     string
-	WeeklyBytes   int64
-	SessionLimit  int
-	CloseAll      bool
-	DiscardCredit bool
+	AccountID             string
+	WeeklyBytes           int64
+	SessionLimit          int
+	CloseAll              bool
+	InvalidateEligibility bool
 }
 
-func (s *Server) SetAccountChanged(changed func(AccountChange) func()) { s.accountChanged = changed }
+// SetAccountChangedForTest installs a controlled invalidation adapter. Production
+// must use ConfigureRelayProtection, which owns the complete policy operation.
+func (s *Server) SetAccountChangedForTest(changed func(AccountChange) func()) {
+	s.accountChanged = changed
+}
+
+// RelaySessions exposes physical operations, not account policy decisions.
+type RelaySessions interface {
+	AccountSessions(string) int
+	DetachAccount(string) func()
+}
+
+// QuotaProtection applies current policy without discarding observations.
+type QuotaProtection interface {
+	ApplyAccountingPolicy(string, int64, bool) bool
+	BeginAccountingDeletion(string)
+	FlushDeletionAccounting(context.Context, string) error
+	ForgetAccounting(string)
+}
+
+// ConfigureRelayProtection installs the complete observed policy
+// operation. Policy collaboration is independent of presentation queries.
+func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions RelaySessions) error {
+	if accounting == nil || sessions == nil {
+		return errors.New("relay account protection requires quota and sessions")
+	}
+	s.deletionAccounting = accounting
+	s.accountChanged = func(change AccountChange) func() {
+		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.InvalidateEligibility)
+		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
+			return sessions.DetachAccount(change.AccountID)
+		}
+		return nil
+	}
+	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
+		sample, err := s.SampleActiveGrants(ctx, account)
+		if err != nil {
+			return sample, err
+		}
+		count := sessions.AccountSessions(account)
+		sample.LiveSessions = &count
+		return sample, nil
+	})
+	return nil
+}
 
 // SampleActiveGrants reads only an aggregate live count, separately from the
 // profile's policy and quota snapshot. The portal treats a failed sample as
@@ -433,6 +486,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && s.accountChanged == nil {
+			fail(w, http.StatusServiceUnavailable)
+			return
+		}
 		s.observedRequest(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) }))
 	})
 }
@@ -945,28 +1002,21 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var status, email string
+	var recoveryHeld bool
 	var weeklyBytes *int64
 	var sessions *int
 	var verified bool
 	var hd *string
-	var committed int64
+	var recorded int64
 	var historyJSON []byte
 	if e == nil {
 		if s.beforeProfileRead != nil {
 			s.beforeProfileRead()
 		}
-		err := s.db.QueryRow(r.Context(), `WITH current_week AS MATERIALIZED (SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date AS monday)
-SELECT a.status,a.email,a.email_verified,a.hosted_domain,COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions),
-COALESCE((SELECT u.committed_bytes FROM public.weekly_quota_usage u WHERE u.account_id=a.id AND u.week_start=(SELECT monday FROM current_week)),0),
-(SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'committed',COALESCE(u.committed_bytes,0)) ORDER BY w.week_start DESC)
- FROM (SELECT ((SELECT monday FROM current_week)-7*n)::date AS week_start FROM generate_series(0,12) n) w
- LEFT JOIN public.weekly_quota_usage u ON u.account_id=a.id AND u.week_start=w.week_start)
-FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id
-LEFT JOIN public.quota_plans p ON p.id=a.plan_id
-WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
-AND ps.credential_generation=a.credential_generation
-AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()
-AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, id, s.sessionDigest(r, version), version).Scan(&status, &email, &verified, &hd, &weeklyBytes, &sessions, &committed, &historyJSON)
+		profile, err := s.ownerUsageProfile(r, id, version)
+		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
+		recoveryHeld = profile.RecoveryHeld
+		weeklyBytes, sessions, recorded, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
 		if err == pgx.ErrNoRows {
 			e = errInvalidSession
 		} else if err != nil {
@@ -985,6 +1035,9 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 		}
 	}
 	description := map[string]string{"Pending": "Your account is waiting for approval.", "Active": "Your account is active.", "Suspended": "Your account is temporarily unavailable.", "Denied": "Your account is not approved."}[status]
+	if recoveryHeld {
+		description = "Recovery Review Hold: an administrator must review your status and quota assignments before relay use."
+	}
 	var bytesValue int64
 	var sessionsValue int
 	if weeklyBytes != nil {
@@ -1013,22 +1066,15 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 		}
 	}
 	percent := int64(0)
-	usageState := "No Quota committed this week."
+	if bytesValue > 0 {
+		percent = min(100, int64(float64(recorded)*100/float64(bytesValue)))
+	}
+	usageState := "Remaining allowance: " + portal.FormatBytes(max(0, bytesValue-recorded)) + "."
 	if bytesValue == 0 {
 		usageState = "Zero allowance: relay use is unavailable."
-		if committed > 0 {
-			usageState += " Quota committed exceeds the current zero allowance."
-		}
-	} else if committed >= bytesValue {
-		percent = 100
-		if committed > bytesValue {
-			usageState = "Quota committed exceeds the current allowance after a plan reduction."
-		} else {
-			usageState = "Weekly allowance fully committed."
-		}
-	} else {
-		percent = int64(float64(committed) * 100 / float64(bytesValue))
-		usageState = "Remaining allowance: " + portal.FormatBytes(bytesValue-committed) + "."
+	}
+	if recorded > bytesValue {
+		usageState += " Recorded Relay Usage exceeds the current allowance."
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	portal.Render(w, http.StatusOK, "account", struct {
@@ -1036,14 +1082,15 @@ AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '
 		Status, Description, Email, CSRF       string
 		DiscoveryURL                           string
 		Active, Admin                          bool
+		RecoveryHeld                           bool
 		WeeklyBytes                            int64
 		Sessions                               int
-		Committed, Percent                     int64
+		Recorded, Percent                      int64
 		UsageState                             string
 		History                                []quotaHistory
 		LiveSessions, ActiveGrants, GrantLimit int
 		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active", admin, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
+	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active" && !recoveryHeld, admin, recoveryHeld, bytesValue, sessionsValue, recorded, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
@@ -1190,9 +1237,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
 			}
-			if s.accountChanged != nil {
-				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
-			}
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, InvalidateEligibility: true})
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {
 			markGuardDiagnostic(r, guardErr)

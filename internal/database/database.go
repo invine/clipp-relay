@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 10
+const ExpectedRevision = 13
 
 type migration struct {
 	revision int
@@ -257,7 +257,29 @@ ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event
  worst_age_seconds bigint NOT NULL DEFAULT 0 CHECK (worst_age_seconds >= 0)
 );
 INSERT INTO public.cleanup_breach_record(singleton) VALUES(true);
-REVOKE ALL ON public.cleanup_breach_record FROM PUBLIC;`}}
+REVOKE ALL ON public.cleanup_breach_record FROM PUBLIC;`}, {11, `CREATE TABLE public.weekly_relay_usage (
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ week_start date NOT NULL CHECK (EXTRACT(ISODOW FROM week_start)=1),
+ recorded_bytes bigint NOT NULL CHECK (recorded_bytes >= 0),
+ sequence bigint NOT NULL CHECK (sequence >= 0),
+ latest_operation_id uuid,
+ latest_delta_bytes bigint NOT NULL CHECK (latest_delta_bytes >= 0),
+ PRIMARY KEY (account_id,week_start),
+ CHECK (recorded_bytes >= latest_delta_bytes AND ((sequence=0 AND latest_operation_id IS NULL AND latest_delta_bytes=0) OR (sequence>0 AND latest_operation_id IS NOT NULL AND latest_delta_bytes>0)))
+);
+CREATE INDEX weekly_relay_usage_retention ON public.weekly_relay_usage(week_start,account_id);
+REVOKE ALL ON public.weekly_relay_usage FROM PUBLIC;`}, {12, `ALTER TABLE public.accounts ADD COLUMN recovery_review_hold boolean NOT NULL DEFAULT false;
+CREATE TABLE public.recovery_runs (
+ run_id uuid PRIMARY KEY,
+ source text NOT NULL CHECK (length(source) BETWEEN 1 AND 255),
+ target text NOT NULL CHECK (length(target) BETWEEN 1 AND 255 AND target<>source),
+ schema_revision integer NOT NULL,
+ journal_head jsonb NOT NULL,
+ completed_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+REVOKE ALL ON public.recovery_runs FROM PUBLIC;`}, {13, `DROP TABLE public.weekly_quota_usage;
+DELETE FROM public.retained_quota_usage;
+ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
@@ -396,6 +418,26 @@ SELECT
 	if err = conn.QueryRow(ctx, `SELECT pg_size_bytes(current_setting('temp_file_limit')) BETWEEN 1 AND 67108864`).Scan(&boundedTemp); err != nil || !boundedTemp {
 		return errors.New("serving database temporary-file limit unavailable or unsafe")
 	}
+	return verifySchema(ctx, conn)
+}
+
+// VerifySchema checks the exact migration history without requiring a serving
+// role. Offline recovery uses maintenance credentials and cannot use that role gate.
+func VerifySchema(ctx context.Context, p *pgxpool.Pool) error {
+	conn, err := p.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	if err = verifyMajor(ctx, conn); err != nil {
+		return err
+	}
+	return verifySchema(ctx, conn)
+}
+func verifySchema(ctx context.Context, conn *pgxpool.Conn) error {
+	return verifySchemaHistory(ctx, conn, migrations)
+}
+func verifySchemaHistory(ctx context.Context, conn *pgxpool.Conn, expected []migration) error {
 	rows, err := conn.Query(ctx, "SELECT revision, checksum FROM public.schema_migrations ORDER BY revision")
 	if err != nil {
 		return errors.New("schema revision unavailable")
@@ -409,11 +451,11 @@ SELECT
 			return errors.New("schema revision unavailable")
 		}
 		count++
-		if revision != count || count > len(migrations) || hash != checksum(migrations[count-1].sql) {
+		if revision != count || count > len(expected) || hash != checksum(expected[count-1].sql) {
 			return errors.New("schema revision or checksum mismatch")
 		}
 	}
-	if rows.Err() != nil || count != ExpectedRevision {
+	if rows.Err() != nil || count != len(expected) {
 		return errors.New("schema revision mismatch")
 	}
 	return nil

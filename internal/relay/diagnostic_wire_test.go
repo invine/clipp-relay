@@ -57,7 +57,7 @@ func TestRelayAuthDiagnosticJourney(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestPolicyCloseEmitsSessionEndWithoutIdentity(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestRelaySessionExpiryIsDistinctFromDisconnect(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(expiringAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(expiringAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestRelayAuthRefusalIsBoundedAndPrivate(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestPreauthenticationExpiresWithoutRelaySession(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestMalformedAuthFrameDoesNotLeakPayload(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestDrainEndsRelaySessionWithDrainReason(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,18 +323,14 @@ func TestDrainEndsRelaySessionWithDrainReason(t *testing.T) {
 	waitRow(t, out, "relay.session", "ended", "draining")
 }
 
-func TestQuotaReporterClosesSessionsWithReportingReason(t *testing.T) {
+func TestAccountingCutoffClosesSessionsWithExhaustionReason(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
 	runAccountCutoff(t, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log}, "tcp")
-	row := waitRow(t, out, "relay.session", "ended", "reporting_failed")
+	row := waitRow(t, out, "relay.session", "ended", "quota_exhausted")
 	if row["session_id"] == nil {
 		t.Fatal(row)
-	}
-	report := waitRow(t, out, "quota.reporting", "failed", "reporting_failed")
-	if report["request_id"] != nil || report["session_id"] != nil {
-		t.Fatalf("aggregate reporter invented correlation: %v", report)
 	}
 	for _, r := range out.rows() {
 		if r["event"] == "quota.reporting" && r["outcome"] == "success" {
@@ -350,7 +346,7 @@ func TestQuotaExhaustionKeepsAuthenticationReasonHonest(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, failingCredit{quota.ErrExhausted}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, failingAccounting{quota.ErrExhausted}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +405,7 @@ func TestClientDisconnectDuringDrainKeepsConnectionReason(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}

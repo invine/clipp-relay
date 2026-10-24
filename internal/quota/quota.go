@@ -1,4 +1,4 @@
-// Package quota commits conservative account-week credit before it is made usable.
+// Package quota records observed relay usage and owns accounting eligibility.
 package quota
 
 import (
@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"clipp-relay/internal/database"
@@ -16,52 +15,41 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const BlockBytes int64 = 65536
-
 var ErrExhausted = errors.New("weekly quota exhausted")
 var ErrTemporary = errors.New("quota temporarily unavailable")
 
-// Result reports durable Quota Committed and remaining process-local credit.
-// Committed includes unused credit and is not measured traffic.
-type Result struct {
-	Committed, Usable int64
-	WeekStart         time.Time
-}
-type balance struct {
-	mu                sync.Mutex
-	refs              int
-	week              time.Time
-	deadline          time.Time
-	generation        int64
-	usable, committed int64
-	pending           string
-	pendingWeek       time.Time
-	pendingGeneration int64
-	pendingSequence   int64
-	epoch             atomic.Uint64
-}
-
-func (b *balance) clearPending() {
-	b.pending = ""
-	b.pendingWeek = time.Time{}
-	b.pendingGeneration = 0
-	b.pendingSequence = 0
-}
-
 type Quota struct {
-	runtime       *database.Runtime
-	diagnostics   *diagnostic.Logger
-	mu            sync.Mutex
-	balances      map[string]*balance
-	clock         clockState
-	stop          chan struct{}
-	done          chan struct{}
-	beforeCommit  func(context.Context, pgx.Tx) error
-	afterCommit   func() error
-	adjustTime    func(time.Time) time.Time
-	probeQuery    func(context.Context) (time.Time, error)
-	beforeLock    func()
-	beforeInstall func()
+	beforeLock           func()
+	beforeCommit         func(context.Context, pgx.Tx) error
+	afterCommit          func() error
+	periodic             periodicAccounting
+	settlementProtection SettlementProtection
+	settlementMu         sync.Mutex
+	settlements          map[settlementKey]*settlementState
+	runtime              *database.Runtime
+	diagnostics          *diagnostic.Logger
+	clock                clockState
+	stop                 chan struct{}
+	done                 chan struct{}
+	settlementBefore     func(context.Context, pgx.Tx) error
+	settlementAfter      func(context.Context) error
+	eligibilityBoundary  func(context.Context) error
+	adjustTime           func(time.Time) time.Time
+	probeQuery           func(context.Context) (time.Time, error)
+}
+
+// SetAccountingBoundariesForTest controls clock and authority availability at the
+// composed HTTP/libp2p test seam. Configure once before serving; callbacks must
+// synchronize any later changes. Settlement still uses real PostgreSQL.
+func (q *Quota) SetAccountingBoundariesForTest(adjust func(time.Time) time.Time, monotonic func() time.Time, eligibility func(context.Context) error) {
+	q.clock.mu.Lock()
+	if adjust != nil && !q.clock.sampled.IsZero() {
+		q.clock.sampled = adjust(q.clock.sampled)
+	}
+	q.adjustTime = adjust
+	q.clock.mu.Unlock()
+	q.periodic.monotonicNow = monotonic
+	q.eligibilityBoundary = eligibility
 }
 
 // SetDiagnostics connects the process-wide, bounded application logger.
@@ -120,14 +108,38 @@ func New(pool *pgxpool.Pool) *Quota {
 
 // NewWithRuntime joins Quota to the serving process's shared DB work budget.
 func NewWithRuntime(runtime *database.Runtime) *Quota {
-	q := &Quota{runtime: runtime, balances: make(map[string]*balance), stop: make(chan struct{}), done: make(chan struct{})}
+	q := &Quota{runtime: runtime, stop: make(chan struct{}), done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = q.Probe(ctx)
 	cancel()
 	go q.probeLoop()
 	return q
 }
-func (q *Quota) Close() { close(q.stop); <-q.done }
+
+// Close cancels workers; graceful persistence belongs to FlushAllAccounting.
+// A faulty dependency cannot indefinitely hold process termination open.
+func (q *Quota) Close() {
+	q.periodic.mu.Lock()
+	cancel, done := q.periodic.cancel, q.periodic.done
+	q.periodic.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	close(q.stop)
+	deadline := time.NewTimer(100 * time.Millisecond)
+	defer deadline.Stop()
+	if done != nil {
+		select {
+		case <-done:
+		case <-deadline.C:
+			return
+		}
+	}
+	select {
+	case <-q.done:
+	case <-deadline.C:
+	}
+}
 
 // NewOperationID produces a cryptographically random stable operation identifier.
 func NewOperationID() (string, error) {
@@ -144,87 +156,6 @@ func weekStart(t time.Time) time.Time {
 	days := (int(u.Weekday()) + 6) % 7
 	return time.Date(u.Year(), u.Month(), u.Day()-days, 0, 0, 0, 0, time.UTC)
 }
-func (q *Quota) acquire(id string) *balance {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	b := q.balances[id]
-	if b == nil {
-		b = &balance{}
-		q.balances[id] = b
-	}
-	b.refs++
-	return b
-}
-func (q *Quota) release(id string, b *balance) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	b.refs--
-	if b.refs == 0 && b.week.IsZero() && b.pending == "" {
-		delete(q.balances, id)
-	}
-}
-
-func (q *Quota) reapExpired() {
-	q.mu.Lock()
-	entries := make(map[string]*balance, len(q.balances))
-	for id, b := range q.balances {
-		entries[id] = b
-	}
-	q.mu.Unlock()
-	for id, b := range entries {
-		b.mu.Lock()
-		if !b.deadline.IsZero() && !q.now().Before(b.deadline) {
-			if b.usable > 0 {
-				q.emit("quota.credit_retired", "success", "expired", time.Time{})
-			}
-			b.usable = 0
-			b.week = time.Time{}
-			b.deadline = time.Time{}
-			b.committed = 0
-		}
-		if b.week.IsZero() && b.pending == "" {
-			q.mu.Lock()
-			if b.refs == 0 && q.balances[id] == b {
-				delete(q.balances, id)
-			}
-			q.mu.Unlock()
-		}
-		b.mu.Unlock()
-	}
-}
-
-// Invalidate discards live credit after an account policy or generation change.
-// The administrator mutation path must call it after its commit.
-func (q *Quota) Invalidate(id string) {
-	b := q.acquire(id)
-	b.epoch.Add(1)
-	b.mu.Lock()
-	if b.usable > 0 {
-		q.emit("quota.credit_retired", "success", "discarded", time.Time{})
-	}
-	b.usable = 0
-	b.mu.Unlock()
-	q.release(id, b)
-}
-
-// InvalidateAbove discards credit only when a committed debit exceeds the new
-// weekly cap. Equal and larger caps preserve the funded remainder.
-func (q *Quota) InvalidateAbove(id string, cap int64) bool {
-	b := q.acquire(id)
-	b.mu.Lock()
-	above := b.committed > cap
-	if above {
-		b.epoch.Add(1)
-		if b.usable > 0 {
-			q.emit("quota.credit_retired", "success", "discarded", time.Time{})
-		}
-		b.usable = 0
-	}
-	b.mu.Unlock()
-	q.release(id, b)
-	return above
-}
-
 func (q *Quota) probeLoop() {
 	defer close(q.done)
 	ticker := time.NewTicker(time.Minute)
@@ -237,7 +168,6 @@ func (q *Quota) probeLoop() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			q.Probe(ctx)
 			cancel()
-			q.reapExpired()
 		}
 	}
 }
@@ -322,351 +252,19 @@ func (q *Quota) clockOK() bool {
 	return q.clock.safe && age <= 5*time.Minute
 }
 
-// Take consumes confirmed credit for one account. A zero-byte call reads its
-// local balance without funding. Reporters should call repeatedly for counts
-// larger than the remaining local credit.
-func (q *Quota) Take(ctx context.Context, id string, generation, bytes int64) (Result, error) {
-	return q.take(ctx, id, generation, bytes, false)
-}
-
-// Ensure commits credit before relay permission is granted, without counting
-// a byte that has not been reported by the stock Circuit Relay endpoint.
-func (q *Quota) Ensure(ctx context.Context, id string, generation int64) (Result, error) {
-	return q.take(ctx, id, generation, 0, true)
-}
-
-func (q *Quota) take(ctx context.Context, id string, generation, bytes int64, ensure bool) (Result, error) {
-	var result Result
-	started := time.Now()
-	admitted := false
-	err := q.runtime.WithUnit(ctx, func(unitCtx context.Context) error {
-		admitted = true
-		var workErr error
-		result, workErr = q.takeAdmitted(unitCtx, id, generation, bytes, ensure)
-		return workErr
-	})
-	if !admitted && err != nil {
-		q.emit("quota.funding", "failed", "database_unavailable", started)
+func (q *Quota) accountingDiagnostic(event string, err error, started time.Time) {
+	outcome, reason := "success", "none"
+	switch {
+	case errors.Is(err, ErrExhausted):
+		outcome, reason = "refused", "quota_exhausted"
+	case errors.Is(err, ErrSettlementUncertain), errors.Is(err, ErrSettlementUnresolved):
+		outcome, reason = "uncertain", "settlement_unconfirmed"
+	case errors.Is(err, ErrSettlementConflict):
+		outcome, reason = "refused", "settlement_conflict"
+	case errors.Is(err, ErrUsageRetired):
+		outcome, reason = "refused", "usage_retired"
+	case err != nil:
+		outcome, reason = "failed", "accounting_unavailable"
 	}
-	if errors.Is(err, database.ErrWorkUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return Result{}, ErrTemporary
-	}
-	return result, err
-}
-
-func (q *Quota) takeAdmitted(unitCtx context.Context, id string, generation, bytes int64, ensure bool) (Result, error) {
-	if unitCtx.Err() != nil {
-		return Result{}, ErrTemporary
-	}
-	if bytes < 0 || bytes > BlockBytes {
-		return Result{}, ErrTemporary
-	}
-	if !q.clockOK() {
-		q.clock.mu.Lock()
-		shouldProbe := q.clock.sampled.IsZero() || time.Since(q.clock.sampledMono) >= 50*time.Second
-		q.clock.mu.Unlock()
-		if shouldProbe {
-			if err := q.Probe(unitCtx); err != nil {
-				q.emit("quota.funding", "failed", "clock_unavailable", time.Now())
-				return Result{}, ErrTemporary
-			}
-		}
-	}
-	if !q.clockOK() {
-		q.emit("quota.funding", "failed", "clock_unavailable", time.Now())
-		return Result{}, ErrTemporary
-	}
-	b := q.acquire(id)
-	defer q.release(id, b)
-	for !b.mu.TryLock() {
-		select {
-		case <-unitCtx.Done():
-			return Result{}, ErrTemporary
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-	defer b.mu.Unlock()
-	if unitCtx.Err() != nil || !q.clockOK() {
-		if !q.clockOK() {
-			q.emit("quota.funding", "failed", "clock_unavailable", time.Now())
-		}
-		return Result{}, ErrTemporary
-	}
-	now := q.now()
-	if b.generation != generation {
-		if b.usable > 0 {
-			q.emit("quota.credit_retired", "success", "discarded", time.Time{})
-		}
-		b.usable = 0
-		b.week = time.Time{}
-		b.deadline = time.Time{}
-		b.committed = 0
-		b.generation = generation
-	} else if !b.deadline.IsZero() && !now.Before(b.deadline) {
-		if b.usable > 0 {
-			q.emit("quota.credit_retired", "success", "expired", time.Time{})
-		}
-		b.usable = 0
-		b.week = time.Time{}
-		b.deadline = time.Time{}
-		b.committed = 0
-	}
-	// A small backward clock step can cross Monday while staying below the
-	// general skew threshold. Credit belongs only to its funded week.
-	if !b.week.IsZero() && !weekStart(now).Equal(b.week) {
-		return Result{}, ErrTemporary
-	}
-	if bytes == 0 && !ensure {
-		return Result{b.committed, b.usable, b.week}, nil
-	}
-	if bytes > b.usable || ensure && b.usable == 0 {
-		// A caller may not consume a partial block or pre-fund its next block.
-		if b.usable > 0 {
-			return Result{b.committed, b.usable, b.week}, ErrTemporary
-		}
-		if b.pending == "" {
-			var err error
-			b.pending, err = NewOperationID()
-			if err != nil {
-				return Result{}, ErrTemporary
-			}
-			b.pendingGeneration = generation
-			b.pendingSequence = 0
-		}
-		epoch := b.epoch.Load()
-		started := time.Now()
-		receipt, err := q.fund(unitCtx, id, generation, b.pending, b.pendingWeek, b.pendingGeneration, b.pendingSequence)
-		if err == nil {
-			q.emit("quota.funding", "success", "none", started)
-		} else {
-			outcome, reason := "failed", "database_unavailable"
-			switch {
-			case errors.Is(err, ErrExhausted):
-				outcome, reason = "refused", "quota_exhausted"
-			case errors.Is(err, errAccountBlocked):
-				outcome, reason = "refused", "account_blocked"
-			case errors.Is(err, errClockUnavailable):
-				reason = "clock_unavailable"
-			case errors.Is(err, errAllocationUnconfirmed):
-				outcome, reason = "uncertain", "allocation_unconfirmed"
-			case errors.Is(err, errExpiredReceipt), errors.Is(err, errStaleOperation):
-				outcome, reason = "uncertain", "allocation_unconfirmed"
-			}
-			q.emit("quota.funding", outcome, reason, started)
-		}
-		if b.pendingWeek.IsZero() && !receipt.week.IsZero() {
-			b.pendingWeek = receipt.week
-		}
-		if b.pendingSequence == 0 && receipt.sequence > 0 {
-			b.pendingSequence = receipt.sequence
-		}
-		if err != nil {
-			if errors.Is(err, ErrExhausted) || errors.Is(err, errExpiredReceipt) || errors.Is(err, errStaleOperation) {
-				b.clearPending()
-			}
-			if errors.Is(err, errExpiredReceipt) || errors.Is(err, errStaleOperation) {
-				err = ErrTemporary
-			} else if errors.Is(err, errAccountBlocked) || errors.Is(err, errClockUnavailable) || errors.Is(err, errAllocationUnconfirmed) {
-				err = ErrTemporary
-			}
-			return Result{b.committed, b.usable, b.week}, err
-		}
-		// An invalidated worker, changed generation or week may not install its receipt.
-		if q.beforeInstall != nil {
-			q.beforeInstall()
-		}
-		installTime := q.now()
-		if unitCtx.Err() != nil || b.epoch.Load() != epoch || receipt.generation != generation || !installTime.Before(receipt.deadline) || !weekStart(installTime).Equal(receipt.week) || !q.clockOK() {
-			q.emit("quota.credit_retired", "success", "discarded", time.Time{})
-			b.clearPending()
-			return Result{}, ErrTemporary
-		}
-		if !b.week.Equal(receipt.week) {
-			if b.usable > 0 {
-				q.emit("quota.credit_retired", "success", "expired", time.Time{})
-			}
-			b.usable = 0
-		}
-		b.week = receipt.week
-		b.deadline = receipt.deadline
-		b.generation = generation
-		b.committed = receipt.committed
-		b.usable += receipt.granted
-		b.clearPending()
-	}
-	if bytes > b.usable {
-		return Result{b.committed, b.usable, b.week}, ErrTemporary
-	}
-	if unitCtx.Err() != nil {
-		return Result{}, ErrTemporary
-	}
-	b.usable -= bytes
-	return Result{b.committed, b.usable, b.week}, nil
-}
-
-type funding struct {
-	week, deadline                           time.Time
-	generation, committed, granted, sequence int64
-}
-
-var errExpiredReceipt = errors.New("old-week receipt discarded")
-var errStaleOperation = errors.New("stale quota operation")
-var errAccountBlocked = errors.New("quota account blocked")
-var errClockUnavailable = errors.New("quota clock unavailable")
-var errAllocationUnconfirmed = errors.New("quota allocation unconfirmed")
-
-func (q *Quota) fund(ctx context.Context, id string, generation int64, op string, pendingWeek time.Time, pendingGeneration, pendingSequence int64) (funding, error) {
-	tx, err := q.runtime.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if err != nil {
-		return funding{}, ErrTemporary
-	}
-	defer tx.Rollback(ctx)
-	var status string
-	var actual, cap int64
-	if q.beforeLock != nil {
-		q.beforeLock()
-	}
-	err = tx.QueryRow(ctx, `SELECT a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 FOR UPDATE OF a`, id).Scan(&status, &actual, &cap)
-	if err == pgx.ErrNoRows {
-		return funding{}, errAccountBlocked
-	}
-	if err != nil {
-		return funding{}, ErrTemporary
-	}
-	if status != "Active" || actual != generation {
-		return funding{}, errAccountBlocked
-	}
-	if pendingGeneration != generation {
-		if pendingWeek.IsZero() {
-			return funding{}, errExpiredReceipt
-		}
-		var oldOp string
-		err = tx.QueryRow(ctx, `SELECT COALESCE(latest_operation_id::text,'') FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, pendingWeek).Scan(&oldOp)
-		if err != nil && err != pgx.ErrNoRows {
-			return funding{week: pendingWeek}, ErrTemporary
-		}
-		return funding{week: pendingWeek}, errExpiredReceipt
-	}
-	var dbTime time.Time
-	before := q.now()
-	err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbTime)
-	after := q.now()
-	if err != nil {
-		return funding{}, ErrTemporary
-	}
-	dbTime = q.dbTime(dbTime)
-	uncertainty := after.Sub(before) / 2
-	offset := dbTime.Sub(before.Add(uncertainty))
-	q.clock.mu.Lock()
-	q.clock.warning = !clockIntervalWithin(offset, uncertainty, time.Second)
-	q.clock.mu.Unlock()
-	if uncertainty > time.Second || !clockIntervalWithin(offset, uncertainty, 5*time.Second) {
-		q.clock.mu.Lock()
-		q.clock.safe = false
-		q.clock.recovering = 0
-		q.clock.sampled = after
-		q.clock.sampledMono = time.Now()
-		q.clock.mu.Unlock()
-		return funding{}, errClockUnavailable
-	}
-	week := weekStart(dbTime)
-	end := week.AddDate(0, 0, 7)
-	until := end.Sub(dbTime) - after.Sub(before) - 6*time.Second
-	if until <= 0 {
-		return funding{week: week}, errClockUnavailable
-	}
-	deadline := after.Add(until)
-	if !pendingWeek.IsZero() && !pendingWeek.Equal(week) {
-		// The previous operation settles under the account lock before a new
-		// week can allocate. Its receipt is never installed in the new week.
-		var oldOp string
-		err = tx.QueryRow(ctx, `SELECT COALESCE(latest_operation_id::text,'') FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, pendingWeek).Scan(&oldOp)
-		if err != nil && err != pgx.ErrNoRows {
-			return funding{week: pendingWeek}, ErrTemporary
-		}
-		return funding{week: pendingWeek}, errExpiredReceipt
-	}
-	var committed, seq, granted int64
-	var latest string
-	err = tx.QueryRow(ctx, `SELECT committed_bytes,sequence,COALESCE(latest_operation_id::text,''),latest_granted_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, id, week).Scan(&committed, &seq, &latest, &granted)
-	rowAbsent := err == pgx.ErrNoRows
-	if err != nil && err != pgx.ErrNoRows {
-		return funding{week: week}, ErrTemporary
-	}
-	if err == pgx.ErrNoRows {
-		committed = 0
-		seq = 0
-		latest = ""
-	}
-	if pendingSequence == 0 {
-		pendingSequence = seq + 1
-	}
-	if latest == op && seq != pendingSequence {
-		return funding{week: week, sequence: pendingSequence}, ErrTemporary
-	}
-	if latest != op && seq >= pendingSequence {
-		return funding{week: week, sequence: pendingSequence}, errStaleOperation
-	}
-	if latest != op && seq+1 != pendingSequence {
-		return funding{week: week, sequence: pendingSequence}, ErrTemporary
-	}
-	if latest != op {
-		remaining := cap - committed
-		if remaining <= 0 {
-			return funding{week: week, sequence: pendingSequence}, ErrExhausted
-		}
-		granted = BlockBytes
-		if remaining < granted {
-			granted = remaining
-		}
-		if rowAbsent {
-			_, err = tx.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,$2,$3,1,$4,$3)`, id, week, granted, op)
-		} else {
-			_, err = tx.Exec(ctx, `UPDATE public.weekly_quota_usage SET committed_bytes=committed_bytes+$3,sequence=sequence+1,latest_operation_id=$4,latest_granted_bytes=$3 WHERE account_id=$1 AND week_start=$2`, id, week, granted, op)
-		}
-		if err != nil {
-			return funding{week: week, sequence: pendingSequence}, ErrTemporary
-		}
-		committed += granted
-	}
-	if q.beforeCommit != nil {
-		if err = q.beforeCommit(ctx, tx); err != nil {
-			return funding{week: week, sequence: pendingSequence}, ErrTemporary
-		}
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return funding{week: week, sequence: pendingSequence}, errAllocationUnconfirmed
-	}
-	if q.afterCommit != nil {
-		if err = q.afterCommit(); err != nil {
-			return funding{week: week, sequence: pendingSequence}, errAllocationUnconfirmed
-		}
-	}
-	var postTime time.Time
-	var currentStatus string
-	var currentGeneration, currentCap int64
-	beforePost := q.now()
-	err = q.runtime.Unit(ctx, func(unitCtx context.Context, conn *pgxpool.Conn) error {
-		return conn.QueryRow(unitCtx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&postTime, &currentStatus, &currentGeneration, &currentCap)
-	})
-	afterPost := q.now()
-	if err != nil {
-		return funding{week: week, sequence: pendingSequence}, errAllocationUnconfirmed
-	}
-	postTime = q.dbTime(postTime)
-	if currentStatus != "Active" || currentGeneration != generation || currentCap < committed {
-		return funding{week: week, sequence: pendingSequence}, errAccountBlocked
-	}
-	if !weekStart(postTime).Equal(week) {
-		return funding{week: week, sequence: pendingSequence}, errClockUnavailable
-	}
-	postUntil := end.Sub(postTime) - afterPost.Sub(beforePost) - 6*time.Second
-	postDeadline := afterPost.Add(postUntil)
-	if postDeadline.Before(deadline) {
-		deadline = postDeadline
-	}
-	if !q.now().Before(deadline) {
-		return funding{week: week, sequence: pendingSequence}, errClockUnavailable
-	}
-	return funding{week: week, deadline: deadline, generation: actual, committed: committed, granted: granted, sequence: pendingSequence}, nil
+	q.emit(event, outcome, reason, started)
 }

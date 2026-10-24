@@ -35,10 +35,13 @@ func run() int {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: reason})
 		return 1
 	}
-	command := flag.String("command", "", "migrate or serve")
-	path := flag.String("config", "", "absolute path to versioned non-secret configuration")
+	command := flag.String("command", "", "migrate, recover or serve")
+	path := flag.String("config", "", "absolute path to versioned non-secret configuration (accounting_failure_deadline defaults to 3s, minimum 1s; restart to change)")
+	recoveryRun := flag.String("recovery-run", "", "stable UUID identifying one offline recovery")
+	recoverySource := flag.String("recovery-source", "", "immutable source backup identity")
+	recoveryTarget := flag.String("recovery-target", "", "explicit isolated restored database name")
 	flag.Parse()
-	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "serve") {
+	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "recover" && *command != "serve") {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: "configuration_rejected"})
 		return 2
 	}
@@ -46,9 +49,9 @@ func run() int {
 	if err != nil {
 		return fail("configuration_rejected")
 	}
-	maintenance := *command == "migrate"
+	maintenance := *command != "serve"
 	var material config.Material
-	if maintenance {
+	if *command == "migrate" {
 		material, err = c.ReadDatabaseMaterial()
 	} else {
 		material, err = c.ReadMaterial()
@@ -76,14 +79,34 @@ func run() int {
 	}
 	startup, cancel := context.WithTimeout(ctx, startupLimit)
 	defer cancel()
-	if maintenance {
+	if *command == "migrate" {
 		if err = database.Migrate(startup, pool); err != nil {
 			return fail("database_unavailable")
 		}
+		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "success", Reason: "none", SchemaRevision: database.ExpectedRevision})
 		return 0
 	}
-	if err = database.VerifyServing(startup, pool); err != nil {
-		return fail("database_unavailable")
+	if *command == "serve" {
+		if err = database.VerifyServing(startup, pool); err != nil {
+			return fail("database_unavailable")
+		}
+	}
+	if *command == "recover" {
+		portal := auth.New(pool, c, material, auth.Google())
+		journal, journalErr := auth.NewOCIJournal(auth.OCIJournalOptions{
+			Endpoint:  "https://objectstorage." + c.Journal.Region + ".oraclecloud.com",
+			Namespace: c.Journal.Namespace, Bucket: c.Journal.Bucket,
+			TenancyOCID: c.Journal.TenancyOCID, UserOCID: c.Journal.UserOCID, Fingerprint: c.Journal.Fingerprint,
+			PrivateKeyPEM: material.JournalSigningKey,
+		})
+		if journalErr != nil {
+			return fail("configuration_rejected")
+		}
+		portal.SetDeletionJournal(journal, c.Journal.RepositoryID, c.Journal.CoverageFloor, c.Journal.CoverageHash)
+		if err = portal.RecoverOffline(startup, auth.RecoveryRequest{RunID: *recoveryRun, Source: *recoverySource, Target: *recoveryTarget}); err != nil {
+			return fail("recovery_unconfirmed")
+		}
+		return 0
 	}
 	debug.SetMemoryLimit(1536 << 20)
 	var rlimit unix.Rlimit
@@ -130,9 +153,13 @@ func run() int {
 			return fail("journal_unavailable")
 		}
 	}
-	credit := quota.NewWithRuntime(db)
-	credit.SetDiagnostics(logger)
-	defer credit.Close()
+	accounting := quota.NewWithRuntime(db)
+	accounting.SetDiagnostics(logger)
+	if err := accounting.ConfigureAccountingFailureDeadline(c.AccountingDeadline()); err != nil {
+		accounting.Close()
+		return fail("configuration_rejected")
+	}
+	defer accounting.Close()
 	observations := diagnostic.NewObservations(logger.Emit, func(ctx context.Context) (string, error) {
 		sample, err := portal.SampleCleanupSignals(ctx)
 		if err != nil {
@@ -162,33 +189,13 @@ func run() int {
 			return "none", nil
 		}
 	})
-	dataPlane, err := relay.New(portal, credit, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
+	dataPlane, err := relay.NewProtected(portal, accounting, relay.Options{ListenAddress: c.RelayTCP.Listen, WebSocketListenAddress: c.RelayWebSocket.Listen, WebRTCListenAddress: c.RelayWebRTC.Listen, WebSocketHostname: c.WSSHostname, Diagnostics: logger})
 	if err != nil {
 		logger.Emit(diagnostic.Event{Event: "service.serving", Outcome: "failed", Reason: "listener_failed"})
 		return 1
 	}
 	defer dataPlane.Close()
 	srv.SetRendezvousMetrics(dataPlane.RendezvousCountV1, dataPlane.RendezvousCountV2)
-	portal.SetAccountChanged(func(change auth.AccountChange) func() {
-		if change.DiscardCredit {
-			credit.Invalidate(change.AccountID)
-		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
-			change.CloseAll = true
-		}
-		if change.CloseAll || dataPlane.AccountSessions(change.AccountID) > change.SessionLimit {
-			return dataPlane.DetachAccount(change.AccountID)
-		}
-		return nil
-	})
-	portal.SetCapacitySampler(func(ctx context.Context, account string) (auth.CapacitySample, error) {
-		sample, err := portal.SampleActiveGrants(ctx, account)
-		if err != nil {
-			return sample, err
-		}
-		count := dataPlane.AccountSessions(account)
-		sample.LiveSessions = &count
-		return sample, nil
-	})
 	decode := func(values []string) []ma.Multiaddr {
 		addresses := make([]ma.Multiaddr, 0, len(values))
 		for _, value := range values {
@@ -232,7 +239,7 @@ func run() int {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
-			safe, _, sampled := credit.ClockHealth()
+			safe, _, sampled := accounting.ClockHealth()
 			observations.Clock(safe, sampled, time.Now())
 			select {
 			case <-ctx.Done():

@@ -52,14 +52,15 @@ type accountActionSpec struct {
 }
 
 var accountActions = map[string]accountActionSpec{
-	"approve":    {map[string]bool{"Pending": true}, "account_approved", "Active", false, true},
-	"deny":       {map[string]bool{"Pending": true, "Active": true, "Suspended": true}, "account_denied", "Denied", true, false},
-	"assign":     {map[string]bool{"Active": true}, "plan_assigned", "", false, true},
-	"suspend":    {map[string]bool{"Active": true}, "account_suspended", "Suspended", true, false},
-	"reactivate": {map[string]bool{"Suspended": true}, "account_reactivated", "Active", false, false},
-	"review":     {map[string]bool{"Denied": true}, "account_reviewed", "Pending", false, false},
-	"revoke":     {map[string]bool{"Pending": true, "Active": true, "Suspended": true, "Denied": true}, "credentials_revoked", "", true, false},
-	"override":   {map[string]bool{"Active": true}, "quota_overridden", "", false, false},
+	"recovery-review": {map[string]bool{"Pending": true, "Active": true, "Suspended": true, "Denied": true}, "account_reviewed", "", false, false},
+	"approve":         {map[string]bool{"Pending": true}, "account_approved", "Active", false, true},
+	"deny":            {map[string]bool{"Pending": true, "Active": true, "Suspended": true}, "account_denied", "Denied", true, false},
+	"assign":          {map[string]bool{"Active": true}, "plan_assigned", "", false, true},
+	"suspend":         {map[string]bool{"Active": true}, "account_suspended", "Suspended", true, false},
+	"reactivate":      {map[string]bool{"Suspended": true}, "account_reactivated", "Active", false, false},
+	"review":          {map[string]bool{"Denied": true}, "account_reviewed", "Pending", false, false},
+	"revoke":          {map[string]bool{"Pending": true, "Active": true, "Suspended": true, "Denied": true}, "credentials_revoked", "", true, false},
+	"override":        {map[string]bool{"Active": true}, "quota_overridden", "", false, false},
 }
 
 func reasonOK(reason string) bool {
@@ -226,8 +227,10 @@ func (s *Server) sessionDigest(r *http.Request, version uint64) []byte {
 }
 
 type adminAccountRow struct {
+	RecoveryHeld                                               bool
 	ID, Email, Status, PlanID, WeeklyOverride, SessionOverride string
 	Revision                                                   int64
+	Usage                                                      *accountUsageQuery
 }
 type adminPlanRow struct {
 	ID, Name string
@@ -344,14 +347,14 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	rows, err = s.db.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
+	rows, err = s.db.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision,recovery_review_hold FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
 	if err != nil {
 		fail(w, 503)
 		return
 	}
 	for rows.Next() {
 		var x adminAccountRow
-		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.WeeklyOverride, &x.SessionOverride, &x.Revision) != nil {
+		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.WeeklyOverride, &x.SessionOverride, &x.Revision, &x.RecoveryHeld) != nil {
 			rows.Close()
 			fail(w, 503)
 			return
@@ -369,8 +372,8 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if data.Selected != "" {
-		var selected adminAccountRow
-		err = s.db.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.WeeklyOverride, &selected.SessionOverride, &selected.Revision)
+		selected, readErr := s.adminAccountUsage(r.Context(), data.Selected)
+		err = readErr
 		if err == pgx.ErrNoRows {
 			fail(w, 404)
 			return
@@ -461,7 +464,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	update := func(unitCtx context.Context) {
 		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
-		if applied != nil && s.accountChanged != nil {
+		if applied != nil {
 			closeConnections = s.accountChanged(*applied)
 		}
 	}
@@ -620,7 +623,14 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 			oldSessions = nil
 		}
 	}
-	if action == "approve" || action == "assign" {
+	if action == "recovery-review" {
+		tag, err := tx.Exec(ctx, `UPDATE public.accounts SET recovery_review_hold=false,revision=revision+1 WHERE id=$1 AND recovery_review_hold`, target)
+		e = err
+		if e == nil && tag.RowsAffected() != 1 {
+			fail(w, 409)
+			return
+		}
+	} else if action == "approve" || action == "assign" {
 		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,plan_id=$3,revision=revision+1 WHERE id=$1`, target, newStatus, plan)
 		if e == nil {
 			_, e = tx.Exec(ctx, `UPDATE public.quota_plans SET first_assigned_at=COALESCE(first_assigned_at,clock_timestamp()) WHERE id=$1`, plan)
@@ -656,14 +666,6 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		fail(w, 503)
 		return
 	}
-	var committed int64
-	if !security && newStatus == "Active" {
-		e = tx.QueryRow(ctx, `SELECT COALESCE((SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date),0)`, target).Scan(&committed)
-		if e != nil {
-			fail(w, 503)
-			return
-		}
-	}
 	var commitErr error
 	if s.commitAccount != nil {
 		commitErr = s.commitAccount(ctx, tx)
@@ -680,10 +682,10 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		}
 		s.uncertainAccounts.Store(target, uncertainMutation{revision: actual + 1, generation: newGeneration, status: newStatus})
 	}
-	// The caller performs local invalidation and connection I/O after releasing
-	// the identity and account guards, before sending success or uncertainty.
-	closeAll := security || committed > weeklyBytes || commitErr != nil
-	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, DiscardCredit: security || committed > weeklyBytes || commitErr != nil}
+	// Auth invalidates under account protection after SQL completion, then runs
+	// the returned connection-close I/O after releasing the logical guards.
+	closeAll := security || commitErr != nil
+	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, InvalidateEligibility: security || commitErr != nil}
 	*uncertain = commitErr != nil
 }
 

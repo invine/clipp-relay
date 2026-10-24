@@ -72,7 +72,7 @@ correctness and recovery gates are.
 23. As a new owner, I want Google registration to create one Pending account, so that repeated login cannot create duplicates.
 24. As an owner, I want all four account states explained, so that I understand whether relay access is available.
 25. As an owner, I want current Quota Committed displayed, so that I understand conservative consumption rather than a misleading exact-byte total.
-26. As an owner, I want historical weekly committed totals, so that I can review usage without percentages based on today's plan.
+26. As an owner, I want historical weekly recorded totals, so that I can review usage without percentages based on today's plan.
 27. As an owner, I want aggregate session and Login Grant capacity, so that I can see limits without a device registry.
 28. As an owner, I want portal-only logout, so that leaving the website does not revoke Clipp credentials.
 29. As an owner, I want Sign out everywhere, so that all portal and relay credentials are invalidated together.
@@ -95,8 +95,8 @@ correctness and recovery gates are.
 46. As an operator, I want exact live admission counts, so that concurrent authentication cannot bypass session limits.
 47. As an operator, I want a newly authenticated same-Peer-ID connection to replace the old session, so that stale authority cannot survive.
 48. As an operator, I want both circuit endpoints charged, so that sending and receiving each consume allowance.
-49. As an operator, I want finite prepaid local credit, so that forwarding needs no SQL per buffer or unconfirmed credit.
-50. As an operator, I want no restart/disconnect refunds, so that reconnecting cannot reset committed usage.
+49. As an operator, I want bounded periodic observed accounting, so that forwarding needs no SQL per buffer and fail-closed accounting health.
+50. As an operator, I want no restart/disconnect refunds, so that reconnecting cannot reset recorded usage.
 51. As an operator, I want Monday UTC rollover without unused allowance carryover, so that weekly policy is unambiguous.
 52. As an operator, I want stock circuit/resource safety limits, so that account quotas are complemented by bounded work.
 53. As an operator, I want exact-connection authentication before HOP/Rendezvous, so that another connection inherits no permission.
@@ -130,8 +130,8 @@ correctness and recovery gates are.
 - Account owns complete authorization, exchange/refresh/access checking,
   profile/admin reads, account policy, plan creation/archival, revocation and
   deletion operations, including atomic durable audit.
-- Quota owns account-week funding/reconciliation, observed endpoint consumption,
-  local credit generations/invalidation and rollover, with one in-flight allocation.
+- Quota owns account-week observations, periodic settlement/reconciliation,
+  accounting health, policy invalidation and rollover, with one unresolved immutable batch per account-week.
 - Relay owns exact-connection auth, replacement, account invalidation,
   reservation/Rendezvous ownership, aggregate capacity and drain. Peer IDs and
   session/timer generations live only here in memory.
@@ -202,10 +202,9 @@ need explicit account reassignment; archive blocks new assignments but preserves
 existing ones. Only admins assign plans/overrides. Redeploy never resets them.
 
 Use the accepted light portal shell and explanatory non-Active views. Active
-profile: current-week **Quota committed** doughnut and compact aggregate session/
-Login Grant capacity table; no individual devices/sessions/grants. Explain unused
-funded credit, exceeded and zero-allowance states. Historical weeks show absolute
-committed bytes, not percentages against today's plan. Policy/usage reads are
+profile: current-week **Recorded Relay Usage** doughnut and compact aggregate session/
+Login Grant capacity table; no individual devices/sessions/grants. Explain periodic confirmation lag, conservative endpoint counting, exceeded and zero-allowance states. Historical weeks show absolute
+recorded bytes, not percentages against today's plan. Policy/usage reads are
 one consistent DB snapshot, live counts a separate sample. Admin workspace has
 service totals, account table and selected-account mutation pane with shared
 styling, reason/revision controls. Detailed layout/polish remains deferred.
@@ -373,34 +372,35 @@ Old-connection tail can charge replacement account; without association record
 aggregate unattributed bytes only. No history reconstruction. Async cutoff may
 allow buffered frames to finish; no proven numerical tail/overshoot bound.
 
-Quota Committed debits at funding, not each observed byte. One account-week local
-balance serves all sessions, funded before protected permission. One in-flight
-allocation, no speculative next block; allocate ≤64 KiB (65,536 bytes) or remaining
-allowance. Disconnect keeps unused live credit. No refund on disconnect/graceful
-exit/crash; restart abandons old unspent credit while debit remains. A 64KiB
-allocation with 10KiB observed shows 64KiB committed, 54KiB locally usable.
+The accepted [periodic accounting specification](../periodic-relay-accounting/spec.md)
+I3–I8 governs observed accounting. Quota aggregates account/week observations in
+memory without SQL per callback and targets settlement every second. Pending
+observations are distinct from one immutable in-flight batch per account-week.
+Total and latest operation/sequence/delta receipt commit atomically. Lost replies
+retry the same payload once; stale/conflicting sequences cannot become new debits.
+No historical ledger or replay is supported. Startup loads confirmed usage only;
+crash may lose unsettled observations, never duplicate confirmed traffic.
 
-Persist account-week total/sequence and one latest operation receipt with stable
-server operation ID/grant amount, not per-block history. Commit before local
-install; reconcile same operation after lost response, apply once, recheck
-account/week/generation. No later allocation until reconciliation; old sequences
-cannot become new debits. Cancellation/invalidation/restart cannot install late
-credit. Unconfirmed credit is unspendable; exhausted confirmed credit with
-uncertain funding closes sessions as temporary failure, not false quota exhaustion.
+Eligibility includes confirmed plus locally unsettled bytes exactly once. Full
+overrun is recorded; allowance is soft with no fixed byte bound. Monday selects
+processing-time weeks and preserves prior-week pending work. Healthy new-week
+eligibility permits continuing sessions without reauthentication solely for Monday.
+The monotonic accounting failure deadline defaults to3s, requires at least1s,
+and closes all affected sessions independently of blocked workers. Empty-account
+reads can refresh health; reads cannot conceal unresolved writes.
 
-Monday discards old credit. Valid sessions may continue after confirmed new-week
-funding without mandatory sign-in/reset; DB failure closes them rather than
-spending old credit. Reporter observations belong to processing week. Exhaustion
-closes all account sessions, not selected circuits. DB outage permits established
-sessions only within valid local credit/deadlines; portal/callback/exchange/
-refresh/discovery/new auth fail closed, with no cached policy/DB substitute.
+Policy edits preserve recorded and pending usage. Equality means exhausted;
+quota reductions/invalidation apply immediately under account protection.
+Session-cap reductions below live count close all, then permit bounded reconnects.
+Revocation/suspension removes authority but does not erase pending observations.
+Deletion attempts a bounded final flush without waiving independent journal proof;
+serialized finalization retains confirmed current-week usage and seals old UUIDs.
+Drain settles continuing traffic and final tails within its original deadline.
 
-Reassignment/override applies this week without resetting usage. New traffic cap
-below committed invalidates credit/closes all; equality preserves funded remainder
-but no more allocation. Session cap below live count closes all then admits
-reconnects within limit, no chosen survivors. Apply within ten seconds after
-commit/local invalidation, no credential revocation for quota edit. Increases
-do not refund discarded/committed credit.
+Schema13 performs the explicit offline prepaid test reset under stop/migrate/serve;
+there is no dual serving mode. Accounts, credentials, plans, audit, journal and
+confirmed observed totals/receipts are preserved. Reset never repeats at startup.
+See [operator cutover](../../docs/operator/accounting-migration.md).
 
 Short Read Committed transactions, explicit locks and authoritative recheck.
 Bound DB work admission before logical-guard waits. Lock order:
@@ -431,8 +431,8 @@ sessions. Same-peer replacement guards both accounts in order, swaps after check
 | --- | --- |
 | accounts | Random ID; unique live issuer/sub; latest permitted metadata/times; four-state status; plan/nullable overrides; admin revision; credential generation; private deletion/recovery markers. Active requires plan. Completed deletion detaches identity/presentation/assignment and hides row. |
 | quota_plans | ID/name/nonnegative allowances/revision/create/archive/first-assignment markers; assigned allowances immutable. |
-| weekly_quota_usage | Unique account/Monday-window, committed bytes, sequence/latest receipt; committed may exceed reduced cap. |
-| retained_quota_usage | Key-version/identity-HMAC/window/committed only, no account IDs/claims/plan/state. |
+| weekly_relay_usage | Unique account/Monday-window, nonnegative recorded bytes, monotonic sequence and latest operation/delta receipt; full overrun retained. |
+| retained_quota_usage | Key-version/identity-HMAC/window/recorded only, no account IDs/claims/plan/state. |
 | authorization_transactions | Flow/client/exact redirect, client-state digest/S256 challenge, Google-state/nonce/browser-binding digests, optional account/generation, create/expiry/one-use status; recoverable outer state only RAM. |
 | authorization_codes | Unique digest/version, account/generation/client/redirect/challenge, issue/expiry/consumed. |
 | login_grants | Account/generation/client type, refresh generation, create/use/idle/absolute/termination; no device identity. |
@@ -965,8 +965,8 @@ guaranteed headroom for control work; pending CONNECT also consumes HOP capacity
 | Application cleanup | One worker startup/every minute, ≤30s pass, ≤250 rows/transaction, ordinary DB deadlines/indexed fair batches |
 | Cleanup age | Warn >1h, escalate 12h, required 24h purge breach recorded; no expiry grace |
 | Clock observation | Startup/every 60s, request/response uncertainty interval; after-lock operation sample can refresh |
-| Clock warning/closed | Interval not contained ±1s warns; not within ±5s, >1s uncertainty, or last usable sample >5m closes time-sensitive issuance/admission/allocation |
-| Clock recovery | 3 valid ordinary-cadence samples, no deadline extension/credit revival/reset; no readiness/liveness dependency |
+| Clock warning/closed | Interval not contained ±1s warns; not within ±5s, >1s uncertainty, or last usable sample >5m closes time-sensitive issuance/admission/settlement |
+| Clock recovery | 3 valid ordinary-cadence samples, no deadline extension/accounting revival/reset; no readiness/liveness dependency |
 | Relay startup readyz | Every 5s, timeout 2s, 120 failures (~10m) |
 | Relay readyz | Every 5s, timeout 2s, 1 failure/1 success |
 | Relay livez | Every 10s, timeout 2s, 3 failures |
@@ -984,8 +984,8 @@ without chart editing global settings. Connection health object creation is not
 startup connectivity/schema proof. Acceptance probe is not authenticated role/
 schema/leaf-rollout validation; fresh pre-serving checks remain independent of
 unprovisioned reload role. Relative clock comparison cannot detect shared wrong
-UTC; infrastructure synchronization required. Existing sessions keep only confirmed
-credit/deadlines through clock fault; unsafe week transition/regression fails
+UTC; infrastructure synchronization required. Existing sessions remain subject to accounting health and fixed deadlines
+through clock fault; unsafe week transition/regression fails
 closed even below warning thresholds. Cancellation never proves rollback.
 
 #### Recovery work and storage
@@ -1034,7 +1034,7 @@ no relay disk queue/log files.
 
 Private aggregate metrics and redacted stdout transitions cover lifecycle,
 discovery, connections/pending handshakes/sessions/reservations/circuits/streams,
-capacity/denial/auth outcomes, charged/unattributed bytes, allocation/stranding,
+capacity/denial/auth outcomes, charged/unattributed bytes, settlement uncertainty/accounting health,
 retries, DB/provider failure/latency, restarts/drain, memory/CPU/storage, certificate,
 cleanup/pending deletion and proven backup/recovery freshness. Bounded enum labels
 and diagnostic queues only, no account/peer series, arbitrary URLs/errors/content.
@@ -1104,10 +1104,9 @@ mock interface solely to test an internal helper.
   Synthetic secret canaries across app/infrastructure logs, metrics, callbacks
   and unauthorized retained storage.
 - Real PostgreSQL 17/18 and both modes: known rollback, ambiguous commit, lost
-  allocation response, late receipts, cancellation/crash/restart, Monday-crossing
-  waits, clock faults and outage. No duplicate install/unconfirmed spend/ordinary
-  refund; both-end charging, all-session cutoff and honest attribution caveats.
-- Quota reductions below/equal committed, zero limits, session reductions, repeated
+  settlement response, late receipts, cancellation/crash/restart, Monday-crossing
+  waits, clock faults and outage. No duplicate debit or stale authority revival; both-end charging, all-session cutoff and honest attribution caveats.
+- Quota reductions below/equal effective usage, zero limits, session reductions, repeated
   delete/register and exactly-once retained import, missing/rotating peppers,
   bounded indexed cleanup and immediate validity despite purge lag. Schema checks
   enforce typed privacy allowlist/no raw credentials, not replace safe SQL/logging.

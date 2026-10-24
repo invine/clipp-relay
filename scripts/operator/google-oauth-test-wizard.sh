@@ -198,6 +198,7 @@ TOTAL_STAGES=19
 START_AT=1
 usage() {
   printf 'Usage: %s [--start-at 1|12|16]\n' "$0"
+  printf '  Chart accounting.failureDeadline defaults to 3s (whole seconds, minimum 1s); review private values before rendering. Changes require relay restart.\n'
   printf '  --start-at 12  Reload saved setup, verify prerequisites, and begin at the CPU capacity check.\n'
   printf '  --start-at 16  Verify the installed release and completed migrations, then resume serving/TLS live checks.\n'
 }
@@ -521,6 +522,7 @@ for name in "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$C
 say "All four application Secret names exist. Existing Secret contents were not read or replaced."
 
 stage "Review the chart values and PostgreSQL target"
+say "Review accounting.failureDeadline in the private chart values: default 3s, minimum 1s, whole seconds. It controls the accounting outage cutoff and takes effect after relay restart; keep a bounded tolerance."
 ask CLIPP_TEST_GO_REPO "Paste the isolated Go relay checkout path (Enter uses the canonical integration worktree):"
 if [[ -z "$CLIPP_TEST_GO_REPO" ]]; then CLIPP_TEST_GO_REPO="/Users/invine/src/go/clipp-relay"; fi
 require_file "$CLIPP_TEST_GO_REPO/charts/clipp-relay/examples/bundled-test-values.yaml"
@@ -1101,9 +1103,9 @@ printf '%s' "$migration_job_json" | ruby -rjson -e '
 migration_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$migration_job" -c migrate --tail=100) || die "Could not verify the completed migration log."
 printf '%s\n' "$migration_logs" | ruby -rjson -e '
   records = STDIN.each_line.map { |line| JSON.parse(line) rescue nil }.compact
-  abort "migration revision 10 completion record missing" unless records.any? { |r| r["msg"] == "migration complete" && r["revision"] == 10 }
+  abort "migration revision 13 completion record missing" unless records.any? { |r| r["event"] == "service.startup" && r["outcome"] == "success" && r["schema_revision"] == 13 }
 ' || die "Migration completion or schema revision could not be verified."
-say "The migration Job completed and reported schema revision 10."
+say "The migration Job completed and reported schema revision 13."
 }
 
 if [[ "$START_AT" != 16 ]]; then

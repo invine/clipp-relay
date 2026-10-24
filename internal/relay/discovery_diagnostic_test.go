@@ -117,7 +117,7 @@ func TestDiscoveryHTTPOutcomesShareBoundedDiagnostics(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestIntegratedHTTPRelayAndReadinessRowsMatchCatalog(t *testing.T) {
 	app := service.New()
 	app.SetPublicHandler(portal.Handler())
 	app.SetDiagnostics(log.Emit)
-	r, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1, Diagnostics: log})
+	r, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1, Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}

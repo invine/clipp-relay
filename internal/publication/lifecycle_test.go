@@ -175,7 +175,7 @@ func TestFakeServiceRealClientDrainRestartAndRediscovery(t *testing.T) {
 	cfg := Config{TCP: Transport{Enabled: true, PublicPort: tcpPort, Service: ServiceRef{Namespace: "clipp", Name: "relay-tcp"}}, WebRTC: Transport{Enabled: true, PublicPort: udpPort, Service: ServiceRef{Namespace: "clipp", Name: "relay-udp"}}}
 	start := func() (*relay.Server, *relay.Discovery, *Controller) {
 		t.Helper()
-		s, err := relay.New(lifecycleAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/" + strconv.Itoa(tcpPort), WebRTCListenAddress: "/ip4/127.0.0.1/udp/" + strconv.Itoa(udpPort) + "/webrtc-direct"})
+		s, err := relay.New(lifecycleAuthority{}, testAccounting{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/" + strconv.Itoa(tcpPort), WebRTCListenAddress: "/ip4/127.0.0.1/udp/" + strconv.Itoa(udpPort) + "/webrtc-direct"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,4 +259,13 @@ func TestFakeServiceRealClientDrainRestartAndRediscovery(t *testing.T) {
 	if h.ID() != deviceID {
 		t.Fatalf("device identity changed: %s -> %s", deviceID, h.ID())
 	}
+}
+
+func (lifecycleAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
+	work(ctx)
+	return ctx.Err() == nil
+}
+func (lifecycleAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
+	work(ctx)
+	return ctx.Err() == nil
 }

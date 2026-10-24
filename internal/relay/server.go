@@ -41,11 +41,19 @@ const AuthProtocol protocol.ID = "/clipp/relay-auth/1.0.0"
 const hopProtocol protocol.ID = "/libp2p/circuit/relay/0.2.0/hop"
 
 type Authority interface {
+	WithServingUnit(context.Context, func(context.Context)) bool
+	WithAccountGuards(context.Context, []string, func(context.Context)) bool
 	AuthenticateRelay(context.Context, string) (auth.RelayCredential, error)
 }
-type Credit interface {
-	Ensure(context.Context, string, int64) (quota.Result, error)
-	Take(context.Context, string, int64, int64) (quota.Result, error)
+type Accounting interface {
+	Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error)
+	Observe(string, int64) error
+	AccountingFailed(string)
+	AccountingReady(string) bool
+	AccountingCurrent(string, uint64) bool
+	AccountingSessions(string, int)
+	ClosureCurrent(quota.ClosureOutcome) bool
+	FlushAllAccounting(context.Context) error
 }
 
 // DiagnosticSink is the shared, catalog-validated application event boundary.
@@ -86,7 +94,11 @@ type Server struct {
 	authority         Authority
 	diagnostics       DiagnosticSink
 	connectionInfo    map[network.Conn]connectionDiagnostic
-	credit            Credit
+	accounting        Accounting
+	accountingCloses  chan struct{}
+	accountingPending map[network.Conn]struct{}
+	accountingStop    chan struct{}
+	accountingDone    chan struct{}
 	maxSessions       int
 	tcpEnabled        bool
 	wsEnabled         bool
@@ -207,9 +219,78 @@ func hopStatus(s network.Stream, status pbv2.Status) {
 	}
 }
 
+// NewProtected installs the sole production accounting and policy composition.
+func NewProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server, error) {
+	if a == nil || q == nil {
+		return nil, errors.New("relay authority and quota required")
+	}
+	return newServer(a, q, opts, func(s *Server) error {
+		if err := a.ConfigureRelayProtection(q, s); err != nil {
+			return err
+		}
+		q.SetSettlementProtection(a)
+		s.accounting = q
+		s.accountingCloses = make(chan struct{}, 1)
+		s.accountingPending = make(map[network.Conn]struct{})
+		s.accountingStop = make(chan struct{})
+		s.accountingDone = make(chan struct{})
+		if err := q.StartAccounting(s.accountingClosure); err != nil {
+			return err
+		}
+		go func() {
+			defer close(s.accountingDone)
+			for {
+				select {
+				case <-s.accountingStop:
+					return
+				case <-s.accountingCloses:
+					for {
+						s.mu.Lock()
+						var conn network.Conn
+						for c := range s.accountingPending {
+							conn = c
+							break
+						}
+						s.mu.Unlock()
+						if conn == nil {
+							break
+						}
+						_ = conn.Close()
+						s.mu.Lock()
+						delete(s.accountingPending, conn)
+						s.mu.Unlock()
+					}
+				}
+			}
+		}()
+		return nil
+	})
+}
+func (s *Server) accountingClosure(out quota.ClosureOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.accounting.ClosureCurrent(out) {
+		return
+	}
+	for v := range s.byAccount[out.AccountID] {
+		s.endSessionLocked(v, out.Reason)
+		// Physical connections remain bounded by libp2p's resource manager.
+		// Keep every detached connection until the fixed close worker finishes.
+		s.accountingPending[v.conn] = struct{}{}
+		select {
+		case s.accountingCloses <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // New starts an inbound-only, Noise-authenticated relay with a new in-RAM
-// identity. It returns only after the listener and fixed resource profile exist.
-func New(a Authority, credit Credit, opts Options) (*Server, error) {
+// identity. Controlled authority adapters must provide all admission operations.
+func New(a Authority, accounting Accounting, opts Options) (*Server, error) {
+	return newServer(a, accounting, opts, nil)
+}
+
+func newServer(a Authority, accounting Accounting, opts Options, installProtection func(*Server) error) (*Server, error) {
 	if opts.ListenAddress == "" && opts.WebSocketListenAddress == "" && opts.WebRTCListenAddress == "" {
 		return nil, errors.New("relay listener required")
 	}
@@ -233,7 +314,7 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, credit: credit, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, accounting: accounting, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -258,6 +339,13 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 		return nil, err
 	}
 	s.Host = h
+	if installProtection != nil {
+		if err := installProtection(s); err != nil {
+			_ = h.Close()
+			_ = manager.Close()
+			return nil, err
+		}
+	}
 	h.Network().Notify(&network.NotifyBundle{ConnectedF: s.connected, DisconnectedF: s.disconnected})
 	h.SetStreamHandler(AuthProtocol, s.handleAuth)
 	h.SetStreamHandler(RendezvousV1Protocol, s.handleRendezvous)
@@ -275,22 +363,37 @@ func New(a Authority, credit Credit, opts Options) (*Server, error) {
 func (s *Server) Close() error {
 	var result error
 	s.closeOnce.Do(func() {
+		if s.accountingStop != nil {
+			close(s.accountingStop)
+		}
 		s.mu.Lock()
 		draining := s.closing
 		s.closing = true
-		conns := make([]network.Conn, 0, len(s.byConn))
+		// Accounting may already have detached authority and queued its physical
+		// close when the worker observes stop. Own both sets during shutdown;
+		// Host.Close remains the final transport backstop.
+		conns := make(map[network.Conn]struct{}, len(s.byConn)+len(s.accountingPending))
+		for c := range s.accountingPending {
+			conns[c] = struct{}{}
+		}
 		for c, v := range s.byConn {
 			if draining {
 				v.endReason = "draining"
 			}
-			conns = append(conns, c)
+			conns[c] = struct{}{}
 		}
 		s.mu.Unlock()
-		for _, c := range conns {
+		for c := range conns {
 			_ = c.Close()
 		}
 		_ = s.stock.Close()
 		_ = s.Host.Close()
+		if s.accountingDone != nil {
+			<-s.accountingDone
+		}
+		s.mu.Lock()
+		clear(s.accountingPending)
+		s.mu.Unlock()
 		result = s.manager.Close()
 	})
 	return result
@@ -420,6 +523,9 @@ func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 		delete(s.byPeer, v.conn.RemotePeer())
 	}
 	delete(s.byAccount[v.account], v)
+	if s.accounting != nil {
+		s.accounting.AccountingSessions(v.account, len(s.byAccount[v.account]))
+	}
 	if len(s.byAccount[v.account]) == 0 {
 		delete(s.byAccount, v.account)
 	}
@@ -437,6 +543,9 @@ func (s *Server) permitted(st network.Stream) (bool, string) {
 	}
 	if v == nil || !time.Now().Before(v.deadline) {
 		return false, "authentication_required"
+	}
+	if s.accounting != nil && !s.accounting.AccountingReady(v.account) {
+		return false, "accounting_unavailable"
 	}
 	s.hopHandlers++
 	return true, ""
@@ -494,7 +603,13 @@ func (s *Server) Drain(ctx context.Context) error {
 		pending := s.hopHandlers
 		s.mu.Unlock()
 		if pending == 0 && s.tracer.active.Load() == 0 {
-			return s.Close()
+			err := s.Close()
+			if s.accounting != nil && ctx.Err() == nil {
+				if flushErr := s.accounting.FlushAllAccounting(ctx); err == nil {
+					err = flushErr
+				}
+			}
+			return err
 		}
 		select {
 		case <-ctx.Done():
@@ -510,6 +625,9 @@ func (s *Server) authoritativeConn(id peer.ID) network.Conn {
 	defer s.mu.Unlock()
 	v := s.byPeer[id]
 	if s.closing || v == nil || !time.Now().Before(v.deadline) || v.conn.IsClosed() {
+		return nil
+	}
+	if s.accounting != nil && !s.accounting.AccountingReady(v.account) {
 		return nil
 	}
 	return v.conn
@@ -556,14 +674,7 @@ func (s *Server) authenticateObserved(ctx context.Context, c network.Conn, raw s
 	admit := func(unitCtx context.Context) {
 		deadline, renew, code, oldToClose, installed = s.authenticateSerial(unitCtx, c, raw, &reason)
 	}
-	unitOK := true
-	if bounded, ok := s.authority.(interface {
-		WithServingUnit(context.Context, func(context.Context)) bool
-	}); ok {
-		unitOK = bounded.WithServingUnit(ctx, admit)
-	} else {
-		admit(ctx)
-	}
+	unitOK := s.authority.WithServingUnit(ctx, admit)
 	if (!unitOK || code != "") && installed != nil {
 		s.mu.Lock()
 		owned := s.byConn[c] == installed
@@ -646,21 +757,15 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 			s.mu.Unlock()
 		}
 	}
-	if guarded, ok := s.authority.(interface {
-		WithAccountGuards(context.Context, []string, func(context.Context)) bool
-	}); ok {
-		if !guarded.WithAccountGuards(ctx, accounts, admit) {
-			*reason = admissionFailure(ctx)
-			return time.Time{}, 0, "temporarily_unavailable", oldToClose, installed
-		}
-	} else {
-		admit(ctx)
+	if !s.authority.WithAccountGuards(ctx, accounts, admit) {
+		*reason = admissionFailure(ctx)
+		return time.Time{}, 0, "temporarily_unavailable", oldToClose, installed
 	}
 	return deadline, renew, code, oldToClose, installed
 }
 
 // The account guard remains held from the authoritative recheck through local
-// credit funding and registry installation. A committed policy change therefore
+// accounting eligibility and registry installation. A committed policy change therefore
 // cannot be followed by installation of an older observed credential.
 func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn, reason *string) (time.Time, time.Duration, string) {
 	if ctx.Err() != nil {
@@ -675,7 +780,10 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		*reason = "account_mismatch"
 		return time.Time{}, 0, "account_change_requires_new_connection"
 	}
-	if _, err := s.credit.Ensure(ctx, credential.AccountID, credential.Generation); err != nil {
+	var eligibility quota.AccountingEligibility
+	var quotaErr error
+	eligibility, quotaErr = s.accounting.Eligibility(ctx, credential.AccountID, credential.Generation)
+	if err := quotaErr; err != nil {
 		if errors.Is(err, quota.ErrExhausted) {
 			*reason = "" // The fixed authentication catalog has no quota-exhausted pair.
 			return time.Time{}, 0, "quota_exhausted"
@@ -698,7 +806,7 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 	// Uniform 75–85% of admitted lifetime, independent of a stable Peer ID.
 	renewFraction := 0.75 + float64(binary.LittleEndian.Uint64(jitter[:])%10001)/100000
 	s.mu.Lock()
-	if ctx.Err() != nil || s.closing || c.IsClosed() {
+	if ctx.Err() != nil || s.closing || c.IsClosed() || s.accounting != nil && !s.accounting.AccountingCurrent(credential.AccountID, eligibility.Revision) {
 		s.mu.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
@@ -740,6 +848,9 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		s.byAccount[v.account] = map[*session]struct{}{}
 	}
 	s.byAccount[v.account][v] = struct{}{}
+	if s.accounting != nil {
+		s.accounting.AccountingSessions(v.account, len(s.byAccount[v.account]))
+	}
 	if t := s.preauth[c]; t != nil {
 		t.Stop()
 		delete(s.preauth, c)

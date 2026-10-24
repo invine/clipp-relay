@@ -31,7 +31,7 @@ func (j *failingHead) ReadHead(context.Context) (auth.JournalHead, string, error
 
 func TestQualifiedJournalFailureAndRecoveryAreSafeTransitions(t *testing.T) {
 	var got []diagnostic.Event
-	s := auth.New(nil, config.Config{}, config.Material{}, auth.Provider{})
+	s := newTestServer(t, nil, config.Config{}, config.Material{}, auth.Provider{})
 	s.SetTransitions(diagnostic.NewTransitions(func(e diagnostic.Event) { got = append(got, e) }))
 	j := &failingHead{fail: true}
 	s.SetDeletionJournal(j, "test-repository", 0, strings.Repeat("0", 64))

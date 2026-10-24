@@ -239,9 +239,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.uncertainAccounts.Store(id, uncertainDeletion{operationID: operation})
 			}
-			if s.accountChanged != nil {
-				closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
-			}
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, InvalidateEligibility: true})
 			admitted, uncertain = true, err != nil
 		}); accountGuardErr != nil {
 			markGuardDiagnostic(r, accountGuardErr)
@@ -255,6 +253,9 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	if !admitted {
 		return
+	}
+	if s.deletionAccounting != nil {
+		s.deletionAccounting.BeginAccountingDeletion(id)
 	}
 	if closeConnections != nil {
 		closeConnections()
@@ -329,24 +330,35 @@ func (s *Server) ValidateDeletionJournal(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.verifyCommittedChain(ctx, head, 0, "")
+	return s.verifyRecordedChain(ctx, head, 0, "")
 }
 
-// verifyCommittedChain checks a fixed head snapshot from the operator's
+// verifyRecordedChain checks a fixed head snapshot from the operator's
 // attested floor. An immutable upload is not committed merely because its
 // sequence is below the head: failed head comparisons can leave orphan events
 // at the same sequence. Only a hash-linked path ending at the head is proof.
 // OCI pages and the reachable set are bounded; the caller bounds total work.
-func (s *Server) verifyCommittedChain(ctx context.Context, head JournalHead, targetSeq int64, targetHash string) error {
+func (s *Server) verifyRecordedChain(ctx context.Context, head JournalHead, targetSeq int64, targetHash string) error {
+	_, err := s.committedDeletionAccounts(ctx, head, targetSeq, targetHash, false)
+	return err
+}
+
+type deletionProof struct {
+	account  string
+	parent   *deletionProof
+	included bool
+}
+
+func (s *Server) committedDeletionAccounts(ctx context.Context, head JournalHead, targetSeq int64, targetHash string, collect bool) ([]string, error) {
 	if head.Sequence == head.CoverageFloor {
 		if targetSeq != 0 {
-			return errJournalTargetUncommitted
+			return nil, errJournalTargetUncommitted
 		}
-		return nil
+		return nil, nil
 	}
 	expected := head.CoverageFloor + 1
-	reachable := map[string]bool{head.CoverageHash: false}
-	current := map[string]bool{}
+	reachable := map[string]*deletionProof{head.CoverageHash: {}}
+	current := map[string]*deletionProof{}
 	cursor := ""
 	lastName := ""
 scan:
@@ -355,17 +367,17 @@ scan:
 		names, next, err := s.deletionJournal.ListEvents(bounded, cursor)
 		stop()
 		if err != nil || len(names) > 250 {
-			return errors.New("journal coverage unavailable")
+			return nil, errors.New("journal coverage unavailable")
 		}
 		for _, name := range names {
 			if !strings.HasPrefix(name, "journal/events/") || name <= lastName {
-				return errors.New("journal event name invalid")
+				return nil, errors.New("journal event name invalid")
 			}
 			lastName = name
 			key := strings.TrimPrefix(name, "journal/")
 			var sequence int64
 			if _, err := fmt.Sscanf(strings.TrimPrefix(key, "events/"), "%020d-", &sequence); err != nil {
-				return errors.New("journal event sequence invalid")
+				return nil, errors.New("journal event sequence invalid")
 			}
 			if sequence <= head.CoverageFloor {
 				continue
@@ -375,13 +387,13 @@ scan:
 			}
 			if sequence > expected {
 				if sequence != expected+1 || len(current) == 0 {
-					return errors.New("journal coverage gap or conflict")
+					return nil, errors.New("journal coverage gap or conflict")
 				}
-				reachable, current = current, map[string]bool{}
+				reachable, current = current, map[string]*deletionProof{}
 				expected = sequence
 			}
 			if sequence != expected {
-				return errors.New("journal coverage gap or conflict")
+				return nil, errors.New("journal coverage gap or conflict")
 			}
 			bounded, stop := context.WithTimeout(ctx, 5*time.Second)
 			data, readErr := s.deletionJournal.ReadEvent(bounded, key)
@@ -401,9 +413,14 @@ scan:
 				continue
 			}
 			if included, ok := reachable[event.PreviousHash]; ok {
-				current[event.Hash] = included || sequence == targetSeq && event.Hash == targetHash
+				node := &deletionProof{included: included.included || sequence == targetSeq && event.Hash == targetHash}
+				if collect {
+					node.account = event.AccountID
+					node.parent = included
+				}
+				current[event.Hash] = node
 				if len(current) > 2048 {
-					return errors.New("journal event fanout exceeds bound")
+					return nil, errors.New("journal event fanout exceeds bound")
 				}
 			}
 		}
@@ -411,18 +428,24 @@ scan:
 			break
 		}
 		if next <= cursor {
-			return errors.New("journal cursor did not advance")
+			return nil, errors.New("journal cursor did not advance")
 		}
 		cursor = next
 	}
 	included, ok := current[head.Hash]
 	if !ok || expected != head.Sequence {
-		return errors.New("journal head hash not covered")
+		return nil, errors.New("journal head hash not covered")
 	}
-	if targetSeq != 0 && !included {
-		return errJournalTargetUncommitted
+	if targetSeq != 0 && !included.included {
+		return nil, errJournalTargetUncommitted
 	}
-	return nil
+	accounts := []string{}
+	for node := included; node != nil; node = node.parent {
+		if node.account != "" {
+			accounts = append(accounts, node.account)
+		}
+	}
+	return accounts, nil
 }
 
 func (s *Server) eventFor(ctx context.Context, x pendingDeletion, h JournalHead) (deletionEvent, []byte, error) {
@@ -603,7 +626,7 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 		return err
 	}
 	if head.Sequence >= event.Sequence {
-		err = s.verifyCommittedChain(ctx, head, event.Sequence, event.Hash)
+		err = s.verifyRecordedChain(ctx, head, event.Sequence, event.Hash)
 		if err == nil {
 			if err = s.proveEvent(ctx, fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID), data); err != nil {
 				return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
@@ -645,6 +668,14 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 }
 
 func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error {
+	// Settlement acquires Auth account protection itself. Attempt it before any
+	// finalization row lock, and reserve the remaining budget for deletion even
+	// when pending usage cannot be preserved. Journal proof precedes this call.
+	if s.deletionAccounting != nil {
+		flushCtx, stop := context.WithTimeout(ctx, time.Second)
+		_ = s.deletionAccounting.FlushDeletionAccounting(flushCtx, x.Account)
+		stop()
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return deletionDatabaseError(err)
@@ -676,13 +707,14 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	if err = tx.QueryRow(ctx, `SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&week); err != nil {
 		return deletionDatabaseError(err)
 	}
-	err = tx.QueryRow(ctx, `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, x.Account, week).Scan(&committed)
+	usageQuery := `SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=$2`
+	err = tx.QueryRow(ctx, usageQuery, x.Account, week).Scan(&committed)
 	if err != nil && err != pgx.ErrNoRows {
 		return deletionDatabaseError(err)
 	}
 	if err == nil {
 		digest := s.digest(s.CurrentPepper, "retained-quota", googleIssuer+"\x00"+*subject)
-		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes) VALUES($1,$2,$3,$4)`, s.CurrentPepper, digest, week, committed); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes) VALUES($1,$2,$3,$4)`, s.CurrentPepper, digest, week, committed); err != nil {
 			return deletionDatabaseError(err)
 		}
 	}
@@ -708,6 +740,7 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 		err = tx.Commit(ctx)
 	}
 	if err == nil {
+		s.forgetDeletedAccounting(x.Account)
 		return nil
 	}
 	checkCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
@@ -715,9 +748,16 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	var complete bool
 	checkErr := s.db.QueryRow(checkCtx, `SELECT d.completed_at IS NOT NULL AND a.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_deleted') FROM public.deletion_operations d JOIN public.accounts a ON a.id=d.account_id WHERE d.id=$1`, x.ID).Scan(&complete)
 	if checkErr == nil && complete {
+		s.forgetDeletedAccounting(x.Account)
 		return nil
 	}
 	return errDeletionFinalizationUnconfirmed
+}
+
+func (s *Server) forgetDeletedAccounting(account string) {
+	if s.deletionAccounting != nil {
+		s.deletionAccounting.ForgetAccounting(account)
+	}
 }
 
 // importRetainedUsage runs inside the fresh Pending account's creation
@@ -751,7 +791,7 @@ func (s *Server) importRetainedUsage(ctx context.Context, tx pgx.Tx, accountID, 
 	for version := range s.Peppers {
 		digest := s.digest(version, "retained-quota", googleIssuer+"\x00"+subject)
 		var amount int64
-		err = tx.QueryRow(ctx, `SELECT committed_bytes FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3 FOR UPDATE`, version, digest, week).Scan(&amount)
+		err = tx.QueryRow(ctx, `SELECT recorded_bytes FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3 FOR UPDATE`, version, digest, week).Scan(&amount)
 		if err == pgx.ErrNoRows {
 			continue
 		}
@@ -769,7 +809,8 @@ func (s *Server) importRetainedUsage(ctx context.Context, tx pgx.Tx, accountID, 
 	if matches == 0 {
 		return nil
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,$2,$3,0,NULL,0)`, accountID, week, committed); err != nil {
+	openingQuery := `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,$2,$3,0,NULL,0)`
+	if _, err = tx.Exec(ctx, openingQuery, accountID, week, committed); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `DELETE FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3`, matchVersion, matchDigest, week)

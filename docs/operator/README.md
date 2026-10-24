@@ -30,3 +30,27 @@ wizard or a direct clip transfer does not establish forced relay-only transfer.
 
 For application startup, readiness and drain diagnostics, see the
 [service lifecycle row examples](service-logging.md).
+
+Review `accounting.failureDeadline` in the private chart values before rendering
+or resuming the wizard. It maps to runtime `accounting_failure_deadline`, defaults
+to `"3s"`, accepts whole seconds of at least `"1s"`, and requires relay restart.
+The wizard copies that default from the bundled example and preserves edits to
+existing private values. It does not add an environment or flag policy override.
+The cutoff is independent of blocked persistence: unresolved writes close all
+affected sessions at the deadline and temporarily deny admission until recovery.
+
+[Offline accounting recovery](offline-recovery.md) describes the isolated local
+reconciliation command, independent journal proof, credential invalidation,
+Recovery Review Hold and explicit current administrator review. Its fixture
+acceptance does not establish live backup or provider/cluster recovery.
+
+During graceful Relay Drain, already admitted circuits continue to settle usage.
+After circuit completion and physical closure, Relay attempts the final accounting
+flush using the **remaining original drain context**. There is no additional
+accounting retry budget after the drain deadline. A second signal cancels that
+context and closes remaining sessions; uncertain/unpersisted observations may be
+lost. Quota cleanup cancels workers and bounds its wait at 100 ms even when a
+faulty dependency ignores cancellation. Confirmed totals and compact receipts
+survive restart; restart never reconstructs lost observations or live sessions.
+
+Offline accounting schema transitions: [observed accounting cutover](accounting-migration.md).

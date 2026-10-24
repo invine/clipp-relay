@@ -91,3 +91,12 @@ The preflight makes no cluster changes. Without a context it reports required ex
 For uninstall, first stop serving and verify termination or fence. Inspect Argo prune and Kubernetes deletion plans, retain operator-owned namespace, Secrets, issuers, NSGs, DNS, PostgreSQL and journal, and preserve stable routing resources until the network slot has drained. A release rename or database-mode change requires a deliberate data handoff, never an empty target fallback. Do not delete the database or repurpose a Secret name as a shortcut.
 
 The Argo example pins a full illustrative Git SHA that must be replaced with the approved commit containing this chart. It has no automated sync. The example does not authorize applying the Application.
+
+`accounting.failureDeadline` renders as JSON `accounting_failure_deadline`.
+It defaults to `"3s"` and changes take effect on relay restart. Chart values
+accept whole seconds from `"1s"` through `"9223372036s"`; the runtime also accepts
+Go duration strings such as `"1500ms"`, always at least one second. Zero cannot
+disable cutoff. Select a bounded outage tolerance: when pending accounting stays
+unhealthy for the configured monotonic duration, all affected account sessions
+close and new admission fails temporarily. Successful reads cannot conceal
+unresolved writes. Confirmed exhaustion uses the separate quota outcome.

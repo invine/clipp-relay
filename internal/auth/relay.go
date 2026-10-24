@@ -34,10 +34,13 @@ func (s *Server) AuthenticateRelay(ctx context.Context, raw string) (RelayCreden
 		err := s.db.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,COALESCE(a.sessions_override,p.sessions),t.expires_at,clock_timestamp()
 			FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id
 			JOIN public.accounts a ON a.id=g.account_id JOIN public.quota_plans p ON p.id=a.plan_id
-			WHERE t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp()
+			WHERE NOT a.recovery_review_hold AND t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp()
 			AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&result.AccountID, &status, &grantGeneration, &result.Generation, &result.SessionLimit, &result.ExpiresAt, &dbNow)
 		after := time.Now()
 		if err == nil {
+			if s.relayCredentialHook != nil {
+				s.relayCredentialHook()
+			}
 			if _, uncertain := s.uncertainAccounts.Load(result.AccountID); uncertain {
 				// Wait for a still-in-flight Commit to release the account row, then
 				// re-read authority. A failed reconciliation keeps admission closed.

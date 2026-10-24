@@ -13,13 +13,32 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
+// AccountingFailureDeadline is an optional duration string. Explicit empty or
+// null JSON values are invalid; omission uses the documented default.
+type AccountingFailureDeadline string
+
+func (d *AccountingFailureDeadline) UnmarshalJSON(data []byte) error {
+	var value string
+	if string(data) == "null" || json.Unmarshal(data, &value) != nil || value == "" {
+		return errors.New("accounting_failure_deadline must be a duration of at least 1s")
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < time.Second {
+		return errors.New("accounting_failure_deadline must be a duration of at least 1s")
+	}
+	*d = AccountingFailureDeadline(value)
+	return nil
+}
+
 type Config struct {
-	Version       int    `json:"version"`
-	PortalOrigin  string `json:"portal_origin"`
-	WSSHostname   string `json:"wss_hostname"`
-	PublicClients struct {
+	AccountingFailureDeadline AccountingFailureDeadline `json:"accounting_failure_deadline,omitempty"`
+	Version                   int                       `json:"version"`
+	PortalOrigin              string                    `json:"portal_origin"`
+	WSSHostname               string                    `json:"wss_hostname"`
+	PublicClients             struct {
 		AndroidRedirect   string `json:"android_redirect"`
 		ExtensionRedirect string `json:"extension_redirect"`
 	} `json:"public_clients"`
@@ -234,7 +253,19 @@ func Load(path string) (Config, error) {
 	return c, nil
 }
 
+// AccountingDeadline returns the validated setting, with the omission default.
+func (c Config) AccountingDeadline() time.Duration {
+	if c.AccountingFailureDeadline == "" {
+		return 3 * time.Second
+	}
+	duration, _ := time.ParseDuration(string(c.AccountingFailureDeadline))
+	return duration
+}
+
 func (c Config) Validate() error {
+	if c.AccountingDeadline() < time.Second {
+		return errors.New("accounting_failure_deadline must be a duration of at least 1s")
+	}
 	if c.Version != 1 {
 		return errors.New("unsupported config version")
 	}

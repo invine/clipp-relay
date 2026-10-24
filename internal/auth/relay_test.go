@@ -11,7 +11,7 @@ import (
 func TestRelayCredentialSeparatesDatabaseOutageFromInvalidToken(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "relay-credential", "relay-credential@example.test", "")
 	var account string
 	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject='relay-credential'`).Scan(&account); err != nil {

@@ -26,8 +26,8 @@ func TestRealJSLibp2pTCPInterop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(modules, "libp2p")); err != nil {
 		t.Fatal(err)
 	}
-	credit := &recordingCredit{counts: map[string]int64{}}
-	s, err := New(twoAuthority{}, credit, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	accounting := &recordingAccounting{counts: map[string]int64{}}
+	s, err := New(twoAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,8 +76,8 @@ func TestRealJSLibp2pTCPInterop(t *testing.T) {
 	if !strings.Contains(string(out), `"ok":true`) {
 		t.Fatalf("missing JS success evidence: %s", out)
 	}
-	if credit.count("a") == 0 || credit.count("b") == 0 {
-		t.Fatalf("JS endpoint charges missing: a=%d b=%d", credit.count("a"), credit.count("b"))
+	if accounting.count("a") == 0 || accounting.count("b") == 0 {
+		t.Fatalf("JS endpoint charges missing: a=%d b=%d", accounting.count("a"), accounting.count("b"))
 	}
 	t.Logf("JS wire evidence: %s", strings.TrimSpace(string(out)))
 }

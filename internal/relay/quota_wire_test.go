@@ -16,52 +16,47 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-type finiteCredit struct {
-	mu        sync.Mutex
-	remaining int64
-	funded    bool
+// Controlled accounting adapter records full callbacks and closes on exhaustion.
+type finiteAccounting struct {
+	wireAccounting
+	mu       sync.Mutex
+	observed int64
+	server   *Server
 }
 
-func (c *finiteCredit) Ensure(_ context.Context, id string, _ int64) (quota.Result, error) {
-	if id != "a" {
-		return quota.Result{Committed: quota.BlockBytes, Usable: quota.BlockBytes}, nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.funded {
-		c.remaining = quota.BlockBytes
-		c.funded = true
-	}
-	if c.remaining == 0 {
-		return quota.Result{}, quota.ErrExhausted
-	}
-	return quota.Result{Committed: quota.BlockBytes, Usable: c.remaining}, nil
+func (c *finiteAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+	return quota.AccountingEligibility{}, nil
 }
-func (c *finiteCredit) Take(_ context.Context, id string, _ int64, n int64) (quota.Result, error) {
+func (c *finiteAccounting) Observe(id string, n int64) error {
 	if id != "a" {
-		return quota.Result{Committed: quota.BlockBytes, Usable: quota.BlockBytes}, nil
+		return nil
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if n > c.remaining {
-		return quota.Result{}, quota.ErrTemporary
+	c.observed += n
+	exhausted := c.observed >= 65536
+	c.mu.Unlock()
+	if exhausted {
+		return quota.ErrExhausted
 	}
-	c.remaining -= n
-	return quota.Result{Committed: quota.BlockBytes, Usable: c.remaining}, nil
+	return nil
+}
+func (c *finiteAccounting) AccountingFailed(id string) {
+	c.server.detachAccount(id, "quota_exhausted")()
 }
 
-func TestConfirmedPartialCreditClosesAllAccountSessionsOnExhaustion(t *testing.T) {
+func TestObservedUsageClosesAllAccountSessionsOnExhaustion(t *testing.T) {
 	runAccountCutoff(t, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
 }
 
 func runAccountCutoff(t *testing.T, opts Options, transport string) {
 	t.Helper()
-	credit := &finiteCredit{}
-	s, err := New(twoAuthority{}, credit, opts)
+	accounting := &finiteAccounting{}
+	s, err := New(twoAuthority{}, accounting, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	accounting.server = s
 	clients := make([]host.Host, 3)
 	for i := range clients {
 		clients[i], err = libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))

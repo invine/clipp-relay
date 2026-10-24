@@ -31,13 +31,10 @@ func (wireAuthority) AuthenticateRelay(_ context.Context, token string) (auth.Re
 	return auth.RelayCredential{AccountID: "a", SessionLimit: 5, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
 }
 
-type wireCredit struct{}
+type wireAccounting struct{}
 
-func (wireCredit) Ensure(context.Context, string, int64) (quota.Result, error) {
-	return quota.Result{Committed: 65536, Usable: 65536}, nil
-}
-func (wireCredit) Take(context.Context, string, int64, int64) (quota.Result, error) {
-	return quota.Result{Committed: 65536, Usable: 65536}, nil
+func (wireAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+	return quota.AccountingEligibility{}, nil
 }
 
 func sendWireAuth(t *testing.T, ctx context.Context, h host.Host, id peer.ID) {
@@ -78,28 +75,24 @@ func (twoAuthority) AuthenticateRelay(_ context.Context, token string) (auth.Rel
 	return auth.RelayCredential{AccountID: token, SessionLimit: 5, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
 }
 
-type recordingCredit struct {
+type recordingAccounting struct {
+	wireAccounting
 	mu     sync.Mutex
 	counts map[string]int64
 }
 
-func (c *recordingCredit) Ensure(context.Context, string, int64) (quota.Result, error) {
-	return quota.Result{Committed: 65536, Usable: 65536}, nil
+func (c *recordingAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+	return quota.AccountingEligibility{}, nil
 }
-func (c *recordingCredit) Take(_ context.Context, id string, _ int64, n int64) (quota.Result, error) {
-	c.mu.Lock()
-	c.counts[id] += n
-	c.mu.Unlock()
-	return quota.Result{Committed: 65536, Usable: 65536}, nil
-}
-func (c *recordingCredit) count(id string) int64 {
+
+func (c *recordingAccounting) count(id string) int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.counts[id]
 }
 
 func TestTCPAuthGatesStockHOP(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +119,7 @@ func TestTCPAuthGatesStockHOP(t *testing.T) {
 }
 
 func TestFullCapacitySamePeerReplacementIsOneForOne(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +171,7 @@ func TestFullCapacitySamePeerReplacementIsOneForOne(t *testing.T) {
 }
 
 func TestSessionCapRejectsDistinctPeerAndRecovers(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +220,7 @@ func TestSessionCapRejectsDistinctPeerAndRecovers(t *testing.T) {
 }
 
 func TestSTOPPinsAuthenticatedPhysicalConnection(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,10 +279,10 @@ func (sameAccountAuthority) AuthenticateRelay(_ context.Context, token string) (
 	return auth.RelayCredential{AccountID: "a", SessionLimit: 5, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
 }
 
-func runOpaqueCircuit(t *testing.T, authority Authority, opts Options, transport string) *recordingCredit {
+func runOpaqueCircuit(t *testing.T, authority Authority, opts Options, transport string) *recordingAccounting {
 	t.Helper()
-	credit := &recordingCredit{counts: map[string]int64{}}
-	s, err := New(authority, credit, opts)
+	accounting := &recordingAccounting{counts: map[string]int64{}}
+	s, err := New(authority, accounting, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,22 +363,36 @@ func runOpaqueCircuit(t *testing.T, authority Authority, opts Options, transport
 		}
 	}
 	_ = st.Close()
-	return credit
+	return accounting
 }
 
 func TestCrossAccountCircuitForwardsOpaqueBytesAndChargesBothEndpoints(t *testing.T) {
-	credit := runOpaqueCircuit(t, twoAuthority{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
-	if credit.count("a") == 0 || credit.count("b") == 0 {
-		t.Fatalf("endpoint charges a=%d b=%d", credit.count("a"), credit.count("b"))
+	accounting := runOpaqueCircuit(t, twoAuthority{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
+	if accounting.count("a") == 0 || accounting.count("b") == 0 {
+		t.Fatalf("endpoint charges a=%d b=%d", accounting.count("a"), accounting.count("b"))
 	}
 }
 
 func TestSameAccountCircuitChargesBothEndpoints(t *testing.T) {
-	credit := runOpaqueCircuit(t, sameAccountAuthority{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
-	if got := credit.count("a"); got < int64(2*len("opaque relayed bytes")) {
+	accounting := runOpaqueCircuit(t, sameAccountAuthority{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"}, "tcp")
+	if got := accounting.count("a"); got < int64(2*len("opaque relayed bytes")) {
 		t.Fatalf("same-account endpoint charge = %d", got)
 	}
-	if got := credit.count("b"); got != 0 {
+	if got := accounting.count("b"); got != 0 {
 		t.Fatalf("charged other account %d", got)
 	}
+}
+
+func (wireAccounting) Observe(string, int64) error              { return nil }
+func (wireAccounting) AccountingFailed(string)                  {}
+func (wireAccounting) AccountingReady(string) bool              { return true }
+func (wireAccounting) AccountingCurrent(string, uint64) bool    { return true }
+func (wireAccounting) AccountingSessions(string, int)           {}
+func (wireAccounting) ClosureCurrent(quota.ClosureOutcome) bool { return true }
+func (wireAccounting) FlushAllAccounting(context.Context) error { return nil }
+func (c *recordingAccounting) Observe(id string, n int64) error {
+	c.mu.Lock()
+	c.counts[id] += n
+	c.mu.Unlock()
+	return nil
 }

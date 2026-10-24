@@ -9,10 +9,10 @@ import (
 	"clipp-relay/internal/quota"
 )
 
-func TestOwnerProfileShowsCommittedUsageAndAbsoluteHistory(t *testing.T) {
+func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "quota-profile", "quota-profile@example.test", "")
 	var id string
 	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject='quota-profile'`).Scan(&id); err != nil {
@@ -22,16 +22,23 @@ func TestOwnerProfileShowsCommittedUsageAndAbsoluteHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := quota.New(db.Pool)
+	q.SetSettlementProtection(s)
 	t.Cleanup(q.Close)
-	if _, err := q.Take(context.Background(), id, 0, 10*1024); err != nil {
+	if _, err := q.Eligibility(context.Background(), id, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,(date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7),12345,1,$2,12345)`, id, "386dfe14-2f37-45e7-ace8-0cbcc3851469"); err != nil {
+	if err := q.Observe(id, 10*1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.FlushAccounting(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,(date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7),12345,1,$2,12345)`, id, "386dfe14-2f37-45e7-ace8-0cbcc3851469"); err != nil {
 		t.Fatal(err)
 	}
 	out := portalRequest(s, "GET", "/", cookie, nil, "")
 	body := out.Body.String()
-	if out.Code != 200 || !strings.Contains(body, "Quota committed: 64 KiB") || !strings.Contains(body, "12.06 KiB") || !strings.Contains(body, "includes unused funded credit") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Unavailable") || strings.Contains(body, "Quota committed: 10 KiB") {
+	if out.Code != 200 || !strings.Contains(body, "Recorded Relay Usage: 10 KiB") || !strings.Contains(body, "12.06 KiB") || !strings.Contains(body, "periodic confirmation lag") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Unavailable") {
 		t.Fatalf("profile: %d %s", out.Code, body)
 	}
 	const grantID = "312ff0d4-b531-4240-a0d5-9012805863fb"
@@ -74,7 +81,7 @@ func TestOwnerProfileShowsCommittedUsageAndAbsoluteHistory(t *testing.T) {
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET plan_id='0d083fee-7828-4ebf-8eef-70a18e8cfcdb' WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
-	if zero := portalRequest(s, "GET", "/", cookie, nil, ""); zero.Code != 200 || !strings.Contains(zero.Body.String(), "Zero allowance") || !strings.Contains(zero.Body.String(), "exceeds the current zero allowance") {
+	if zero := portalRequest(s, "GET", "/", cookie, nil, ""); zero.Code != 200 || !strings.Contains(zero.Body.String(), "Zero allowance") || !strings.Contains(zero.Body.String(), "exceeds the current allowance") {
 		t.Fatalf("zero allowance: %d %s", zero.Code, zero.Body.String())
 	}
 }

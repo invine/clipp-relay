@@ -1,6 +1,6 @@
 deployment:
   phase: stopped
-  expectedSchema: 10
+  expectedSchema: 13
 image:
   repository: registry.example.test/clipp-relay
   digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -76,3 +76,7 @@ networkPolicy:
   dnsPodSelector:
     k8s-app: kube-dns
   httpsCidrs: ["0.0.0.0/0"]
+
+# Accounting cutoff uses whole seconds (minimum 1s); changes require restart.
+accounting:
+  failureDeadline: "3s"

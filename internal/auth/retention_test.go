@@ -22,7 +22,7 @@ func retainedDigest(key []byte, subject string) []byte {
 
 func TestMaintenanceKeepsLiveGrantAndRetentionBoundaries(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	id := "5f3d87a7-8f7b-478f-8a4b-8adcfde941d7"
 	grant := "bfca2164-f32b-40a9-bb1f-cd0d51c682a9"
@@ -33,13 +33,13 @@ VALUES($1,'https://accounts.google.com','retention-boundary','boundary@example.t
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id=$1`, id)
 	for _, offset := range []int{0, 12, 13} {
-		_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes)
+		_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes)
 VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*$2,10,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f',10)`, id, offset)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_quota_usage WHERE account_id=$1`, id)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id=$1`, id)
 	_, err = db.Pool.Exec(ctx, `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,current_refresh_generation,created_at,last_used_at,idle_expires_at,absolute_expires_at)
 VALUES($1,$2,0,'electron',2,clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '7 days',clock_timestamp()+interval '30 days')`, grant, id)
 	if err != nil {
@@ -52,7 +52,7 @@ VALUES(decode(repeat('ab',32),'hex'),$1,$2,1,clock_timestamp()-interval '2 days'
 		t.Fatal(err)
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.refresh_generations WHERE grant_id=$1`, grant)
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,decode(repeat('cd',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7,10),
 ($1,decode(repeat('ef',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,10)`, s.CurrentPepper)
 	if err != nil {
@@ -73,7 +73,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var oldHistory, oldRetained, oldAudit int
-		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-91`, id).Scan(&oldHistory)
+		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-91`, id).Scan(&oldHistory)
 		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('cd',32),'hex')`).Scan(&oldRetained)
 		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id='2d41eb9e-c19a-4dcf-9094-f64123115573'`).Scan(&oldAudit)
 		if oldHistory == 0 && oldRetained == 0 && oldAudit == 0 {
@@ -82,7 +82,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 		time.Sleep(50 * time.Millisecond)
 	}
 	var history, retained, expiredRetained, liveHash, account, oldAudit, currentAudit int
-	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_quota_usage WHERE account_id=$1`, id).Scan(&history); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1`, id).Scan(&history); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('ef',32),'hex')`).Scan(&retained); err != nil {
@@ -110,7 +110,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 
 func TestCompletedDeletionPurgesHiddenAccountButKeepsDetachedAudit(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	id := "3184eac8-27c9-4308-9a32-031103e84a4a"
 	op := "458c6c6d-a0d2-4d93-b092-f969e17c8cd0"
@@ -133,12 +133,12 @@ VALUES($1,clock_timestamp()-interval '2 hours','account_deleted',$2)`, audit, id
 		t.Fatal(err)
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.audit_events WHERE id=$1`, audit)
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes)
 VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,8,1,'506d5f55-fd80-48a5-bd4e-c99db74b8389',8)`, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_quota_usage WHERE account_id=$1`, id)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id=$1`, id)
 	maintainCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { s.Maintain(maintainCtx); close(done) }()
@@ -161,7 +161,7 @@ VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,8,1,'506
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.deletion_operations WHERE id=$1`, op).Scan(&operation); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_quota_usage WHERE account_id=$1`, id).Scan(&quota); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1`, id).Scan(&quota); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id=$1 AND account_id=$2`, audit, id).Scan(&auditCount); err != nil {
@@ -176,9 +176,9 @@ func TestRetainedUsagePreventsPrematurePepperRetirement(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "pepper-missing-registration"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	ctx := context.Background()
-	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES(993,decode(repeat('fa',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,100)`)
 	if err != nil {
 		t.Fatal(err)
@@ -211,9 +211,9 @@ VALUES(993,decode(repeat('fa',32),'hex'),date_trunc('week',clock_timestamp() AT 
 
 func TestCleanupErrorDoesNotStarveLaterRetentionClass(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
-	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,decode(repeat('da',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7,1)`, s.CurrentPepper)
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ VALUES('80975492-9579-4df7-8aa6-1ce9757be7ca',clock_timestamp()-interval '181 da
 	if err := lock.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	restarted := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	restarted := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	restartCtx, stopRestart := context.WithCancel(ctx)
 	restartDone := make(chan struct{})
 	go func() { restarted.Maintain(restartCtx); close(restartDone) }()
@@ -287,11 +287,11 @@ func TestDuplicateLogicalRetainedUsageFailsRegistration(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "duplicate-retained-usage"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	s.Peppers[993] = make([]byte, 32)
 	ctx := context.Background()
 	for _, version := range []uint64{s.CurrentPepper, 993} {
-		_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+		_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,100)`, version, retainedDigest(s.Peppers[version], d.subject))
 		if err != nil {
 			t.Fatal(err)
@@ -318,7 +318,7 @@ func TestConcurrentRegistrationImportsRetainedUsageOnce(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "concurrent-retained-usage"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	for attempt := range 2 {
 		t.Run(fmt.Sprintf("attempt-%d", attempt), func(t *testing.T) {
 			concurrentRegistrationImportsRetainedUsageOnce(t, db, d, s)
@@ -330,7 +330,7 @@ func concurrentRegistrationImportsRetainedUsageOnce(t *testing.T, db *database.R
 	t.Helper()
 	ctx := context.Background()
 	t.Cleanup(func() {
-		for _, table := range []string{"portal_sessions", "weekly_quota_usage", "audit_events"} {
+		for _, table := range []string{"portal_sessions", "weekly_relay_usage", "audit_events"} {
 			_, err := db.Pool.Exec(ctx, `DELETE FROM public.`+table+` WHERE account_id IN (SELECT id FROM public.accounts WHERE subject=$1)`, d.subject)
 			if err != nil {
 				t.Errorf("clean up %s: %v", table, err)
@@ -341,7 +341,7 @@ func concurrentRegistrationImportsRetainedUsageOnce(t *testing.T, db *database.R
 		}
 	})
 	digest := retainedDigest(s.Peppers[s.CurrentPepper], d.subject)
-	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`, s.CurrentPepper, digest)
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&accounts); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Pool.QueryRow(ctx, `SELECT u.committed_bytes,u.sequence FROM public.weekly_quota_usage u JOIN public.accounts a ON a.id=u.account_id WHERE a.subject=$1 AND u.week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`, d.subject).Scan(&committed, &sequence); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT u.recorded_bytes,u.sequence FROM public.weekly_relay_usage u JOIN public.accounts a ON a.id=u.account_id WHERE a.subject=$1 AND u.week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`, d.subject).Scan(&committed, &sequence); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=$1`, digest).Scan(&remaining); err != nil {
@@ -384,7 +384,7 @@ VALUES($1,$2,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,123)`
 
 func TestHiddenAccountBatchDoesNotMonopolizeOtherAccounts(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	oldID := "042d4989-6695-4b1f-901b-2e9defb53903"
 	newID := "c9d3edce-e472-4a0d-b8ed-e45e20b753c1"
@@ -432,7 +432,7 @@ VALUES(decode(lpad(to_hex(5001),64,'0'),'hex'),$1,$2,0,decode(repeat('cd',32),'h
 
 func TestHiddenAccountCursorPagesAcrossMoreThanOneBatch(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.New(db.Pool, c, m, newProvider(t).endpoints())
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
 	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at)
 SELECT gen_random_uuid(),'https://accounts.google.com','fair-page-'||n,'page@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '91 days'
@@ -465,5 +465,42 @@ FROM public.accounts WHERE subject LIKE 'fair-page-%'`, s.CurrentPepper)
 	}
 	if remaining != 0 {
 		t.Fatalf("cursor did not visit all 257 eligible accounts: %d remain", remaining)
+	}
+}
+
+func TestMaintenanceRetainsThirteenRecordedWindowsAndRemovesHiddenChildren(t *testing.T) {
+	c, m, db := fixture(t)
+	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
+	ctx := context.Background()
+	id := "c573732c-18d0-4ca3-835f-a2bd2cd07b54"
+	hidden := "c573732c-18d0-4ca3-835f-a2bd2cd07b55"
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at,status,plan_id) VALUES($1,'https://accounts.google.com','recorded-retention','recorded@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp(),'Active','6dd09395-51a0-451c-96b3-716e6038e870'),($2,'https://accounts.google.com','recorded-hidden','hidden@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp()-interval '91 days','Pending',NULL)`, id, hidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id IN ($1,$2)`, id, hidden)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id IN ($1,$2)`, id, hidden)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) SELECT $1::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*n,10,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f'::uuid,10 FROM generate_series(0,13) n UNION ALL SELECT $2::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,20,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f',20`, id, hidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintain, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.Maintain(maintain); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var retained, hiddenCount int
+		err = db.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1),(SELECT count(*) FROM public.accounts WHERE id=$2)`, id, hidden).Scan(&retained, &hiddenCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if retained == 13 && hiddenCount == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recorded retention: windows=%d hidden=%d", retained, hiddenCount)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

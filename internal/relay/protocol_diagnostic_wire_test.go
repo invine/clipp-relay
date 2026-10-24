@@ -23,7 +23,7 @@ func TestReservationDiagnosticsDistinguishAuthenticationAndStockRenewal(t *testi
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestCircuitDiagnosticsUseOnlyStockAggregateEvidence(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestRendezvousDiagnosticsFollowVersionAndLeaseOutcome(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestRendezvousRepeatedMissesRemainBounded(t *testing.T) {
 	out := &lockedOutput{}
 	log := diagnostic.New(out)
 	defer log.Close()
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,7 +22,7 @@ func TestPublicClientCodeAndRefresh(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	session := loginAs(t, s, d, "oauth-account", "oauth@example.test", "")
 	_, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='oauth-account'`)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestAllRegisteredClientsAndBlockedStates(t *testing.T) {
 			c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 			c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
 			d := newProvider(t)
-			s := auth.New(db.Pool, c, m, d.endpoints())
+			s := newTestServer(t, db.Pool, c, m, d.endpoints())
 			cookie := loginAs(t, s, d, "states-"+status, "states@example.test", "")
 			if status != "Pending" {
 				_, e := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status=$1,plan_id=CASE WHEN $1='Active' THEN '6dd09395-51a0-451c-96b3-716e6038e870'::uuid ELSE NULL END WHERE subject=$2`, status, "states-"+status)
@@ -165,7 +165,7 @@ func TestRefreshReplayInvalidatesOnlyOwningGrant(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "replay-account", "replay@example.test", "")
 	_, e := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='replay-account'`)
 	if e != nil {
@@ -204,7 +204,7 @@ func TestIdentityFenceCancelsUnknownGoogleFlow(t *testing.T) {
 	d.mu.Lock()
 	d.subject = "fenced-unknown-subject"
 	d.mu.Unlock()
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
 	e := s.WithIdentityFence("fenced-unknown-subject", func() error { return nil })
 	if e != nil {
@@ -228,7 +228,7 @@ func TestIdentityFenceCancelsUnknownGoogleFlow(t *testing.T) {
 func TestIdentityFenceOverflowCancelsUnfinishedFlows(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
 	for i := 0; i < 4097; i++ {
 		subject := fmt.Sprintf("fenced-%04d", i)
@@ -239,7 +239,7 @@ func TestIdentityFenceOverflowCancelsUnfinishedFlows(t *testing.T) {
 	if w := complete(s, state, binding); w.Code == 303 {
 		t.Fatal("overflow preserved an unfinished flow")
 	}
-	if w := complete(auth.New(db.Pool, c, m, d.endpoints()), state, binding); w.Code == 303 {
+	if w := complete(newTestServer(t, db.Pool, c, m, d.endpoints()), state, binding); w.Code == 303 {
 		t.Fatal("restart revived a flow")
 	}
 	state, binding = start(t, s, nil)
@@ -252,7 +252,7 @@ func TestCodeBindingExpiryAndGeneration(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "binding-account", "binding@example.test", "")
 	_, e := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='binding-account'`)
 	if e != nil {
@@ -317,7 +317,7 @@ func TestDeletedIdentityCannotCompleteOldGoogleFlow(t *testing.T) {
 	d.mu.Lock()
 	d.subject = "deletion-fence-subject"
 	d.mu.Unlock()
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "deletion-fence-subject", "delete@example.test", "")
 	_ = cookie
 	state, binding := start(t, s, nil)
@@ -341,7 +341,7 @@ func TestUnknownClientBrowserFlowRequiresConsent(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	// The account already has approval, but this browser has no Portal Session.
 	cookie := loginAs(t, s, d, "browser-oauth-subject", "browser@example.test", "")
 	_, e := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='browser-oauth-subject'`)
@@ -415,7 +415,7 @@ func TestGrantCapAndDeadlines(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "cap-account", "cap@example.test", "")
 	_, e := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='cap-account'`)
 	if e != nil {
@@ -456,7 +456,7 @@ func TestHTTPSPublicClientStateContract(t *testing.T) {
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, "https-client-subject", "https@example.test", "")
 	_, e := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='https-client-subject'`)
 	if e != nil {

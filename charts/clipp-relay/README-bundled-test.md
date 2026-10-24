@@ -38,7 +38,7 @@ security rules; changing `oci.internal` alone cannot convert the existing NLBs.
 1. Inspect the empty claim and all prerequisites, render `stopped` with `database.bundled.initialize=true`, and confirm the relay is stopped. Read-only preflight rejects a same-name existing PVC when first initialization would create a claim. The init container writes a release marker before `initdb`. Interrupted initialization, a missing marker, an empty replacement claim after initialization, or a wrong major fails closed for manual recovery. No chart operation erases or reinitializes data.
 2. Set `initialize=false` and render `migrating` with a fresh `deployment.runId`. Inspect the ordinary named bootstrap Job and its result. It creates or verifies the database and distinct roles without resetting an existing password; mismatched credentials, serving DDL grants/ownership, or serving role membership fail. Do not reuse a failed Job name without inspecting the cause. Bootstrap does not run on serving restarts.
    The Job has Argo prune protection so its status remains available for inspection; remove old Jobs only after an explicit review.
-3. Verify the old relay Pod is absent or fenced, then run the separate application migration with the migration Secret and the intended immutable relay image. Label that Job's Pods `app.kubernetes.io/name: clipp-relay-migration` and `app.kubernetes.io/instance: <release>`; the PostgreSQL NetworkPolicy allows that exact same-namespace identity on port 5432. The chart does **not** run the migration automatically. Verify schema revision 10 and the serving role's inability to create objects.
+3. Verify the old relay Pod is absent or fenced, then run the separate application migration with the migration Secret and the intended immutable relay image. Label that Job's Pods `app.kubernetes.io/name: clipp-relay-migration` and `app.kubernetes.io/instance: <release>`; the PostgreSQL NetworkPolicy allows that exact same-namespace identity on port 5432. The chart does **not** run the migration automatically. Verify schema revision 13 and the serving role's inability to create objects.
 4. Render `serving` with `initialize=false` and an empty run ID. The relay process verifies the intended database, exact schema, TLS trust, supported major and serving privileges. The PostgreSQL StatefulSet stays at one replica through all relay phases and has an `OnDelete` update strategy.
 
 Both a new and an existing claim require a deliberate data handoff for a mode or release change. Do not change values to point at empty storage as an upgrade or restore path. Password Secret replacement alone does not rotate an existing PostgreSQL role. Plan credential and certificate rotation as an outage with explicit database changes and verification.
@@ -61,3 +61,12 @@ Use the exact pair from a successful `Publish relay image` workflow's
 does not publish an image or supply its digest. The PostgreSQL image digest is a
 separate field. The wizard delegates linting to this preflight so every Helm call
 uses the required `relay-portal-test` namespace.
+
+`accounting.failureDeadline` renders as JSON `accounting_failure_deadline`.
+It defaults to `"3s"` and changes take effect on relay restart. Chart values
+accept whole seconds from `"1s"` through `"9223372036s"`; the runtime also accepts
+Go duration strings such as `"1500ms"`, always at least one second. Zero cannot
+disable cutoff. Select a bounded outage tolerance: when pending accounting stays
+unhealthy for the configured monotonic duration, all affected account sessions
+close and new admission fails temporarily. Successful reads cannot conceal
+unresolved writes. Confirmed exhaustion uses the separate quota outcome.

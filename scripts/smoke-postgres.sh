@@ -24,10 +24,10 @@ trap cleanup EXIT
 wait_for_pg() {
   local target=$1
   for i in $(seq 1 60); do
-    if docker exec "$target" pg_isready -U postgres >/dev/null 2>&1; then return 0; fi
+    if docker exec "$target" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
-  docker exec "$target" pg_isready -U postgres >/dev/null
+  docker exec "$target" pg_isready -h 127.0.0.1 -U postgres >/dev/null
 }
 
 start_tls_pg() {
@@ -65,7 +65,7 @@ expect_ddl_role_rejected() {
     echo "$label serving role was accepted" >&2
     return 1
   fi
-  if ! grep -q 'serving database role has DDL authority' "$work/$label.log"; then
+  if ! grep -q '"reason":"database_unavailable"' "$work/$label.log"; then
     cat "$work/$label.log" >&2
     return 1
   fi
@@ -126,7 +126,7 @@ printf 'test-secret\n' > "$work/google-secret"
 printf '{"revision":1,"emails":[]}\n' > "$work/allowlist.json"
 printf '{"current":1,"keys":[{"version":1,"material":"%s"}]}\n' "$(openssl rand -base64 32 | tr -d '\n')" > "$work/keyring.json"
 cat > "$work/migration.json" <<EOF
-{"version":1,"portal_origin":"https://portal.example.test","wss_hostname":"wss.example.test","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082","public_addresses":["/ip4/127.0.0.1/tcp/18082"]},"database":{"mode":"external","host":"localhost","port":$port,"name":"clipp_ticket02_smoke","username_file":"$work/migration-user","password_file":"$work/migration-pass","ca_file":"$work/ca.crt"},"journal":{"region":"us-ashburn-1","namespace":"fixture","bucket":"events","repository_id":"local-smoke-repository","coverage_floor":0,"coverage_hash":"$zero_hash","tenancy_ocid":"ocid1.tenancy.oc1..test","user_ocid":"ocid1.user.oc1..test","fingerprint":"aa:bb","private_key_file":"$work/journal-signing.key"},"secrets":{"google_client_id_file":"$work/google-id","google_client_secret_file":"$work/google-secret","admin_allowlist_file":"$work/allowlist.json","pepper_keyring_file":"$work/keyring.json"}}
+{"version":1,"accounting_failure_deadline":"3s","portal_origin":"https://portal.example.test","wss_hostname":"wss.example.test","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082","public_addresses":["/ip4/127.0.0.1/tcp/18082"]},"database":{"mode":"external","host":"localhost","port":$port,"name":"clipp_ticket02_smoke","username_file":"$work/migration-user","password_file":"$work/migration-pass","ca_file":"$work/ca.crt"},"journal":{"region":"us-ashburn-1","namespace":"fixture","bucket":"events","repository_id":"local-smoke-repository","coverage_floor":0,"coverage_hash":"$zero_hash","tenancy_ocid":"ocid1.tenancy.oc1..test","user_ocid":"ocid1.user.oc1..test","fingerprint":"aa:bb","private_key_file":"$work/journal-signing.key"},"secrets":{"google_client_id_file":"$work/google-id","google_client_secret_file":"$work/google-secret","admin_allowlist_file":"$work/allowlist.json","pepper_keyring_file":"$work/keyring.json"}}
 EOF
 sed "s|migration-user|serving-user|;s|migration-pass|serving-pass|" "$work/migration.json" > "$work/serving.json"
 
@@ -134,7 +134,7 @@ export GOCACHE="${GOCACHE:-/private/tmp/clipp-go-cache}"
 go build -o "$work/clipp-relay" ./cmd/clipp-relay
 migrate_when_ready "$work/migration.json"
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_relay_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
 python3 - "$work/serving.json" "$work/missing-journal.json" "$work/wrong-journal.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as source: config=json.load(source)
@@ -146,11 +146,11 @@ PY
 if env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/missing-journal.json" > "$work/missing-journal.log" 2>&1; then
   echo 'serving accepted missing journal' >&2; exit 1
 fi
-grep -q 'journal configuration required' "$work/missing-journal.log"
+grep -q '"reason":"configuration_rejected"' "$work/missing-journal.log"
 if env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/wrong-journal.json" > "$work/wrong-journal.log" 2>&1; then
   echo 'serving accepted wrong journal' >&2; exit 1
 fi
-grep -q 'journal qualification failed' "$work/wrong-journal.log"
+grep -q '"reason":"journal_unavailable"' "$work/wrong-journal.log"
 env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/serving.json" > "$work/service.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do
@@ -217,7 +217,7 @@ echo 'Inherited extension ownership rejection passed'
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'DROP EXTENSION clipp_ownership_probe; REVOKE clipp_extension_owner FROM clipp_serving; DROP ROLE clipp_extension_owner' >/dev/null
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
 echo 'PostgreSQL 18 integration tests passed'
-docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_relay_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
 if [[ "${CLIPP_FAULT_RACE_ONLY:-0}" != 1 ]]; then
   CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/auth
   echo 'PostgreSQL 18 OIDC browser integration tests passed'
@@ -225,7 +225,7 @@ if [[ "${CLIPP_FAULT_RACE_ONLY:-0}" != 1 ]]; then
   echo 'PostgreSQL 18 quota integration tests passed'
 fi
 if [[ "${CLIPP_FAULT_RACE:-0}" == 1 ]]; then
-  CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/quota -run 'Test(LostCommitReplyReconcilesSameReceipt|KnownRollbackRetriesWithoutDoubleDebit|InvalidatedWorkerCannotInstallLateReceipt|CancelledWaiterCannotUseLocalCredit)$'
+  CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/quota -run 'Test(RecordedUsage|Periodic|SmallBackwardStepAcrossMonday|SuccessfulSettlementCannotConcealUnsafeClock|FinalFlush|QuotaClose|ObservedProcessCrash)'
   CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -race -count=1 ./internal/auth -run 'Test(SuspensionWaitsForAccountRowLockAndRevokesRelayCredential|ConcurrentRegistrationImportsRetainedUsageOnce|ConcurrentEquivalentLoginsCreateOneAccount|MaintenanceKeepsLiveGrantAndRetentionBoundaries|CleanupErrorDoesNotStarveLaterRetentionClass)$'
   echo 'PostgreSQL 18 focused quota and account race tests passed'
 fi
@@ -243,7 +243,7 @@ sed "s/\"port\":$port/\"port\":$supported_port/" "$work/migration.json" > "$work
 sed "s/\"port\":$port/\"port\":$supported_port/" "$work/serving.json" > "$work/serving17.json"
 migrate_when_ready "$work/migration17.json"
 docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
-docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_quota_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.authorization_transactions, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_relay_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
 env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/service17.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do
@@ -273,7 +273,7 @@ sed "s|$work/ca.crt|$work/wrong-ca.crt|" "$work/serving17.json" > "$work/wrong-c
 if "$work/clipp-relay" -command serve -config "$work/wrong-ca.json" > "$work/wrong-ca.log" 2>&1; then
   echo 'untrusted PostgreSQL CA unexpectedly accepted' >&2; exit 1
 fi
-grep -q 'startup validation failed' "$work/wrong-ca.log"
+grep -q '"reason":"database_unavailable"' "$work/wrong-ca.log"
 
 openssl req -newkey rsa:2048 -nodes -subj '/CN=wrong.example.test' -keyout "$work/wrong-host.key" -out "$work/wrong-host.csr" >/dev/null 2>&1
 printf 'subjectAltName=DNS:wrong.example.test\nextendedKeyUsage=serverAuth\n' > "$work/wrong-host.ext"
@@ -287,7 +287,7 @@ wait_for_pg "$supported_name"
 if "$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/wrong-host.log" 2>&1; then
   echo 'wrong PostgreSQL certificate hostname unexpectedly accepted' >&2; exit 1
 fi
-grep -q 'startup validation failed' "$work/wrong-host.log"
+grep -q '"reason":"database_unavailable"' "$work/wrong-host.log"
 echo 'PostgreSQL 17 wrong CA and hostname rejection passed'
 
 # A separate verified-TLS PostgreSQL 16 target must fail before migration.
@@ -300,5 +300,5 @@ sed "s/\"port\":$port/\"port\":$wrong_port/;s|migration-user|admin-user|;s|migra
 if "$work/clipp-relay" -command migrate -config "$work/wrong-major.json" > "$work/wrong-major.log" 2>&1; then
   echo 'wrong PostgreSQL major unexpectedly accepted' >&2; exit 1
 fi
-grep -q 'unsupported PostgreSQL major' "$work/wrong-major.log"
+grep -q '"reason":"database_unavailable"' "$work/wrong-major.log"
 echo 'smoke passed: verified-TLS PostgreSQL 17/18 migrate and serve, table/database/extension ownership rejection, role/schema/rollback/concurrency, private health, public isolation, lost database, PostgreSQL 16 rejection, wrong CA/hostname rejection'

@@ -80,3 +80,13 @@ if KUBECTL_MOCK_PVC=present KUBECTL_TEST_LOG="$work/kubectl-collision.log" PATH=
   exit 1
 fi
 grep -q 'existing same-name PVC' "$work/collision.log"
+
+# Deadline settings propagate into the single JSON source in either DB mode.
+helm template isolated "$chart" -n relay-portal-test -f "$values" --set-string accounting.failureDeadline=7s > "$work/deadline.yaml"
+ruby -ryaml -rjson -e 'docs=YAML.load_stream(File.read(ARGV[0])).compact; config=docs.find { |d| d["kind"] == "ConfigMap" && d.dig("data", "config.json") }; abort "deadline override lost" unless JSON.parse(config.dig("data", "config.json"))["accounting_failure_deadline"] == "7s"' "$work/deadline.yaml"
+for deadline in '' 0s 999ms -1s NaN Inf 9223372037s 999999999999999999999s; do
+  if helm template isolated "$chart" -n relay-portal-test -f "$values" --set-string "accounting.failureDeadline=$deadline" > "$work/deadline-invalid.yaml" 2>&1; then
+    echo "invalid accounting deadline accepted: $deadline" >&2
+    exit 1
+  fi
+done

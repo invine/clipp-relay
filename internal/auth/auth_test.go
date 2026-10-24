@@ -22,7 +22,17 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// newTestServer supplies an explicit controlled invalidation adapter for isolated
+// Auth tests. Composed HTTP/libp2p acceptance uses relay.NewProtected instead.
+func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.Material, provider auth.Provider) *auth.Server {
+	t.Helper()
+	s := auth.New(pool, c, m, provider)
+	s.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
+	return s
+}
 
 func fixture(t *testing.T) (config.Config, config.Material, *database.Runtime) {
 	t.Helper()
@@ -200,7 +210,7 @@ func sessionFrom(w *httptest.ResponseRecorder) *http.Cookie {
 func TestGoogleRegistrationAndSessionPersistAcrossRestart(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	first, binding := start(t, s, nil)
 	d.mu.Lock()
 	d.nonce = strings.Split(first, "|")[1]
@@ -236,7 +246,7 @@ func TestGoogleRegistrationAndSessionPersistAcrossRestart(t *testing.T) {
 	if e := db.Pool.QueryRow(context.Background(), "SELECT count(*) FROM public.audit_events e JOIN public.accounts a ON a.id=e.account_id WHERE e.event='account_created' AND a.subject='stable-subject'").Scan(&audits); e != nil || audits != 1 {
 		t.Fatalf("audit: %d %v", audits, e)
 	}
-	restarted := auth.New(db.Pool, c, m, d.endpoints())
+	restarted := newTestServer(t, db.Pool, c, m, d.endpoints())
 	home := httptest.NewRequest("GET", "/", nil)
 	home.AddCookie(session)
 	out := httptest.NewRecorder()
@@ -280,7 +290,7 @@ func TestProviderAndBrowserFailuresDoNotCreateAccount(t *testing.T) {
 			c, m, db := fixture(t)
 			d := newProvider(t)
 			d.subject = "invalid-" + kind
-			s := auth.New(db.Pool, c, m, d.endpoints())
+			s := newTestServer(t, db.Pool, c, m, d.endpoints())
 			state, binding := start(t, s, nil)
 			d.mu.Lock()
 			d.nonce = strings.Split(state, "|")[1]
@@ -315,7 +325,7 @@ func TestProviderAndBrowserFailuresDoNotCreateAccount(t *testing.T) {
 func TestOriginAndCSRFRequiredForLogout(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
 	d.mu.Lock()
 	d.nonce = strings.Split(state, "|")[1]
@@ -350,7 +360,7 @@ func TestOriginAndCSRFRequiredForLogout(t *testing.T) {
 func TestExpiredSessionsAndDatabaseOutageFailClosed(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
 	good := complete(s, state, binding)
 	if good.Code != 303 {
@@ -394,7 +404,7 @@ func TestExpiredSessionsAndDatabaseOutageFailClosed(t *testing.T) {
 func TestGlobalRateAndRequestBoundsRejectImmediately(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	r := httptest.NewRequest("GET", "/"+strings.Repeat("a", 8192), nil)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
@@ -420,7 +430,7 @@ func TestExpiredVerificationKeysCannotCompleteLogin(t *testing.T) {
 	d := newProvider(t)
 	d.keyAge = "0"
 	d.subject = "expired-key-subject"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
 	w := complete(s, state, binding)
 	if w.Code == 303 {
@@ -436,7 +446,7 @@ func TestConcurrentEquivalentLoginsCreateOneAccount(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "concurrent-subject"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	flows := make([]string, 8)
 	bindings := make([]*http.Cookie, 8)
 	for i := range flows {
@@ -491,7 +501,7 @@ func TestProviderCapacityRejectsWithoutQueue(t *testing.T) {
 			close(gate)
 		}
 	}()
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	flows := make([]string, 9)
 	bindings := make([]*http.Cookie, 9)
 	for i := range flows {
@@ -523,7 +533,7 @@ func TestProviderCapacityRejectsWithoutQueue(t *testing.T) {
 func TestContinuationCapacityRefusesNewLogin(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	for i := 0; i < 1024; i++ {
 		start(t, s, nil)
 		time.Sleep(5 * time.Millisecond)
@@ -539,9 +549,9 @@ func TestRestartCancelsUnfinishedLogin(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "restart-unfinished"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
-	restarted := auth.New(db.Pool, c, m, d.endpoints())
+	restarted := newTestServer(t, db.Pool, c, m, d.endpoints())
 	w := complete(restarted, state, binding)
 	if w.Code == 303 {
 		t.Fatal("unfinished login survived restart")
@@ -558,7 +568,7 @@ func TestUnknownKeyFetchHasSharedCooldown(t *testing.T) {
 	d := newProvider(t)
 	d.subject = "unknown-key"
 	d.keyID = "other-key"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	for i := 0; i < 2; i++ {
 		state, binding := start(t, s, nil)
 		w := complete(s, state, binding)
@@ -578,7 +588,7 @@ func TestResolvedAccountRateIsBounded(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "rate-account"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
 	w := complete(s, state, binding)
 	if w.Code != 303 {
@@ -609,7 +619,7 @@ func TestOversizeAndUnavailableProviderCannotRegister(t *testing.T) {
 			d.subject = "provider-" + kind
 			d.oversizeBody = kind == "body"
 			d.oversizeHeader = kind == "header"
-			s := auth.New(db.Pool, c, m, d.endpoints())
+			s := newTestServer(t, db.Pool, c, m, d.endpoints())
 			state, binding := start(t, s, nil)
 			if kind == "unavailable" {
 				d.server.Close()
@@ -631,7 +641,7 @@ func TestSuccessfulCallbackPreservesSharedBrowserBindingForAnotherTab(t *testing
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "two-tabs"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	portal := httptest.NewTLSServer(s.Handler())
 	defer portal.Close()
 	jar, e := cookiejar.New(nil)
@@ -681,7 +691,7 @@ func TestExpiredKnownVerificationKeyRefreshesBeforeUnknownKeyCooldown(t *testing
 	d := newProvider(t)
 	d.subject = "known-key-refresh"
 	d.keyAge = "1"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	first, binding := start(t, s, nil)
 	if w := complete(s, first, binding); w.Code != 303 {
 		t.Fatalf("first login: %d", w.Code)
@@ -703,7 +713,7 @@ func TestRepeatedSuccessfulCallbacksRespectResolvedAccountRate(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "callback-rate"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	first, binding := start(t, s, nil)
 	if w := complete(s, first, binding); w.Code != 303 {
 		t.Fatalf("initial callback: %d", w.Code)
@@ -741,7 +751,7 @@ func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "cleanup-owner"
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	flow, binding := start(t, s, nil)
 	if w := complete(s, flow, binding); w.Code != 303 {
 		t.Fatalf("setup: %d", w.Code)
@@ -792,7 +802,7 @@ func TestDatabaseOutageAfterVerifiedProviderResponseCreatesNoFallbackState(t *te
 	d := newProvider(t)
 	d.subject = "verified-before-db-outage"
 	d.onKeys = func() { db.Pool.Close() }
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	flow, binding := start(t, s, nil)
 	w := complete(s, flow, binding)
 	if w.Code != 503 {

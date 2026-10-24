@@ -97,7 +97,7 @@ func (j *deletionJournalFixture) ReplaceHead(_ context.Context, old string, head
 func TestDeletionUploadAloneCannotCompleteOrFreeIdentity(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}, failBeforeHeadOnce: true}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -156,7 +156,7 @@ func TestDeletionUploadAloneCannotCompleteOrFreeIdentity(t *testing.T) {
 func TestDeletionRejectsWrongJournalAndStaleGoogleAuth(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "unexpected", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "expected", 0, zero)
@@ -185,7 +185,7 @@ func TestDeletionRejectsWrongJournalAndStaleGoogleAuth(t *testing.T) {
 func TestOwnerDeletionAllAccountStatesAndCapacityGate(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -231,7 +231,7 @@ func TestOwnerDeletionAllAccountStatesAndCapacityGate(t *testing.T) {
 func TestAmbiguousDeletionAdmissionRollbackAllowsFreshLogin(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -260,7 +260,7 @@ func TestAmbiguousDeletionAdmissionRollbackAllowsFreshLogin(t *testing.T) {
 func TestDeletionReleasesDatabaseLockDuringJournalIO(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -300,10 +300,10 @@ func TestDeletionReleasesDatabaseLockDuringJournalIO(t *testing.T) {
 	}
 }
 
-func TestCommittedDeletionRecoversAfterHeadAdvancesAndValidatesCoverage(t *testing.T) {
+func TestRecordedDeletionRecoversAfterHeadAdvancesAndValidatesCoverage(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -366,7 +366,7 @@ func TestCommittedDeletionRecoversAfterHeadAdvancesAndValidatesCoverage(t *testi
 func TestUncommittedUploadLosesSequenceAndRebasesWithoutBlockingStartup(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}, failBeforeHeadOnce: true}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
@@ -415,7 +415,7 @@ func TestUncommittedUploadLosesSequenceAndRebasesWithoutBlockingStartup(t *testi
 func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: "0000000000000000000000000000000000000000000000000000000000000000", Sequence: 0, Hash: "0000000000000000000000000000000000000000000000000000000000000000", Format: 1}, etag: "initial", events: map[string][]byte{}, failHeadOnce: true}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, j.head.CoverageHash)
 	s.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
@@ -433,7 +433,7 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE id=$1`, oldID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,12345,1,'11111111-1111-4111-8111-111111111111',12345)`, oldID); err != nil {
+	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,12345,1,'11111111-1111-4111-8111-111111111111',12345)`, oldID); err != nil {
 		t.Fatal(err)
 	}
 	csrf := csrfFrom(t, s, owner)
@@ -483,7 +483,7 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	var newID string
 	var committed int64
 	var sequence int64
-	if err := db.Pool.QueryRow(context.Background(), `SELECT a.id,u.committed_bytes,u.sequence FROM public.accounts a JOIN public.weekly_quota_usage u ON u.account_id=a.id AND u.week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date WHERE a.subject=$1`, subject).Scan(&newID, &committed, &sequence); err != nil || newID == oldID || committed != 12345 || sequence != 0 {
+	if err := db.Pool.QueryRow(context.Background(), `SELECT a.id,u.recorded_bytes,u.sequence FROM public.accounts a JOIN public.weekly_relay_usage u ON u.account_id=a.id AND u.week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date WHERE a.subject=$1`, subject).Scan(&newID, &committed, &sequence); err != nil || newID == oldID || committed != 12345 || sequence != 0 {
 		t.Fatalf("retained usage import: %s %d %d %v", newID, committed, sequence, err)
 	}
 	var remaining int
@@ -493,11 +493,11 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE id=$1`, newID); err != nil {
 		t.Fatal(err)
 	}
-	credit := quota.New(db.Pool)
-	defer credit.Close()
-	result, err := credit.Ensure(context.Background(), newID, 0)
-	if err != nil || result.Committed != 12345+quota.BlockBytes {
-		t.Fatalf("new plan funding after import: %+v %v", result, err)
+	accounting := quota.New(db.Pool)
+	defer accounting.Close()
+	result, err := accounting.Eligibility(context.Background(), newID, 0)
+	if err != nil || result.RecordedBytes != 12345 {
+		t.Fatalf("confirmed usage after import: %+v %v", result, err)
 	}
 }
 

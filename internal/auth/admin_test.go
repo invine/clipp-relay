@@ -96,7 +96,7 @@ func TestAccountSecurityActionsThroughPortal(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	admin := loginAs(t, s, d, "security-admin", "security@gmail.com", "")
 	adminCSRF := csrfFrom(t, s, admin)
 	subject := "security-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -154,16 +154,16 @@ func TestAccountSecurityActionsThroughPortal(t *testing.T) {
 	}
 }
 
-func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
+func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 	c, m, db := fixture(t)
 	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
 	if err := os.WriteFile(c.Secrets.AdminAllowlistFile, []byte(`{"revision":1,"emails":["quota-admin@gmail.com"]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	var changes []auth.AccountChange
-	s.SetAccountChanged(func(change auth.AccountChange) func() { changes = append(changes, change); return nil })
+	s.SetAccountChangedForTest(func(change auth.AccountChange) func() { changes = append(changes, change); return nil })
 	admin := loginAs(t, s, d, "quota-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "quota-admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	subject := "quota-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -176,7 +176,7 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, approve, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("approve: %d", out.Code)
 	}
-	_, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,1000,1,'3ec305cd-15c4-4d3d-83ee-e47ec7febf10',1000)`, id)
+	_, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,1000,1,'3ec305cd-15c4-4d3d-83ee-e47ec7febf10',1000)`, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 			t.Fatalf("override %s: %d %s", bytes, out.Code, out.Body.String())
 		}
 		change := changes[len(changes)-1]
-		if change.CloseAll != close || change.DiscardCredit != discard || change.WeeklyBytes != mustInt64(t, bytes) || change.SessionLimit != mustInt(t, sessions) {
+		if change.CloseAll != close || change.InvalidateEligibility != discard || change.WeeklyBytes != mustInt64(t, bytes) || change.SessionLimit != mustInt(t, sessions) {
 			t.Fatalf("override %s callback: %+v", bytes, change)
 		}
 	}
@@ -200,7 +200,7 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, onlyBytes, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("one-field override: %d", out.Code)
 	}
-	if change := changes[len(changes)-1]; change.WeeklyBytes != 999 || change.SessionLimit != 5 || !change.CloseAll || !change.DiscardCredit {
+	if change := changes[len(changes)-1]; change.WeeklyBytes != 999 || change.SessionLimit != 5 || change.CloseAll || change.InvalidateEligibility {
 		t.Fatalf("one-field override reset other limit: %+v", change)
 	}
 	onlySessions := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {"4"}, "sessions_override": {"0"}}
@@ -211,11 +211,11 @@ func TestLiveQuotaOverridesPreserveCommittedUsageAndCredentials(t *testing.T) {
 		t.Fatalf("session-only override reset byte cap: %+v", change)
 	}
 	profile := portalRequest(s, "GET", "/", owner, nil, "")
-	if profile.Code != 200 || !strings.Contains(profile.Body.String(), "Quota committed: 1000 bytes") || !strings.Contains(profile.Body.String(), "999 bytes") || !strings.Contains(profile.Body.String(), "Relay Sessions: 0") {
+	if profile.Code != 200 || !strings.Contains(profile.Body.String(), "Recorded Relay Usage: 1000 bytes") || !strings.Contains(profile.Body.String(), "999 bytes") || !strings.Contains(profile.Body.String(), "Relay Sessions: 0") {
 		t.Fatalf("owner quota profile: %d %s", profile.Code, profile.Body.String())
 	}
 	var generation, committed int64
-	if err := db.Pool.QueryRow(context.Background(), `SELECT a.credential_generation,u.committed_bytes FROM public.accounts a JOIN public.weekly_quota_usage u ON u.account_id=a.id WHERE a.id=$1`, id).Scan(&generation, &committed); err != nil || generation != 0 || committed != 1000 {
+	if err := db.Pool.QueryRow(context.Background(), `SELECT a.credential_generation,u.recorded_bytes FROM public.accounts a JOIN public.weekly_relay_usage u ON u.account_id=a.id WHERE a.id=$1`, id).Scan(&generation, &committed); err != nil || generation != 0 || committed != 1000 {
 		t.Fatalf("quota edit changed credentials or usage: generation=%d committed=%d err=%v", generation, committed, err)
 	}
 }
@@ -227,25 +227,14 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
-	credit := quota.New(db.Pool)
-	defer credit.Close()
-	dataPlane, err := relay.New(s, credit, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s := auth.NewWithRuntime(db, c, m, d.endpoints())
+	accounting := quota.NewWithRuntime(db)
+	defer accounting.Close()
+	dataPlane, err := relay.NewProtected(s, accounting, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer dataPlane.Close()
-	s.SetAccountChanged(func(change auth.AccountChange) func() {
-		if change.DiscardCredit {
-			credit.Invalidate(change.AccountID)
-		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
-			change.CloseAll = true
-		}
-		if change.CloseAll || dataPlane.AccountSessions(change.AccountID) > change.SessionLimit {
-			return dataPlane.DetachAccount(change.AccountID)
-		}
-		return nil
-	})
 	admin := loginAs(t, s, d, "wire-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "wire-admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	subject := "wire-owner-" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -366,9 +355,9 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	}
 	write(`{"revision":1,"emails":["admin@gmail.com"]}`)
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	var accountChanges []auth.AccountChange
-	s.SetAccountChanged(func(change auth.AccountChange) func() { accountChanges = append(accountChanges, change); return nil })
+	s.SetAccountChangedForTest(func(change auth.AccountChange) func() { accountChanges = append(accountChanges, change); return nil })
 	admin := loginAs(t, s, d, "admin-test", "Admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	workspace := portalRequest(s, "GET", "/admin", admin, nil, "")
@@ -487,7 +476,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+userID, admin, assign, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("explicit replacement = %d", out.Code)
 	}
-	if accountChanges[len(accountChanges)-1].AccountID != userID || accountChanges[len(accountChanges)-1].CloseAll || accountChanges[len(accountChanges)-1].DiscardCredit || accountChanges[len(accountChanges)-1].WeeklyBytes != 1073741824 || accountChanges[len(accountChanges)-1].SessionLimit != 5 {
+	if accountChanges[len(accountChanges)-1].AccountID != userID || accountChanges[len(accountChanges)-1].CloseAll || accountChanges[len(accountChanges)-1].InvalidateEligibility || accountChanges[len(accountChanges)-1].WeeklyBytes != 1073741824 || accountChanges[len(accountChanges)-1].SessionLimit != 5 {
 		t.Fatal("plan assignment did not invalidate account")
 	}
 	if out := portalRequest(s, "GET", "/", user, nil, ""); !strings.Contains(out.Body.String(), "1 GiB") {
@@ -502,7 +491,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+deniedID, admin, deny, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("deny pending = %d", out.Code)
 	}
-	if accountChanges[len(accountChanges)-1].AccountID != deniedID || !accountChanges[len(accountChanges)-1].CloseAll || !accountChanges[len(accountChanges)-1].DiscardCredit {
+	if accountChanges[len(accountChanges)-1].AccountID != deniedID || !accountChanges[len(accountChanges)-1].CloseAll || !accountChanges[len(accountChanges)-1].InvalidateEligibility {
 		t.Fatal("denial did not invalidate account")
 	}
 	if out := portalRequest(s, "GET", "/", denied, nil, ""); strings.Contains(out.Body.String(), "Your relay account") {
@@ -611,7 +600,7 @@ func TestPlanMutationRechecksGoogleAgeAfterActorLockWait(t *testing.T) {
 		t.Fatal(e)
 	}
 	d := newProvider(t)
-	s := auth.New(db.Pool, c, m, d.endpoints())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	admin := loginAs(t, s, d, "lock-admin-test", "lock-admin@gmail.com", "")
 	csrf := csrfFrom(t, s, admin)
 	var actorID string

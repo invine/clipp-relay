@@ -45,6 +45,7 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 	}
 	t.Cleanup(pool.Close)
 	s := New(pool, c, m, Provider{})
+	s.SetAccountChangedForTest(func(AccountChange) func() { return nil })
 	id, err := uuid()
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +101,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, target)
 	})
 	var changed AccountChange
-	s.SetAccountChanged(func(change AccountChange) func() { changed = change; return nil })
+	s.SetAccountChangedForTest(func(change AccountChange) func() { changed = change; return nil })
 	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
@@ -109,7 +110,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 	}
 	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"routine_administration"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
 	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
-	if out.Code != 503 || changed.AccountID != target || !changed.CloseAll || !changed.DiscardCredit {
+	if out.Code != 503 || changed.AccountID != target || !changed.CloseAll || !changed.InvalidateEligibility {
 		t.Fatalf("ambiguous commit response=%d invalidated=%+v", out.Code, changed)
 	}
 	var status string
@@ -135,7 +136,7 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 	})
 	var changed AccountChange
 	closed := false
-	s.SetAccountChanged(func(change AccountChange) func() {
+	s.SetAccountChangedForTest(func(change AccountChange) func() {
 		changed = change
 		return func() { closed = true }
 	})
@@ -147,7 +148,7 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 	}
 	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {"1"}}
 	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
-	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !changed.DiscardCredit || !closed {
+	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !changed.InvalidateEligibility || !closed {
 		t.Fatalf("ambiguous security mutation response=%d callback=%+v closed=%t", out.Code, changed, closed)
 	}
 	var status string
