@@ -10,6 +10,8 @@ All eight tickets requested on 2026-10-24. See [run](run.md) for local implement
 
 - [01](issues/01-protected-account-operations.md): protected production composition integrated and verified; required collaboration fails closed.
 
+- [02](issues/02-recorded-usage-safe-retries.md): authoritative observed totals and immutable ordered retry receipts integrated; PG18 and race passed.
+
 ## Fog
 
 No product decision remains open. Native/live acceptance is outside local implementation.

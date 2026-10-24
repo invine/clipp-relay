@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Record usage with safe retries.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Parent: [Relay, Quota and Auth specification](../spec.md), especially I1, I3–I5 and I6. User stories: 1, 2, 10–15, 18, 19, 22, 30, 38. Breakdown approved 2026-10-24.
 

@@ -13,3 +13,7 @@ Authorization: user requested all eight tickets with implement-spec on 2026-10-2
 - 01 integrated/resolved: source `be582981253064f7c8e14aea52b75889e53cb243`, integrated `e6926559c6c710bfcdf0b24723aafb1572b9dc34`; focused source/integration PG18 checks and race passed. Evidence artifacts `clipp-periodic-01-handoff.md`, `clipp-periodic-01-integration.md` under local temporary artifacts.
 - 02 claimed by settlement-02 after 01 resolution. Decision: observed totals and immutable retry receipts implement spec I3/I4; original migrations remain checksummed and unchanged; staged accounting is not activated until 08.
 - Baseline routine and real PG18 Quota tests passed at planning revision `9e13ae79d9dd85e487195bfcdc2a6d769faa6ede`; full final profiles remain required.
+
+- 02 integrated/resolved: source `45c6e905b52cf195af3f2a0a03a16587d62e1004`, integrated `52c308f85291d63089a4b47858697cec0c446cd9`; source and integrated PG18 settlement/composition checks passed. Artifacts `clipp-periodic-02-{handoff,integration}.md`.
+- 03 claimed by periodic-03 after 02 resolution. Approved I3/I5: shared account-week observations, bounded periodic settlement, no DB work in reporter, separate in-flight payload, soft allowance/full overrun and independent default deadline. No serving cutover until 08.
+- Baseline separate race profile passed at planning revision; final integrated profiles still required.
