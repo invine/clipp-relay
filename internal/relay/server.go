@@ -382,15 +382,21 @@ func (s *Server) Close() error {
 		s.mu.Lock()
 		draining := s.closing
 		s.closing = true
-		conns := make([]network.Conn, 0, len(s.byConn))
+		// Accounting may already have detached authority and queued its physical
+		// close when the worker observes stop. Own both sets during shutdown;
+		// Host.Close remains the final transport backstop.
+		conns := make(map[network.Conn]struct{}, len(s.byConn)+len(s.accountingPending))
+		for c := range s.accountingPending {
+			conns[c] = struct{}{}
+		}
 		for c, v := range s.byConn {
 			if draining {
 				v.endReason = "draining"
 			}
-			conns = append(conns, c)
+			conns[c] = struct{}{}
 		}
 		s.mu.Unlock()
-		for _, c := range conns {
+		for c := range conns {
 			_ = c.Close()
 		}
 		_ = s.stock.Close()
@@ -398,6 +404,9 @@ func (s *Server) Close() error {
 		if s.accountingDone != nil {
 			<-s.accountingDone
 		}
+		s.mu.Lock()
+		clear(s.accountingPending)
+		s.mu.Unlock()
 		result = s.manager.Close()
 	})
 	return result
