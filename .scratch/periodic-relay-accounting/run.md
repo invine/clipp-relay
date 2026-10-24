@@ -9,3 +9,7 @@ Authorization: user requested all eight tickets with implement-spec on 2026-10-2
 ## Claims and integration
 
 - 01 claimed by protected-01; baseline is this planning commit. Preserves admission/security invariants while completing Auth/Relay ownership; see spec I1/I2/I6 and ticket 01.
+
+- 01 integrated/resolved: source `be582981253064f7c8e14aea52b75889e53cb243`, integrated `e6926559c6c710bfcdf0b24723aafb1572b9dc34`; focused source/integration PG18 checks and race passed. Evidence artifacts `clipp-periodic-01-handoff.md`, `clipp-periodic-01-integration.md` under local temporary artifacts.
+- 02 claimed by settlement-02 after 01 resolution. Decision: observed totals and immutable retry receipts implement spec I3/I4; original migrations remain checksummed and unchanged; staged accounting is not activated until 08.
+- Baseline routine and real PG18 Quota tests passed at planning revision `9e13ae79d9dd85e487195bfcdc2a6d769faa6ede`; full final profiles remain required.

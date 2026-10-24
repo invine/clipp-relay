@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Make protected account operations explicit.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Parent: [Relay, Quota and Auth specification](../spec.md), especially I1–I4 and I8. User stories: 8, 9, 12, 33, 34, 38, 41. Breakdown approved 2026-10-24.
 
