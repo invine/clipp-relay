@@ -38,6 +38,14 @@ func (r *endpointReporter) report(n int64, proto protocol.ID, p peer.ID) {
 	s := r.server
 	s.mu.Lock()
 	active := s.byPeer[p]
+	if s.accounting != nil && active != nil && time.Now().Before(active.deadline) {
+		err := s.accounting.Observe(active.account, n)
+		s.mu.Unlock()
+		if err != nil {
+			s.accounting.AccountingFailed(active.account)
+		}
+		return
+	}
 	s.mu.Unlock()
 	if active == nil || !time.Now().Before(active.deadline) {
 		r.unattributed.Add(n)

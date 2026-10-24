@@ -89,6 +89,11 @@ type Server struct {
 	diagnostics       DiagnosticSink
 	connectionInfo    map[network.Conn]connectionDiagnostic
 	credit            Credit
+	accounting        *quota.Quota
+	accountingCloses  chan struct{}
+	accountingPending map[network.Conn]struct{}
+	accountingStop    chan struct{}
+	accountingDone    chan struct{}
 	maxSessions       int
 	tcpEnabled        bool
 	wsEnabled         bool
@@ -225,6 +230,72 @@ func NewProtected(a *auth.Server, credit *quota.Quota, opts Options) (*Server, e
 	})
 }
 
+// NewObservedProtected composes the staged observed-usage path. The executable
+// continues to use NewProtected until the final accounting lifecycle cutover.
+func NewObservedProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server, error) {
+	if a == nil || q == nil {
+		return nil, errors.New("relay authority and quota required")
+	}
+	return newServer(a, q, opts, func(s *Server) error {
+		if err := a.ConfigureRelayProtection(q, s); err != nil {
+			return err
+		}
+		q.SetSettlementProtection(a)
+		s.accounting = q
+		s.accountingCloses = make(chan struct{}, 1)
+		s.accountingPending = make(map[network.Conn]struct{})
+		s.accountingStop = make(chan struct{})
+		s.accountingDone = make(chan struct{})
+		if err := q.StartAccounting(s.accountingClosure); err != nil {
+			return err
+		}
+		go func() {
+			defer close(s.accountingDone)
+			for {
+				select {
+				case <-s.accountingStop:
+					return
+				case <-s.accountingCloses:
+					for {
+						s.mu.Lock()
+						var conn network.Conn
+						for c := range s.accountingPending {
+							conn = c
+							break
+						}
+						s.mu.Unlock()
+						if conn == nil {
+							break
+						}
+						_ = conn.Close()
+						s.mu.Lock()
+						delete(s.accountingPending, conn)
+						s.mu.Unlock()
+					}
+				}
+			}
+		}()
+		return nil
+	})
+}
+func (s *Server) accountingClosure(out quota.ClosureOutcome) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.accounting.ClosureCurrent(out) {
+		return
+	}
+	for v := range s.byAccount[out.AccountID] {
+		s.endSessionLocked(v, out.Reason)
+		// Physical connections remain bounded by libp2p's resource manager.
+		// Keep every detached connection until the fixed close worker finishes.
+		s.accountingPending[v.conn] = struct{}{}
+		select {
+		case s.accountingCloses <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // New starts an inbound-only, Noise-authenticated relay with a new in-RAM
 // identity. Controlled authority adapters must provide all admission operations.
 func New(a Authority, credit Credit, opts Options) (*Server, error) {
@@ -304,6 +375,9 @@ func newServer(a Authority, credit Credit, opts Options, installProtection func(
 func (s *Server) Close() error {
 	var result error
 	s.closeOnce.Do(func() {
+		if s.accountingStop != nil {
+			close(s.accountingStop)
+		}
 		s.mu.Lock()
 		draining := s.closing
 		s.closing = true
@@ -320,6 +394,9 @@ func (s *Server) Close() error {
 		}
 		_ = s.stock.Close()
 		_ = s.Host.Close()
+		if s.accountingDone != nil {
+			<-s.accountingDone
+		}
 		result = s.manager.Close()
 	})
 	return result
@@ -449,6 +526,9 @@ func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 		delete(s.byPeer, v.conn.RemotePeer())
 	}
 	delete(s.byAccount[v.account], v)
+	if s.accounting != nil {
+		s.accounting.AccountingSessions(v.account, len(s.byAccount[v.account]))
+	}
 	if len(s.byAccount[v.account]) == 0 {
 		delete(s.byAccount, v.account)
 	}
@@ -691,7 +771,14 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		*reason = "account_mismatch"
 		return time.Time{}, 0, "account_change_requires_new_connection"
 	}
-	if _, err := s.credit.Ensure(ctx, credential.AccountID, credential.Generation); err != nil {
+	var eligibility quota.AccountingEligibility
+	var quotaErr error
+	if s.accounting != nil {
+		eligibility, quotaErr = s.accounting.Eligibility(ctx, credential.AccountID, credential.Generation)
+	} else {
+		_, quotaErr = s.credit.Ensure(ctx, credential.AccountID, credential.Generation)
+	}
+	if err := quotaErr; err != nil {
 		if errors.Is(err, quota.ErrExhausted) {
 			*reason = "" // The fixed authentication catalog has no quota-exhausted pair.
 			return time.Time{}, 0, "quota_exhausted"
@@ -714,7 +801,7 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 	// Uniform 75–85% of admitted lifetime, independent of a stable Peer ID.
 	renewFraction := 0.75 + float64(binary.LittleEndian.Uint64(jitter[:])%10001)/100000
 	s.mu.Lock()
-	if ctx.Err() != nil || s.closing || c.IsClosed() {
+	if ctx.Err() != nil || s.closing || c.IsClosed() || s.accounting != nil && !s.accounting.AccountingCurrent(credential.AccountID, eligibility.Revision) {
 		s.mu.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
@@ -756,6 +843,9 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 		s.byAccount[v.account] = map[*session]struct{}{}
 	}
 	s.byAccount[v.account][v] = struct{}{}
+	if s.accounting != nil {
+		s.accounting.AccountingSessions(v.account, len(s.byAccount[v.account]))
+	}
 	if t := s.preauth[c]; t != nil {
 		t.Stop()
 		delete(s.preauth, c)

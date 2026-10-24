@@ -22,6 +22,7 @@ import (
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	circuitclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 )
 
 type protectedPortal struct {
@@ -35,6 +36,9 @@ type protectedPortal struct {
 }
 
 func protectedPortalFixture(t *testing.T) protectedPortal {
+	return protectedPortalFixtureWithRelay(t, relay.NewProtected)
+}
+func protectedPortalFixtureWithRelay(t *testing.T, construct func(*auth.Server, *quota.Quota, relay.Options) (*relay.Server, error)) protectedPortal {
 	t.Helper()
 	c, m, db := fixture(t)
 	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
@@ -45,7 +49,7 @@ func protectedPortalFixture(t *testing.T) protectedPortal {
 	s := auth.NewWithRuntime(db, c, m, d.endpoints())
 	q := quota.NewWithRuntime(db)
 	t.Cleanup(q.Close)
-	r, err := relay.NewProtected(s, q, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	r, err := construct(s, q, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,5 +251,55 @@ func TestProductionProtectionComposesObservedSettlement(t *testing.T) {
 	result, err := p.quota.Settle(context.Background(), quota.Settlement{AccountID: p.account, WeekStart: week, OperationID: op, Sequence: 1, DeltaBytes: 123456})
 	if err != nil || result.RecordedBytes != 123456 {
 		t.Fatalf("composed settlement=%+v %v", result, err)
+	}
+}
+
+func TestProductionObservedReporterSharedExhaustionClosesEverySession(t *testing.T) {
+	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	p.mutate(t, "override", "2", url.Values{"weekly_bytes_override": {"10000"}, "sessions_override": {"2"}})
+	first, second := protectedClient(t, p), protectedClient(t, p)
+	requireProtectedAuthentication(t, first, p, `"ok":true`)
+	requireProtectedAuthentication(t, second, p, `"ok":true`)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := circuitclient.Reserve(ctx, first, peer.AddrInfo{ID: p.relay.Host.ID(), Addrs: p.relay.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	// Stock HOP protocol callbacks must reach the observed accounting path.
+	now := time.Now().UTC()
+	days := (int(now.Weekday()) + 6) % 7
+	week := time.Date(now.Year(), now.Month(), now.Day()-days, 0, 0, 0, 0, time.UTC)
+	until := time.Now().Add(2500 * time.Millisecond)
+	var recorded quota.RecordedUsage
+	for time.Now().Before(until) {
+		recorded, _ = p.quota.RecordedUsage(ctx, p.account, week)
+		if recorded.RecordedBytes > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if recorded.RecordedBytes <= 0 {
+		t.Fatal("stock HOP reporter did not persist usage")
+	}
+	if err := p.quota.Observe(p.account, 20000); err != nil {
+		t.Fatal(err)
+	}
+	until = time.Now().Add(2500 * time.Millisecond)
+	for p.relay.AccountSessions(p.account) != 0 && time.Now().Before(until) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := p.relay.AccountSessions(p.account); got != 0 {
+		t.Fatalf("exhaustion retained %d account sessions", got)
+	}
+	recorded, err := p.quota.RecordedUsage(ctx, p.account, week)
+	if err != nil || recorded.RecordedBytes < 20000 {
+		t.Fatalf("full overrun=%+v %v", recorded, err)
+	}
+	until = time.Now().Add(time.Second)
+	for (len(first.Network().ConnsToPeer(p.relay.Host.ID())) > 0 || len(second.Network().ConnsToPeer(p.relay.Host.ID())) > 0) && time.Now().Before(until) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(first.Network().ConnsToPeer(p.relay.Host.ID())) > 0 || len(second.Network().ConnsToPeer(p.relay.Host.ID())) > 0 {
+		t.Fatal("exhausted physical connections remain open")
 	}
 }
