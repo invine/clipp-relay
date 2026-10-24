@@ -1,3 +1,4 @@
+{{/* Recorded selects the staged observed query model. */}}
 {{define "account"}}
 {{template "head" "Clipp Relay — Your account"}}
 <main class="page">
@@ -90,11 +91,11 @@
 <p class="eyebrow">THIS WEEK</p>
 <h2 id="quota-title">Your allowance</h2>
       <div class="quota-summary">
-<svg class="quota-ring" viewBox="0 0 120 120" role="img" aria-label="Quota committed {{bytes .Committed}} of {{bytes .WeeklyBytes}}">
+<svg class="quota-ring" viewBox="0 0 120 120" role="img" aria-label="{{if .Recorded}}Recorded Relay Usage{{else}}Quota committed{{end}} {{bytes .Committed}} of {{bytes .WeeklyBytes}}">
 <circle class="ring-track" cx="60" cy="60" r="49"/>
 <circle class="ring-value" cx="60" cy="60" r="49" pathLength="100" stroke-dasharray="{{.Percent}} 100"/>
 <text class="ring-percent" x="60" y="61">{{.Percent}}%</text>
-<text class="ring-label" x="60" y="78">committed</text>
+<text class="ring-label" x="60" y="78">{{if .Recorded}}recorded{{else}}committed{{end}}</text>
 </svg>
 <div>
 <p class="metric-value" title="{{.Committed}} bytes">{{bytes .Committed}}
@@ -103,14 +104,16 @@
 </strong> per week</p>
 </div>
 </div>
-      <p class="quota-total">Quota committed: {{bytes .Committed}}
+      <p class="quota-total">{{if .Recorded}}Recorded Relay Usage{{else}}Quota committed{{end}}: {{bytes .Committed}}
 </p>
 <p class="usage-state">{{.UsageState}}
 </p>
 <p class="muted fine-print">Resets Monday at 00:00 UTC. Unused allowance does not roll over.</p>
 <details class="explanation">
-<summary>What does quota committed mean?</summary>
-<p>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</p>
+{{if .Recorded}}<summary>What does Recorded Relay Usage mean?</summary>
+<p>Confirmed durable usage has a periodic confirmation lag; recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for the same account; control traffic can count too. This conservative measure is not exact application payload traffic. History retains the current week + twelve preceding weeks as absolute totals, independent of today’s allowance.</p>
+{{else}}<summary>What does quota committed mean?</summary>
+<p>Quota committed includes unused funded credit and is not measured traffic. Unused funded credit is lost on restart and never refunded.</p>{{end}}
 </details>
     </section>
     <section class="card capacity-card">
@@ -156,12 +159,12 @@
 {{$chart := .}}
 <figure class="history-chart" aria-labelledby="history-title">
   <div class="history-chart-heading">
-    <p class="muted fine-print">Quota committed · week starting UTC</p>
+    <p class="muted fine-print">{{if $.Recorded}}Recorded Relay Usage{{else}}Quota committed{{end}} · week starting UTC</p>
     <span class="history-legend"><span aria-hidden="true"></span>Current week</span>
   </div>
   <p class="history-scroll-hint muted fine-print">Scroll horizontally to view all weeks.</p>
   <div class="history-chart-scroll" tabindex="0" role="region" aria-label="Weekly quota histogram, oldest to newest">
-    <svg class="history-histogram" width="{{.Width}}" height="280" viewBox="0 0 {{.Width}} 280" style="min-width:{{.Width}}px" role="group" aria-label="Quota committed by week">
+    <svg class="history-histogram" width="{{.Width}}" height="280" viewBox="0 0 {{.Width}} 280" style="min-width:{{.Width}}px" role="group" aria-label="{{if $.Recorded}}Recorded Relay Usage{{else}}Quota committed{{end}} by week">
       {{range .Ticks}}
       <line class="history-gridline" x1="64" x2="{{$chart.Right}}" y1="{{.Y}}" y2="{{.Y}}"/>
       <text class="history-axis" x="54" y="{{.Y}}" dy="4" text-anchor="end">{{.Label}}</text>
@@ -177,7 +180,7 @@
       {{end}}
     </svg>
   </div>
-  {{if .AllZero}}<figcaption class="muted fine-print">No quota committed in these weeks.</figcaption>{{end}}
+  {{if .AllZero}}<figcaption class="muted fine-print">{{if $.Recorded}}No recorded usage in these weeks.{{else}}No quota committed in these weeks.{{end}}</figcaption>{{end}}
 </figure>
 {{end}}
 {{else}}<p class="muted">No quota history available.</p>{{end}}

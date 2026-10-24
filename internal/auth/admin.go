@@ -228,6 +228,7 @@ func (s *Server) sessionDigest(r *http.Request, version uint64) []byte {
 type adminAccountRow struct {
 	ID, Email, Status, PlanID, WeeklyOverride, SessionOverride string
 	Revision                                                   int64
+	Usage                                                      *accountUsageQuery
 }
 type adminPlanRow struct {
 	ID, Name string
@@ -369,8 +370,8 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if data.Selected != "" {
-		var selected adminAccountRow
-		err = s.db.QueryRow(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, data.Selected).Scan(&selected.ID, &selected.Email, &selected.Status, &selected.PlanID, &selected.WeeklyOverride, &selected.SessionOverride, &selected.Revision)
+		selected, readErr := s.adminAccountUsage(r.Context(), data.Selected)
+		err = readErr
 		if err == pgx.ErrNoRows {
 			fail(w, 404)
 			return
