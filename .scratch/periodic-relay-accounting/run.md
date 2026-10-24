@@ -17,3 +17,6 @@ Authorization: user requested all eight tickets with implement-spec on 2026-10-2
 - 02 integrated/resolved: source `45c6e905b52cf195af3f2a0a03a16587d62e1004`, integrated `52c308f85291d63089a4b47858697cec0c446cd9`; source and integrated PG18 settlement/composition checks passed. Artifacts `clipp-periodic-02-{handoff,integration}.md`.
 - 03 claimed by periodic-03 after 02 resolution. Approved I3/I5: shared account-week observations, bounded periodic settlement, no DB work in reporter, separate in-flight payload, soft allowance/full overrun and independent default deadline. No serving cutover until 08.
 - Baseline separate race profile passed at planning revision; final integrated profiles still required.
+
+- 03 integrated/resolved: source `cd9dc6a6223f6cd5b6f531db1d911d0b9095312f`, integrated `a53594a869be7cea30a9ddbd4451b0101f4b2fcd`; source PG/race/Relay checks and integrated PG checks passed. Artifacts `clipp-periodic-03-{handoff,integration}.md`.
+- 04 claimed by health-04 and 05 by weekly-05, at the two-implementer bound. 04 implements accepted I5 configurable monotonic health/immediate protected policy without erasing usage. 05 implements accepted I3/I4/I8 weekly attribution/retention and authority-free confirmed query models. Both preserve physical admission and no serving activation before08.

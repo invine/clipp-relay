@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 — Account for live traffic periodically.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Parent: [Relay, Quota and Auth specification](../spec.md), especially I2–I4 and I8. User stories: 3–7, 11, 18, 41. Breakdown approved 2026-10-24.
 
