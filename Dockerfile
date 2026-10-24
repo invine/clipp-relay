@@ -1,4 +1,4 @@
-ARG GO_BUILDER_IMAGE=golang:1.27.1-bookworm
+ARG GO_BUILDER_IMAGE=golang:1.27.3-bookworm
 FROM --platform=$BUILDPLATFORM ${GO_BUILDER_IMAGE} AS build
 
 ARG TARGETOS

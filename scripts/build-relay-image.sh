@@ -30,8 +30,8 @@ fi
 
 args=(buildx build "--platform=$platform" -f Dockerfile -t "$image")
 if [[ -n "${GO_BUILDER_IMAGE:-}" ]]; then
-  if [[ ! "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.1-bookworm@sha256:[0-9a-f]{64}$ ]]; then
-    echo 'GO_BUILDER_IMAGE must pin the Go 1.27.1 Bookworm image by sha256 digest' >&2
+  if [[ ! "$GO_BUILDER_IMAGE" =~ ^golang:1\.27\.3-bookworm@sha256:[0-9a-f]{64}$ ]]; then
+    echo 'GO_BUILDER_IMAGE must pin the Go 1.27.3 Bookworm image by sha256 digest' >&2
     exit 2
   fi
   args+=("--build-arg=GO_BUILDER_IMAGE=$GO_BUILDER_IMAGE")

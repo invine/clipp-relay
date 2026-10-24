@@ -24,9 +24,9 @@ image's architecture and non-root UID, then starts the image read-only with no
 network, capabilities or configuration and expects a fail-closed configuration
 error. Full serving requires the external PostgreSQL and Secret configuration
 described in the chart. Cross-architecture execution requires emulation. The
-local command defaults to the `golang:1.27.1-bookworm` build stage; set
+local command defaults to the `golang:1.27.3-bookworm` build stage; set
 `GO_BUILDER_IMAGE` to a verified
-`golang:1.27.1-bookworm@sha256:...` reference to reproduce a specific builder.
+`golang:1.27.3-bookworm@sha256:...` reference to reproduce a specific builder.
 
 ## Manual GitHub Container Registry publication
 
@@ -48,10 +48,10 @@ The publish job uses GitHub's job-scoped token with `contents: read` and
 | GitHub setting | Value |
 | --- | --- |
 | Optional Repository or Environment variable `RELAY_IMAGE_REPOSITORY` | Full lower-case GHCR path; defaults to `ghcr.io/<github.repository_owner>/clipp-relay`. The local test target is `ghcr.io/invine/clipp-relay`. No tag or digest. |
-| Repository variable `RELAY_GO_BUILDER_IMAGE` | Verified digest-pinned `golang:1.27.1-bookworm@sha256:...` builder reference, available to every verification job. |
+| Repository variable `RELAY_GO_BUILDER_IMAGE` | Verified digest-pinned `golang:1.27.3-bookworm@sha256:...` builder reference, available to every verification job. |
 
-Registry inspection on 2026-10-01 resolved the Go builder to
-`golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195`.
+Registry inspection on 2026-10-24 resolved the patched Go builder to
+`golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5`.
 Its multi-platform index contains Linux AMD64 and ARM64 manifests. This is the
 builder pin, not the relay image digest that the workflow produces.
 
