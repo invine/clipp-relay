@@ -61,6 +61,8 @@ type Quota struct {
 	stop                 chan struct{}
 	done                 chan struct{}
 	beforeCommit         func(context.Context, pgx.Tx) error
+	settlementBefore     func(context.Context, pgx.Tx) error
+	settlementAfter      func(context.Context) error
 	afterCommit          func() error
 	adjustTime           func(time.Time) time.Time
 	probeQuery           func(context.Context) (time.Time, error)

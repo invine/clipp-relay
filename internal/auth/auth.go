@@ -113,6 +113,7 @@ type Server struct {
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
 	observedPolicy                     bool
+	deletionAccounting                 ObservedQuotaProtection
 	deletionJournal                    DeletionJournal
 	deletionRepository                 string
 	deletionFloor                      int64
@@ -257,6 +258,9 @@ func (s *Server) ConfigureRelayProtection(credit QuotaProtection, sessions Relay
 // ObservedQuotaProtection applies current policy without discarding observations.
 type ObservedQuotaProtection interface {
 	ApplyAccountingPolicy(string, int64, bool) bool
+	BeginAccountingDeletion(string)
+	FlushDeletionAccounting(context.Context, string) error
+	ForgetAccounting(string)
 }
 
 // ConfigureObservedRelayProtection installs the staged complete observed policy
@@ -266,6 +270,7 @@ func (s *Server) ConfigureObservedRelayProtection(accounting ObservedQuotaProtec
 		return errors.New("relay account protection requires quota and sessions")
 	}
 	s.observedPolicy = true
+	s.deletionAccounting = accounting
 	s.accountChanged = func(change AccountChange) func() {
 		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.DiscardCredit)
 		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {

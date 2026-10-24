@@ -254,6 +254,9 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	if !admitted {
 		return
 	}
+	if s.deletionAccounting != nil {
+		s.deletionAccounting.BeginAccountingDeletion(id)
+	}
 	if closeConnections != nil {
 		closeConnections()
 	}
@@ -643,6 +646,14 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 }
 
 func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error {
+	// Settlement acquires Auth account protection itself. Attempt it before any
+	// finalization row lock, and reserve the remaining budget for deletion even
+	// when pending usage cannot be preserved. Journal proof precedes this call.
+	if s.deletionAccounting != nil {
+		flushCtx, stop := context.WithTimeout(ctx, time.Second)
+		_ = s.deletionAccounting.FlushDeletionAccounting(flushCtx, x.Account)
+		stop()
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return deletionDatabaseError(err)
@@ -674,7 +685,11 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	if err = tx.QueryRow(ctx, `SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&week); err != nil {
 		return deletionDatabaseError(err)
 	}
-	err = tx.QueryRow(ctx, `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`, x.Account, week).Scan(&committed)
+	usageQuery := `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`
+	if s.observedPolicy {
+		usageQuery = `SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=$2`
+	}
+	err = tx.QueryRow(ctx, usageQuery, x.Account, week).Scan(&committed)
 	if err != nil && err != pgx.ErrNoRows {
 		return deletionDatabaseError(err)
 	}
@@ -706,6 +721,7 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 		err = tx.Commit(ctx)
 	}
 	if err == nil {
+		s.forgetDeletedAccounting(x.Account)
 		return nil
 	}
 	checkCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
@@ -713,9 +729,16 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	var complete bool
 	checkErr := s.db.QueryRow(checkCtx, `SELECT d.completed_at IS NOT NULL AND a.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_deleted') FROM public.deletion_operations d JOIN public.accounts a ON a.id=d.account_id WHERE d.id=$1`, x.ID).Scan(&complete)
 	if checkErr == nil && complete {
+		s.forgetDeletedAccounting(x.Account)
 		return nil
 	}
 	return errDeletionFinalizationUnconfirmed
+}
+
+func (s *Server) forgetDeletedAccounting(account string) {
+	if s.deletionAccounting != nil {
+		s.deletionAccounting.ForgetAccounting(account)
+	}
 }
 
 // importRetainedUsage runs inside the fresh Pending account's creation
@@ -767,7 +790,11 @@ func (s *Server) importRetainedUsage(ctx context.Context, tx pgx.Tx, accountID, 
 	if matches == 0 {
 		return nil
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,$2,$3,0,NULL,0)`, accountID, week, committed); err != nil {
+	openingQuery := `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,$2,$3,0,NULL,0)`
+	if s.observedPolicy {
+		openingQuery = `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,$2,$3,0,NULL,0)`
+	}
+	if _, err = tx.Exec(ctx, openingQuery, accountID, week, committed); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `DELETE FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3`, matchVersion, matchDigest, week)

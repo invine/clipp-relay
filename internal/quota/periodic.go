@@ -39,6 +39,8 @@ type observedAccount struct {
 	invalidated  bool
 	reason       string
 	busy         bool
+	retiring     bool
+	flushCancel  context.CancelFunc
 }
 type periodicAccounting struct {
 	monotonicNow func() time.Time
@@ -202,16 +204,65 @@ func (q *Quota) AccountingCurrent(id string, revision uint64) bool {
 // FlushAccounting attempts each original observation week once. An immutable
 // failed batch remains queued for the same retry, independent of session life.
 func (q *Quota) FlushAccounting(ctx context.Context, id string) error {
+	return q.flushAccounting(ctx, id, false)
+}
+
+// FlushDeletionAccounting stops competing scheduled flushes before its bounded
+// final attempt. Account authority has already been detached by Auth. This
+// cancellation does not discard pending bytes or bypass the durable seal.
+// BeginAccountingDeletion retires scheduled work without erasing pending
+// observations. It is safe before independent journal/finalization retries.
+func (q *Quota) BeginAccountingDeletion(id string) {
+	q.periodic.mu.Lock()
+	a := q.periodic.accounts[id]
+	var cancel context.CancelFunc
+	if a != nil {
+		a.retiring = true
+		cancel = a.flushCancel
+	}
+	q.periodic.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (q *Quota) FlushDeletionAccounting(ctx context.Context, id string) error {
+	q.BeginAccountingDeletion(id)
+	q.periodic.mu.Lock()
+	a := q.periodic.accounts[id]
+	q.periodic.mu.Unlock()
+	if a == nil {
+		return nil
+	}
+	for {
+		q.periodic.mu.Lock()
+		busy := a.busy
+		q.periodic.mu.Unlock()
+		if !busy {
+			return q.flushAccounting(ctx, id, true)
+		}
+		select {
+		case <-ctx.Done():
+			return ErrTemporary
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) error {
 	q.periodic.mu.Lock()
 	a := q.periodic.accounts[id]
 	if a == nil {
 		q.periodic.mu.Unlock()
 		return nil
 	}
-	if a.busy {
+	if a.busy || a.retiring && !deletion {
 		q.periodic.mu.Unlock()
 		return ErrTemporary
 	}
+	flushCtx, cancel := context.WithCancel(ctx)
+	ctx = flushCtx
+	a.flushCancel = cancel
 	a.busy = true
 	weeks := make([]time.Time, 0, len(a.weeks))
 	for week, w := range a.weeks {
@@ -220,7 +271,13 @@ func (q *Quota) FlushAccounting(ctx context.Context, id string) error {
 		}
 	}
 	q.periodic.mu.Unlock()
-	defer func() { q.periodic.mu.Lock(); a.busy = false; q.periodic.mu.Unlock() }()
+	defer func() {
+		cancel()
+		q.periodic.mu.Lock()
+		a.busy = false
+		a.flushCancel = nil
+		q.periodic.mu.Unlock()
+	}()
 	sort.Slice(weeks, func(i, j int) bool { return weeks[i].Before(weeks[j]) })
 	for _, week := range weeks {
 		q.periodic.mu.Lock()
@@ -358,8 +415,10 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 		case <-cadence.C:
 			q.periodic.mu.Lock()
 			ids := make([]string, 0, len(q.periodic.accounts))
-			for id := range q.periodic.accounts {
-				ids = append(ids, id)
+			for id, account := range q.periodic.accounts {
+				if !account.retiring {
+					ids = append(ids, id)
+				}
 			}
 			q.periodic.mu.Unlock()
 			for _, id := range ids {
@@ -414,6 +473,18 @@ func (q *Quota) ForgetAccounting(id string) {
 	q.periodic.mu.Lock()
 	delete(q.periodic.accounts, id)
 	q.periodic.mu.Unlock()
+	// Active attempts may still return an acknowledgement. Their state retires
+	// when their last reference exits; idle uncertain receipts can go now.
+	q.settlementMu.Lock()
+	for key, state := range q.settlements {
+		if key.id == id {
+			state.retired = true
+			if state.refs == 0 {
+				delete(q.settlements, key)
+			}
+		}
+	}
+	q.settlementMu.Unlock()
 }
 
 // ClosureCurrent fences delayed outcomes after accounting recovers.
