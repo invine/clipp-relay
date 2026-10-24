@@ -5,6 +5,8 @@ require 'json'
 stopped, migrating, serving = ARGV.map { |path| YAML.load_stream(File.read(path)).compact }
 find = ->(docs, kind, suffix) { docs.find { |d| d['kind'] == kind && d.dig('metadata', 'name').end_with?(suffix) } }
 [stopped, migrating, serving].each do |docs|
+  config = find.call(docs, 'ConfigMap', '-config') or abort 'config missing'
+  abort 'accounting deadline missing' unless JSON.parse(config.dig('data', 'config.json'))['accounting_failure_deadline'] == '3s'
   abort 'duplicate resource' unless docs.map { |d| [d['kind'], d.dig('metadata', 'name')] }.uniq.length == docs.length
   abort 'chart generated a Secret' if docs.any? { |d| d['kind'] == 'Secret' }
   db = find.call(docs, 'StatefulSet', '-postgres') or abort 'database StatefulSet missing'

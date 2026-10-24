@@ -251,3 +251,11 @@ The original private values are preserved at `~/.config/clipp-relay/managed-rela
 - [Docker Official PostgreSQL image](https://hub.docker.com/_/postgres) — digest/architecture inspection used Docker Registry via `docker buildx imagetools inspect`.
 - [GitHub Container Registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 - [OKE internal NLB and security-rule management annotations](https://docs.oracle.com/en-us/iaas/Content/ContEng/Tasks/contengconfiguringloadbalancersnetworkloadbalancers-subtopic.htm)
+
+Review `accounting.failureDeadline` in the private chart values before rendering
+or resuming the wizard. It maps to runtime `accounting_failure_deadline`, defaults
+to `"3s"`, accepts whole seconds of at least `"1s"`, and requires relay restart.
+The wizard copies that default from the bundled example and preserves edits to
+existing private values. It does not add an environment or flag policy override.
+The cutoff is independent of blocked persistence: unresolved writes close all
+affected sessions at the deadline and temporarily deny admission until recovery.

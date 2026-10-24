@@ -99,3 +99,7 @@ scheduling:
   nodeSelector:
     kubernetes.io/arch: arm64
   tolerations: []
+
+# Accounting cutoff uses whole seconds (minimum 1s); changes require restart.
+accounting:
+  failureDeadline: "3s"

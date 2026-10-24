@@ -34,6 +34,7 @@ policy = find.call(serving, 'NetworkPolicy', 'clipp-relay') or abort 'NetworkPol
 abort 'not default deny' unless policy.dig('spec', 'policyTypes').sort == %w[Egress Ingress] && policy.dig('spec', 'ingress').length >= 3 && policy.dig('spec', 'egress').length >= 3
 config = find.call(serving, 'ConfigMap', '-config') or abort 'config missing'
 settings = JSON.parse(config.dig('data', 'config.json'))
+abort 'accounting deadline missing' unless settings['accounting_failure_deadline'] == '3s'
 abort 'wrong DB target' unless settings.dig('database', 'mode') == 'external' && settings.dig('database', 'host') == 'db.internal.example.test'
 abort 'secret value in config' if config.to_s.include?('client-secret-value')
 puts 'rendered manifest assertions passed'

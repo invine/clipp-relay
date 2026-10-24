@@ -198,6 +198,7 @@ TOTAL_STAGES=19
 START_AT=1
 usage() {
   printf 'Usage: %s [--start-at 1|12|16]\n' "$0"
+  printf '  Chart accounting.failureDeadline defaults to 3s (whole seconds, minimum 1s); review private values before rendering. Changes require relay restart.\n'
   printf '  --start-at 12  Reload saved setup, verify prerequisites, and begin at the CPU capacity check.\n'
   printf '  --start-at 16  Verify the installed release and completed migrations, then resume serving/TLS live checks.\n'
 }
@@ -521,6 +522,7 @@ for name in "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$C
 say "All four application Secret names exist. Existing Secret contents were not read or replaced."
 
 stage "Review the chart values and PostgreSQL target"
+say "Review accounting.failureDeadline in the private chart values: default 3s, minimum 1s, whole seconds. It controls the accounting outage cutoff and takes effect after relay restart; keep a bounded tolerance."
 ask CLIPP_TEST_GO_REPO "Paste the isolated Go relay checkout path (Enter uses the canonical integration worktree):"
 if [[ -z "$CLIPP_TEST_GO_REPO" ]]; then CLIPP_TEST_GO_REPO="/Users/invine/src/go/clipp-relay"; fi
 require_file "$CLIPP_TEST_GO_REPO/charts/clipp-relay/examples/bundled-test-values.yaml"

@@ -133,7 +133,11 @@ func requireProtectedAuthentication(t *testing.T, h host.Host, p protectedPortal
 }
 
 func TestProductionProtectionClosesAllOnSessionCapReduction(t *testing.T) {
-	p := protectedPortalFixture(t)
+	t.Run("prepaid", func(t *testing.T) { testProtectedSessionCap(t, relay.NewProtected) })
+	t.Run("observed", func(t *testing.T) { testProtectedSessionCap(t, relay.NewObservedProtected) })
+}
+func testProtectedSessionCap(t *testing.T, construct func(*auth.Server, *quota.Quota, relay.Options) (*relay.Server, error)) {
+	p := protectedPortalFixtureWithRelay(t, construct)
 	p.mutate(t, "override", "2", url.Values{"sessions_override": {"2"}})
 	first, second := protectedClient(t, p), protectedClient(t, p)
 	requireProtectedAuthentication(t, first, p, `"ok":true`)
@@ -161,7 +165,11 @@ func TestProductionProtectionClosesAllOnSessionCapReduction(t *testing.T) {
 }
 
 func TestProductionProtectionInvalidationDefeatsInFlightAuthentication(t *testing.T) {
-	p := protectedPortalFixture(t)
+	t.Run("prepaid", func(t *testing.T) { testProtectedInvalidation(t, relay.NewProtected) })
+	t.Run("observed", func(t *testing.T) { testProtectedInvalidation(t, relay.NewObservedProtected) })
+}
+func testProtectedInvalidation(t *testing.T, construct func(*auth.Server, *quota.Quota, relay.Options) (*relay.Server, error)) {
+	p := protectedPortalFixtureWithRelay(t, construct)
 	h := protectedClient(t, p)
 	entered, release := make(chan struct{}), make(chan struct{})
 	releaseAuth := sync.OnceFunc(func() { close(release) })
@@ -302,4 +310,59 @@ func TestProductionObservedReporterSharedExhaustionClosesEverySession(t *testing
 	if len(first.Network().ConnsToPeer(p.relay.Host.ID())) > 0 || len(second.Network().ConnsToPeer(p.relay.Host.ID())) > 0 {
 		t.Fatal("exhausted physical connections remain open")
 	}
+}
+
+func TestProductionObservedPolicyEditsPreservePendingAndEnforceEquality(t *testing.T) {
+	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	first := protectedClient(t, p)
+	requireProtectedAuthentication(t, first, p, `"ok":true`)
+	if err := p.quota.Observe(p.account, 60); err != nil {
+		t.Fatal(err)
+	}
+	p.mutate(t, "override", "2", url.Values{"weekly_bytes_override": {"60"}, "sessions_override": {"2"}})
+	if got := p.relay.AccountSessions(p.account); got != 0 {
+		t.Fatalf("cap equality retained %d sessions", got)
+	}
+	p.mutate(t, "override", "3", url.Values{"weekly_bytes_override": {"100"}})
+	replacement := protectedClient(t, p)
+	requireProtectedAuthentication(t, replacement, p, `"ok":true`)
+	if err := p.quota.FlushAccounting(context.Background(), p.account); err != nil && err != quota.ErrTemporary {
+		t.Fatal(err)
+	}
+	eligible, err := p.quota.Eligibility(context.Background(), p.account, 0)
+	if err != nil || eligible.EffectiveBytes != 60 {
+		t.Fatalf("policy edit reset consumption: %+v %v", eligible, err)
+	}
+	p.mutate(t, "override", "4", url.Values{"weekly_bytes_override": {"59"}})
+	if got := p.relay.AccountSessions(p.account); got != 0 {
+		t.Fatalf("cap reduction retained %d sessions", got)
+	}
+}
+
+func TestProductionObservedSuspensionRetainsUsage(t *testing.T) {
+	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	first := protectedClient(t, p)
+	requireProtectedAuthentication(t, first, p, `"ok":true`)
+	if err := p.quota.Observe(p.account, 83); err != nil {
+		t.Fatal(err)
+	}
+	p.mutate(t, "suspend", "2", nil)
+	if got := p.relay.AccountSessions(p.account); got != 0 {
+		t.Fatalf("suspension retained %d sessions", got)
+	}
+	if err := p.quota.FlushAccounting(context.Background(), p.account); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	days := (int(now.Weekday()) + 6) % 7
+	week := time.Date(now.Year(), now.Month(), now.Day()-days, 0, 0, 0, 0, time.UTC)
+	usage, err := p.quota.RecordedUsage(context.Background(), p.account, week)
+	if err != nil || usage.RecordedBytes != 83 {
+		t.Fatalf("suspension lost usage: %+v %v", usage, err)
+	}
+	if _, err := p.quota.Eligibility(context.Background(), p.account, 0); err != quota.ErrTemporary {
+		t.Fatalf("suspended account eligible: %v", err)
+	}
+	replacement := protectedClient(t, p)
+	requireProtectedAuthentication(t, replacement, p, "authentication_failed")
 }
