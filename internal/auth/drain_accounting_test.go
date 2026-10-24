@@ -2,8 +2,10 @@ package auth_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +20,7 @@ import (
 )
 
 func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
-	for _, mode := range []string{"complete", "blocked-final", "forced-active"} {
+	for _, mode := range []string{"complete", "blocked-final", "forced-active", "forced-after-accounting-cutoff"} {
 		t.Run(mode, func(t *testing.T) {
 			p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -36,6 +38,12 @@ func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
 				return h
 			}
 			dest, src := create(), create()
+			// Capture the exact admitted physical connections at the Relay boundary.
+			// Remote swarm registries may retain a half after its streams have reset.
+			initialRelay := p.relay.Host.Network().Conns()
+			if len(initialRelay) != 2 {
+				t.Fatalf("expected both admitted physical endpoints, got %d", len(initialRelay))
+			}
 			ai := peer.AddrInfo{ID: p.relay.Host.ID(), Addrs: p.relay.Host.Addrs()}
 			if _, err := circuitclient.Reserve(ctx, dest, ai); err != nil {
 				t.Fatal(err)
@@ -85,22 +93,42 @@ func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
 				t.Fatalf("drain ended with open circuit: %v", err)
 			default:
 			}
-			if mode == "forced-active" {
+			if mode == "forced-active" || mode == "forced-after-accounting-cutoff" {
+				if mode == "forced-after-accounting-cutoff" {
+					p.quota.AccountingFailed(p.account)
+				}
 				stop()
 				select {
 				case err := <-finished:
-					if err != context.Canceled {
+					// Accounting cutoff can finish the circuit just before the
+					// forced context is observed. Either completion must
+					// leave the same exact transports closed below.
+					if err != context.Canceled && !(mode == "forced-after-accounting-cutoff" && err == nil) {
 						t.Fatalf("forced=%v", err)
 					}
 				case <-time.After(time.Second):
 					t.Fatal("forced drain blocked")
 				}
-				until = time.Now().Add(time.Second)
-				for len(src.Network().ConnsToPeer(p.relay.Host.ID())) != 0 && time.Now().Before(until) {
-					time.Sleep(time.Millisecond)
+				for _, conn := range initialRelay {
+					if !conn.IsClosed() {
+						t.Fatalf("forced drain left admitted physical connection %s open", conn.ID())
+					}
 				}
-				if len(src.Network().ConnsToPeer(p.relay.Host.ID())) != 0 {
-					t.Fatal("forced drain left physical session")
+				if p.relay.AccountSessions(p.account) != 0 || len(p.relay.Host.Network().Conns()) != 0 {
+					t.Fatal("forced drain retained local session authority")
+				}
+				// The actual admitted circuit must abort too; a timeout is not
+				// evidence of closure. Checking only the remote swarm's Conn
+				// registry races its independent transport cleanup.
+				_ = st.SetReadDeadline(time.Now().Add(time.Second))
+				var byteAfterForce [1]byte
+				_, readErr := io.ReadFull(st, byteAfterForce[:])
+				if readErr == nil {
+					t.Fatal("forced circuit still carried traffic")
+				}
+				var timeout net.Error
+				if errors.As(readErr, &timeout) && timeout.Timeout() {
+					t.Fatalf("forced circuit failed to abort: %v", readErr)
 				}
 				return
 			}
