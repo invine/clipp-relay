@@ -20,3 +20,6 @@ Authorization: user requested all eight tickets with implement-spec on 2026-10-2
 
 - 03 integrated/resolved: source `cd9dc6a6223f6cd5b6f531db1d911d0b9095312f`, integrated `a53594a869be7cea30a9ddbd4451b0101f4b2fcd`; source PG/race/Relay checks and integrated PG checks passed. Artifacts `clipp-periodic-03-{handoff,integration}.md`.
 - 04 claimed by health-04 and 05 by weekly-05, at the two-implementer bound. 04 implements accepted I5 configurable monotonic health/immediate protected policy without erasing usage. 05 implements accepted I3/I4/I8 weekly attribution/retention and authority-free confirmed query models. Both preserve physical admission and no serving activation before08.
+
+- 05 source `8c45148d62236e587c21b0fde3f2907056eae409` merged at `1742988e6fcb19faf5edf50d1b7cb34933dcf3fc`; integration verification in progress. Implementer work complete; 04 incorporates combined invalidation/week gate.
+- 06 claimed by deletion-06 (03 resolved, implementation slot free). Approved I4/I7: immediate deletion invalidation, bounded best-effort final flush outside logical protection, account-row serialized durable capture/seal, privacy-minimal exact-once retained import; independent journal prerequisites remain mandatory.
