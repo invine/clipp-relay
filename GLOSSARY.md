@@ -21,7 +21,7 @@ Clipp's logical owner-scoped group whose membership is maintained by its devices
 _Avoid_: Relay Account, relay tenant
 
 **Relay Quota**:
-The administrator-defined allowance governing a Relay Account's weekly Quota Committed and concurrent Relay Sessions.
+The administrator-defined allowance governing a Relay Account's weekly traffic usage and concurrent Relay Sessions.
 _Avoid_: Client quota, device quota
 
 **Weekly Quota Window**:
@@ -29,11 +29,15 @@ The period from Monday at 00:00 UTC until the following Monday at 00:00 UTC duri
 _Avoid_: Billing period, rolling week
 
 **Quota Committed**:
-The portion of a Relay Account's weekly traffic allowance committed to relay-use credit, including both spent and still-unused reserved credit. It is the quota consumption shown in the portal, not a measurement of transferred bytes; ordinary operation does not refund it, while disaster recovery may explicitly reset an unrecoverable amount.
+The prepaid measure of a Relay Account's weekly allowance committed to relay-use credit, including both spent and still-unused reserved credit. It is distinct from observed traffic and Recorded Relay Usage; ordinary operation does not refund it.
 _Avoid_: Charged Relay Traffic, exact transferred bytes
 
+**Recorded Relay Usage**:
+The portion of a Relay Account's Charged Relay Traffic confirmed as recorded against its Weekly Quota Window. It can exceed the allowance and excludes observations not yet recorded.
+_Avoid_: Quota Committed, exact payload traffic
+
 **Retained Quota Usage**:
-The privacy-minimal record of a deleted Relay Account's Quota Committed for the current Weekly Quota Window. It preserves consumption on re-registration within that window and expires when the window ends, without preserving the deleted account or its Device Identities.
+The privacy-minimal record of a deleted Relay Account's confirmed quota consumption for the current Weekly Quota Window. It preserves consumption on re-registration within that window and expires when the window ends, without preserving the deleted account or its Device Identities.
 _Avoid_: Quota Carryover, quota rollover, deleted account, denial record
 
 **Quota Plan**:
