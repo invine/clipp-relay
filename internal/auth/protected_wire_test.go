@@ -29,6 +29,7 @@ type protectedPortal struct {
 	config                config.Config
 	auth                  *auth.Server
 	relay                 *relay.Server
+	quota                 *quota.Quota
 	admin, owner          *http.Cookie
 	account, access, csrf string
 }
@@ -56,7 +57,7 @@ func protectedPortalFixture(t *testing.T) protectedPortal {
 	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, "protected-owner-"+suffix).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	p := protectedPortal{provider: d, config: c, auth: s, relay: r, admin: admin, owner: owner, account: id, csrf: csrfFrom(t, s, admin)}
+	p := protectedPortal{provider: d, config: c, auth: s, relay: r, quota: q, admin: admin, owner: owner, account: id, csrf: csrfFrom(t, s, admin)}
 	p.mutate(t, "approve", "1", nil)
 	p.access, _ = redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, owner, "android", c.PublicClients.AndroidRedirect))
 	return p
@@ -231,5 +232,20 @@ func TestProductionProtectionCrossAccountReplacementAtCapacity(t *testing.T) {
 	}
 	if len(original.Network().ConnsToPeer(p.relay.Host.ID())) != 0 {
 		t.Fatal("cross-account replacement left original physical connection open")
+	}
+}
+
+func TestProductionProtectionComposesObservedSettlement(t *testing.T) {
+	p := protectedPortalFixture(t)
+	now := time.Now().UTC()
+	days := (int(now.Weekday()) + 6) % 7
+	week := time.Date(now.Year(), now.Month(), now.Day()-days, 0, 0, 0, 0, time.UTC)
+	op, err := quota.NewOperationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := p.quota.Settle(context.Background(), quota.Settlement{AccountID: p.account, WeekStart: week, OperationID: op, Sequence: 1, DeltaBytes: 123456})
+	if err != nil || result.RecordedBytes != 123456 {
+		t.Fatalf("composed settlement=%+v %v", result, err)
 	}
 }

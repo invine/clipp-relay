@@ -217,7 +217,11 @@ func NewProtected(a *auth.Server, credit *quota.Quota, opts Options) (*Server, e
 		return nil, errors.New("relay authority and quota required")
 	}
 	return newServer(a, credit, opts, func(s *Server) error {
-		return a.ConfigureRelayProtection(credit, s)
+		if err := a.ConfigureRelayProtection(credit, s); err != nil {
+			return err
+		}
+		credit.SetSettlementProtection(a)
+		return nil
 	})
 }
 
