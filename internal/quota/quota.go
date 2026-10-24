@@ -133,16 +133,30 @@ func NewWithRuntime(runtime *database.Runtime) *Quota {
 	go q.probeLoop()
 	return q
 }
+
+// Close cancels workers; graceful persistence belongs to FlushAllAccounting.
+// A faulty dependency cannot indefinitely hold process termination open.
 func (q *Quota) Close() {
 	q.periodic.mu.Lock()
 	cancel, done := q.periodic.cancel, q.periodic.done
 	q.periodic.mu.Unlock()
 	if cancel != nil {
 		cancel()
-		<-done
 	}
 	close(q.stop)
-	<-q.done
+	deadline := time.NewTimer(100 * time.Millisecond)
+	defer deadline.Stop()
+	if done != nil {
+		select {
+		case <-done:
+		case <-deadline.C:
+			return
+		}
+	}
+	select {
+	case <-q.done:
+	case <-deadline.C:
+	}
 }
 
 // NewOperationID produces a cryptographically random stable operation identifier.
@@ -542,7 +556,7 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 	if q.beforeLock != nil {
 		q.beforeLock()
 	}
-	err = tx.QueryRow(ctx, `SELECT a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 FOR UPDATE OF a`, id).Scan(&status, &actual, &cap)
+	err = tx.QueryRow(ctx, `SELECT a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND NOT a.recovery_review_hold FOR UPDATE OF a`, id).Scan(&status, &actual, &cap)
 	if err == pgx.ErrNoRows {
 		return funding{}, errAccountBlocked
 	}
@@ -663,7 +677,7 @@ func (q *Quota) fund(ctx context.Context, id string, generation int64, op string
 	var currentGeneration, currentCap int64
 	beforePost := q.now()
 	err = q.runtime.Unit(ctx, func(unitCtx context.Context, conn *pgxpool.Conn) error {
-		return conn.QueryRow(unitCtx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, id).Scan(&postTime, &currentStatus, &currentGeneration, &currentCap)
+		return conn.QueryRow(unitCtx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND NOT a.recovery_review_hold`, id).Scan(&postTime, &currentStatus, &currentGeneration, &currentCap)
 	})
 	afterPost := q.now()
 	if err != nil {

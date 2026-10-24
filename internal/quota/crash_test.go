@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestAllocationProcessCrashAtCommitBoundary(t *testing.T) {
+func TestObservedProcessCrashAtCommitBoundary(t *testing.T) {
 	if mode := os.Getenv("CLIPP_CRASH_MODE"); mode != "" {
 		path := os.Getenv("CLIPP_TEST_SERVING_CONFIG")
 		c, err := config.Load(path)
@@ -40,14 +40,17 @@ func TestAllocationProcessCrashAtCommitBoundary(t *testing.T) {
 		}
 		switch mode {
 		case "before":
-			q.beforeCommit = func(context.Context, pgx.Tx) error { hold(); return nil }
+			q.SetSettlementHooksForTest(func(context.Context, pgx.Tx) error { hold(); return nil }, nil)
 		case "after":
-			q.afterCommit = func() error { hold(); return nil }
+			q.SetSettlementHooksForTest(nil, func(context.Context) error { hold(); return nil })
 		default:
 			t.Fatalf("unknown crash mode %q", mode)
 		}
-		_, _ = q.Take(context.Background(), os.Getenv("CLIPP_CRASH_ACCOUNT"), 0, 1024)
-		t.Fatal("allocation returned before process kill")
+		q.SetSettlementProtection(settlementTestProtection{})
+		_, _ = q.Eligibility(context.Background(), os.Getenv("CLIPP_CRASH_ACCOUNT"), 0)
+		_ = q.Observe(os.Getenv("CLIPP_CRASH_ACCOUNT"), 12345)
+		_ = q.FlushAccounting(context.Background(), os.Getenv("CLIPP_CRASH_ACCOUNT"))
+		t.Fatal("settlement returned before process kill")
 	}
 
 	for _, tc := range []struct {
@@ -55,12 +58,12 @@ func TestAllocationProcessCrashAtCommitBoundary(t *testing.T) {
 		durable   int64
 		restarted int64
 	}{
-		{"before", 0, BlockBytes},
-		{"after", BlockBytes, 2 * BlockBytes},
+		{"before", 0, 0},
+		{"after", 12345, 12345},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			_, id, pool := fixture(t)
-			child := exec.Command(os.Args[0], "-test.run=^TestAllocationProcessCrashAtCommitBoundary$")
+			child := exec.Command(os.Args[0], "-test.run=^TestObservedProcessCrashAtCommitBoundary$")
 			child.Env = append(os.Environ(), "CLIPP_CRASH_MODE="+tc.mode, "CLIPP_CRASH_ACCOUNT="+id)
 			stdout, err := child.StdoutPipe()
 			if err != nil {
@@ -99,14 +102,23 @@ func TestAllocationProcessCrashAtCommitBoundary(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var durable int64
-			if err := pool.QueryRow(ctx, `SELECT COALESCE((SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1),0)`, id).Scan(&durable); err != nil || durable != tc.durable {
+			if err := pool.QueryRow(ctx, `SELECT COALESCE((SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1),0)`, id).Scan(&durable); err != nil || durable != tc.durable {
 				t.Fatalf("durable debit after %s crash = %d, want %d: %v", tc.mode, durable, tc.durable, err)
 			}
 			restarted := New(pool)
 			defer restarted.Close()
-			got, err := restarted.Take(ctx, id, 0, 1024)
-			if err != nil || got.Committed != tc.restarted || got.Usable != BlockBytes-1024 {
-				t.Fatalf("fresh process credit after %s crash = %+v, want committed %d and usable %d: %v", tc.mode, got, tc.restarted, BlockBytes-1024, err)
+			restarted.SetSettlementProtection(settlementTestProtection{})
+			got, err := restarted.Eligibility(ctx, id, 0)
+			if err != nil || got.RecordedBytes != tc.restarted || got.EffectiveBytes != tc.restarted {
+				t.Fatalf("restart after %s = %+v: %v", tc.mode, got, err)
+			}
+			// A graceful no-observation flush after restart creates no debit.
+			if err := restarted.FlushAllAccounting(ctx); err != nil {
+				t.Fatal(err)
+			}
+			usage, err := restarted.RecordedUsage(ctx, id, weekStart(time.Now()))
+			if err != nil || usage.RecordedBytes != tc.restarted {
+				t.Fatalf("restart flush=%+v %v", usage, err)
 			}
 		})
 	}

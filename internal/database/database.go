@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 11
+const ExpectedRevision = 12
 
 type migration struct {
 	revision int
@@ -268,7 +268,16 @@ REVOKE ALL ON public.cleanup_breach_record FROM PUBLIC;`}, {11, `CREATE TABLE pu
  CHECK (recorded_bytes >= latest_delta_bytes AND ((sequence=0 AND latest_operation_id IS NULL AND latest_delta_bytes=0) OR (sequence>0 AND latest_operation_id IS NOT NULL AND latest_delta_bytes>0)))
 );
 CREATE INDEX weekly_relay_usage_retention ON public.weekly_relay_usage(week_start,account_id);
-REVOKE ALL ON public.weekly_relay_usage FROM PUBLIC;`}}
+REVOKE ALL ON public.weekly_relay_usage FROM PUBLIC;`}, {12, `ALTER TABLE public.accounts ADD COLUMN recovery_review_hold boolean NOT NULL DEFAULT false;
+CREATE TABLE public.recovery_runs (
+ run_id uuid PRIMARY KEY,
+ source text NOT NULL CHECK (length(source) BETWEEN 1 AND 255),
+ target text NOT NULL CHECK (length(target) BETWEEN 1 AND 255 AND target<>source),
+ schema_revision integer NOT NULL,
+ journal_head jsonb NOT NULL,
+ completed_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+REVOKE ALL ON public.recovery_runs FROM PUBLIC;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
@@ -407,6 +416,23 @@ SELECT
 	if err = conn.QueryRow(ctx, `SELECT pg_size_bytes(current_setting('temp_file_limit')) BETWEEN 1 AND 67108864`).Scan(&boundedTemp); err != nil || !boundedTemp {
 		return errors.New("serving database temporary-file limit unavailable or unsafe")
 	}
+	return verifySchema(ctx, conn)
+}
+
+// VerifySchema checks the exact migration history without requiring a serving
+// role. Offline recovery uses maintenance credentials and cannot use that role gate.
+func VerifySchema(ctx context.Context, p *pgxpool.Pool) error {
+	conn, err := p.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	if err = verifyMajor(ctx, conn); err != nil {
+		return err
+	}
+	return verifySchema(ctx, conn)
+}
+func verifySchema(ctx context.Context, conn *pgxpool.Conn) error {
 	rows, err := conn.Query(ctx, "SELECT revision, checksum FROM public.schema_migrations ORDER BY revision")
 	if err != nil {
 		return errors.New("schema revision unavailable")

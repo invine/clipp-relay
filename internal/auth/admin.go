@@ -52,14 +52,15 @@ type accountActionSpec struct {
 }
 
 var accountActions = map[string]accountActionSpec{
-	"approve":    {map[string]bool{"Pending": true}, "account_approved", "Active", false, true},
-	"deny":       {map[string]bool{"Pending": true, "Active": true, "Suspended": true}, "account_denied", "Denied", true, false},
-	"assign":     {map[string]bool{"Active": true}, "plan_assigned", "", false, true},
-	"suspend":    {map[string]bool{"Active": true}, "account_suspended", "Suspended", true, false},
-	"reactivate": {map[string]bool{"Suspended": true}, "account_reactivated", "Active", false, false},
-	"review":     {map[string]bool{"Denied": true}, "account_reviewed", "Pending", false, false},
-	"revoke":     {map[string]bool{"Pending": true, "Active": true, "Suspended": true, "Denied": true}, "credentials_revoked", "", true, false},
-	"override":   {map[string]bool{"Active": true}, "quota_overridden", "", false, false},
+	"recovery-review": {map[string]bool{"Pending": true, "Active": true, "Suspended": true, "Denied": true}, "account_reviewed", "", false, false},
+	"approve":         {map[string]bool{"Pending": true}, "account_approved", "Active", false, true},
+	"deny":            {map[string]bool{"Pending": true, "Active": true, "Suspended": true}, "account_denied", "Denied", true, false},
+	"assign":          {map[string]bool{"Active": true}, "plan_assigned", "", false, true},
+	"suspend":         {map[string]bool{"Active": true}, "account_suspended", "Suspended", true, false},
+	"reactivate":      {map[string]bool{"Suspended": true}, "account_reactivated", "Active", false, false},
+	"review":          {map[string]bool{"Denied": true}, "account_reviewed", "Pending", false, false},
+	"revoke":          {map[string]bool{"Pending": true, "Active": true, "Suspended": true, "Denied": true}, "credentials_revoked", "", true, false},
+	"override":        {map[string]bool{"Active": true}, "quota_overridden", "", false, false},
 }
 
 func reasonOK(reason string) bool {
@@ -226,6 +227,7 @@ func (s *Server) sessionDigest(r *http.Request, version uint64) []byte {
 }
 
 type adminAccountRow struct {
+	RecoveryHeld                                               bool
 	ID, Email, Status, PlanID, WeeklyOverride, SessionOverride string
 	Revision                                                   int64
 	Usage                                                      *accountUsageQuery
@@ -345,14 +347,14 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	rows, err = s.db.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
+	rows, err = s.db.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision,recovery_review_hold FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
 	if err != nil {
 		fail(w, 503)
 		return
 	}
 	for rows.Next() {
 		var x adminAccountRow
-		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.WeeklyOverride, &x.SessionOverride, &x.Revision) != nil {
+		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.WeeklyOverride, &x.SessionOverride, &x.Revision, &x.RecoveryHeld) != nil {
 			rows.Close()
 			fail(w, 503)
 			return
@@ -621,7 +623,14 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 			oldSessions = nil
 		}
 	}
-	if action == "approve" || action == "assign" {
+	if action == "recovery-review" {
+		tag, err := tx.Exec(ctx, `UPDATE public.accounts SET recovery_review_hold=false,revision=revision+1 WHERE id=$1 AND recovery_review_hold`, target)
+		e = err
+		if e == nil && tag.RowsAffected() != 1 {
+			fail(w, 409)
+			return
+		}
+	} else if action == "approve" || action == "assign" {
 		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,plan_id=$3,revision=revision+1 WHERE id=$1`, target, newStatus, plan)
 		if e == nil {
 			_, e = tx.Exec(ctx, `UPDATE public.quota_plans SET first_assigned_at=COALESCE(first_assigned_at,clock_timestamp()) WHERE id=$1`, plan)
