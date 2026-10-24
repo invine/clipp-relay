@@ -25,3 +25,6 @@ Authorization: user requested all eight tickets with implement-spec on 2026-10-2
 - 06 claimed by deletion-06 (03 resolved, implementation slot free). Approved I4/I7: immediate deletion invalidation, bounded best-effort final flush outside logical protection, account-row serialized durable capture/seal, privacy-minimal exact-once retained import; independent journal prerequisites remain mandatory.
 
 - 05 resolved after integrated PG18 periodic/presentation/retention passed; focused review no issues. Artifacts `clipp-periodic-05-{handoff,integration}.md`. Full final fresh DB acceptance remains08.
+
+- 04 integrated/resolved: source `ed79b585392eb74a9f89a692d1972c2f759909ef`, integrated `c426d55d7a14e7071c1df13741bfa8b33b438dd9`; combined05 source race/checks and integrated PG/config checks passed, focused review no issues. Artifacts `clipp-periodic-04-{handoff,integration}.md`.
+- Recovery exploration found baseline has no restore command or Recovery Review Hold (prior managed-relay ticket22 is still unimplemented). 07 must implement the local safeguards explicitly required by this parent spec, without claiming physical backup/provider/cluster qualification or silently marking absent protections preserved. The accepted recovery/privacy requirements remain unchanged.
