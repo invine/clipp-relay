@@ -49,19 +49,22 @@ func (b *balance) clearPending() {
 }
 
 type Quota struct {
-	runtime       *database.Runtime
-	diagnostics   *diagnostic.Logger
-	mu            sync.Mutex
-	balances      map[string]*balance
-	clock         clockState
-	stop          chan struct{}
-	done          chan struct{}
-	beforeCommit  func(context.Context, pgx.Tx) error
-	afterCommit   func() error
-	adjustTime    func(time.Time) time.Time
-	probeQuery    func(context.Context) (time.Time, error)
-	beforeLock    func()
-	beforeInstall func()
+	settlementProtection SettlementProtection
+	settlementMu         sync.Mutex
+	settlements          map[settlementKey]*settlementState
+	runtime              *database.Runtime
+	diagnostics          *diagnostic.Logger
+	mu                   sync.Mutex
+	balances             map[string]*balance
+	clock                clockState
+	stop                 chan struct{}
+	done                 chan struct{}
+	beforeCommit         func(context.Context, pgx.Tx) error
+	afterCommit          func() error
+	adjustTime           func(time.Time) time.Time
+	probeQuery           func(context.Context) (time.Time, error)
+	beforeLock           func()
+	beforeInstall        func()
 }
 
 // SetDiagnostics connects the process-wide, bounded application logger.

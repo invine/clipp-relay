@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 10
+const ExpectedRevision = 11
 
 type migration struct {
 	revision int
@@ -257,7 +257,18 @@ ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event
  worst_age_seconds bigint NOT NULL DEFAULT 0 CHECK (worst_age_seconds >= 0)
 );
 INSERT INTO public.cleanup_breach_record(singleton) VALUES(true);
-REVOKE ALL ON public.cleanup_breach_record FROM PUBLIC;`}}
+REVOKE ALL ON public.cleanup_breach_record FROM PUBLIC;`}, {11, `CREATE TABLE public.weekly_relay_usage (
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ week_start date NOT NULL CHECK (EXTRACT(ISODOW FROM week_start)=1),
+ recorded_bytes bigint NOT NULL CHECK (recorded_bytes >= 0),
+ sequence bigint NOT NULL CHECK (sequence >= 0),
+ latest_operation_id uuid,
+ latest_delta_bytes bigint NOT NULL CHECK (latest_delta_bytes >= 0),
+ PRIMARY KEY (account_id,week_start),
+ CHECK (recorded_bytes >= latest_delta_bytes AND ((sequence=0 AND latest_operation_id IS NULL AND latest_delta_bytes=0) OR (sequence>0 AND latest_operation_id IS NOT NULL AND latest_delta_bytes>0)))
+);
+CREATE INDEX weekly_relay_usage_retention ON public.weekly_relay_usage(week_start,account_id);
+REVOKE ALL ON public.weekly_relay_usage FROM PUBLIC;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

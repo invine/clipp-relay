@@ -45,7 +45,13 @@ func fixture(t *testing.T) (*Quota, string, *pgxpool.Pool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = p.Exec(context.Background(), `DELETE FROM public.weekly_quota_usage WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, id)
+		for _, query := range []string{
+			`DELETE FROM public.weekly_relay_usage WHERE account_id=$1`,
+			`DELETE FROM public.weekly_quota_usage WHERE account_id=$1`,
+			`DELETE FROM public.accounts WHERE id=$1`,
+		} {
+			_, _ = p.Exec(context.Background(), query, id)
+		}
 	})
 	q := New(p)
 	t.Cleanup(q.Close)
