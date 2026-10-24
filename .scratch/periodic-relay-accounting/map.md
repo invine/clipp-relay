@@ -22,6 +22,8 @@ All eight tickets requested on 2026-10-24. See [run](run.md) for local implement
 
 - [07](issues/07-drain-restart-and-recovery.md): bounded lifecycle/restart and concrete local recovery safeguards integrated; forced-drain correction verified with original mixed/race tests.
 
+- [08](issues/08-migration-and-integrated-verification.md): sole observed composition and migration13 complete; final routine/race/fresh PG smoke passed, both independent review findings fixed and re-reviewed clear.
+
 ## Fog
 
 No product decision remains open. Native/live acceptance is outside local implementation.
