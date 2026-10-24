@@ -1103,9 +1103,9 @@ printf '%s' "$migration_job_json" | ruby -rjson -e '
 migration_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$migration_job" -c migrate --tail=100) || die "Could not verify the completed migration log."
 printf '%s\n' "$migration_logs" | ruby -rjson -e '
   records = STDIN.each_line.map { |line| JSON.parse(line) rescue nil }.compact
-  abort "migration revision 10 completion record missing" unless records.any? { |r| r["msg"] == "migration complete" && r["revision"] == 10 }
+  abort "migration revision 13 completion record missing" unless records.any? { |r| r["event"] == "service.startup" && r["outcome"] == "success" && r["schema_revision"] == 13 }
 ' || die "Migration completion or schema revision could not be verified."
-say "The migration Job completed and reported schema revision 10."
+say "The migration Job completed and reported schema revision 13."
 }
 
 if [[ "$START_AT" != 16 ]]; then

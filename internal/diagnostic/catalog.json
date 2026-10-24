@@ -1501,97 +1501,6 @@
       "duration_measurable": true
     },
     {
-      "event": "quota.funding",
-      "pairs": [
-        [
-          "success",
-          "none"
-        ],
-        [
-          "refused",
-          "quota_exhausted"
-        ],
-        [
-          "refused",
-          "account_blocked"
-        ],
-        [
-          "failed",
-          "database_unavailable"
-        ],
-        [
-          "failed",
-          "clock_unavailable"
-        ],
-        [
-          "uncertain",
-          "allocation_unconfirmed"
-        ]
-      ],
-      "transports": [
-        "none"
-      ],
-      "clients": [
-        "none"
-      ],
-      "log": "activity",
-      "duration_measurable": true
-    },
-    {
-      "event": "quota.credit_retired",
-      "pairs": [
-        [
-          "success",
-          "none"
-        ],
-        [
-          "success",
-          "expired"
-        ],
-        [
-          "success",
-          "discarded"
-        ]
-      ],
-      "transports": [
-        "none"
-      ],
-      "clients": [
-        "none"
-      ],
-      "log": "activity",
-      "duration_measurable": false
-    },
-    {
-      "event": "quota.reporting",
-      "pairs": [
-        [
-          "success",
-          "none"
-        ],
-        [
-          "failed",
-          "database_unavailable"
-        ],
-        [
-          "failed",
-          "reporting_failed"
-        ],
-        [
-          "failed",
-          "clock_unavailable"
-        ]
-      ],
-      "transports": [
-        "none"
-      ],
-      "clients": [
-        "none"
-      ],
-      "log": "failure_only",
-      "duration_measurable": true
-    },
-    {
       "event": "dependency.database",
       "pairs": [
         [
@@ -1895,6 +1804,105 @@
       ],
       "duration_measurable": false,
       "log": "failure_only"
+    },
+    {
+      "event": "quota.settlement",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "quota_exhausted"
+        ],
+        [
+          "uncertain",
+          "settlement_unconfirmed"
+        ],
+        [
+          "refused",
+          "settlement_conflict"
+        ],
+        [
+          "refused",
+          "usage_retired"
+        ],
+        [
+          "failed",
+          "accounting_unavailable"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "quota.eligibility",
+      "pairs": [
+        [
+          "success",
+          "none"
+        ],
+        [
+          "refused",
+          "quota_exhausted"
+        ],
+        [
+          "uncertain",
+          "settlement_unconfirmed"
+        ],
+        [
+          "refused",
+          "settlement_conflict"
+        ],
+        [
+          "refused",
+          "usage_retired"
+        ],
+        [
+          "failed",
+          "accounting_unavailable"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "quota.health",
+      "pairs": [
+        [
+          "refused",
+          "quota_exhausted"
+        ],
+        [
+          "refused",
+          "accounting_unavailable"
+        ],
+        [
+          "refused",
+          "clock_unavailable"
+        ]
+      ],
+      "transports": [
+        "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": false
     }
   ],
   "limits": {

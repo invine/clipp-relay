@@ -36,9 +36,6 @@ type protectedPortal struct {
 }
 
 func protectedPortalFixture(t *testing.T) protectedPortal {
-	return protectedPortalFixtureWithRelay(t, relay.NewProtected)
-}
-func protectedPortalFixtureWithRelay(t *testing.T, construct func(*auth.Server, *quota.Quota, relay.Options) (*relay.Server, error)) protectedPortal {
 	t.Helper()
 	c, m, db := fixture(t)
 	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
@@ -49,7 +46,7 @@ func protectedPortalFixtureWithRelay(t *testing.T, construct func(*auth.Server, 
 	s := auth.NewWithRuntime(db, c, m, d.endpoints())
 	q := quota.NewWithRuntime(db)
 	t.Cleanup(q.Close)
-	r, err := construct(s, q, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	r, err := relay.NewProtected(s, q, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,11 +130,10 @@ func requireProtectedAuthentication(t *testing.T, h host.Host, p protectedPortal
 }
 
 func TestProductionProtectionClosesAllOnSessionCapReduction(t *testing.T) {
-	t.Run("prepaid", func(t *testing.T) { testProtectedSessionCap(t, relay.NewProtected) })
-	t.Run("observed", func(t *testing.T) { testProtectedSessionCap(t, relay.NewObservedProtected) })
+	t.Run("observed", func(t *testing.T) { testProtectedSessionCap(t) })
 }
-func testProtectedSessionCap(t *testing.T, construct func(*auth.Server, *quota.Quota, relay.Options) (*relay.Server, error)) {
-	p := protectedPortalFixtureWithRelay(t, construct)
+func testProtectedSessionCap(t *testing.T) {
+	p := protectedPortalFixture(t)
 	p.mutate(t, "override", "2", url.Values{"sessions_override": {"2"}})
 	first, second := protectedClient(t, p), protectedClient(t, p)
 	requireProtectedAuthentication(t, first, p, `"ok":true`)
@@ -165,11 +161,10 @@ func testProtectedSessionCap(t *testing.T, construct func(*auth.Server, *quota.Q
 }
 
 func TestProductionProtectionInvalidationDefeatsInFlightAuthentication(t *testing.T) {
-	t.Run("prepaid", func(t *testing.T) { testProtectedInvalidation(t, relay.NewProtected) })
-	t.Run("observed", func(t *testing.T) { testProtectedInvalidation(t, relay.NewObservedProtected) })
+	t.Run("observed", func(t *testing.T) { testProtectedInvalidation(t) })
 }
-func testProtectedInvalidation(t *testing.T, construct func(*auth.Server, *quota.Quota, relay.Options) (*relay.Server, error)) {
-	p := protectedPortalFixtureWithRelay(t, construct)
+func testProtectedInvalidation(t *testing.T) {
+	p := protectedPortalFixture(t)
 	h := protectedClient(t, p)
 	entered, release := make(chan struct{}), make(chan struct{})
 	releaseAuth := sync.OnceFunc(func() { close(release) })
@@ -263,7 +258,7 @@ func TestProductionProtectionComposesObservedSettlement(t *testing.T) {
 }
 
 func TestProductionObservedReporterSharedExhaustionClosesEverySession(t *testing.T) {
-	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	p := protectedPortalFixture(t)
 	p.mutate(t, "override", "2", url.Values{"weekly_bytes_override": {"10000"}, "sessions_override": {"2"}})
 	first, second := protectedClient(t, p), protectedClient(t, p)
 	requireProtectedAuthentication(t, first, p, `"ok":true`)
@@ -313,7 +308,7 @@ func TestProductionObservedReporterSharedExhaustionClosesEverySession(t *testing
 }
 
 func TestProductionObservedPolicyEditsPreservePendingAndEnforceEquality(t *testing.T) {
-	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	p := protectedPortalFixture(t)
 	first := protectedClient(t, p)
 	requireProtectedAuthentication(t, first, p, `"ok":true`)
 	if err := p.quota.Observe(p.account, 60); err != nil {
@@ -340,7 +335,7 @@ func TestProductionObservedPolicyEditsPreservePendingAndEnforceEquality(t *testi
 }
 
 func TestProductionObservedSuspensionRetainsUsage(t *testing.T) {
-	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	p := protectedPortalFixture(t)
 	first := protectedClient(t, p)
 	requireProtectedAuthentication(t, first, p, `"ok":true`)
 	if err := p.quota.Observe(p.account, 83); err != nil {

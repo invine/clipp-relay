@@ -239,7 +239,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.uncertainAccounts.Store(id, uncertainDeletion{operationID: operation})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, InvalidateEligibility: true})
 			admitted, uncertain = true, err != nil
 		}); accountGuardErr != nil {
 			markGuardDiagnostic(r, accountGuardErr)
@@ -330,15 +330,15 @@ func (s *Server) ValidateDeletionJournal(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.verifyCommittedChain(ctx, head, 0, "")
+	return s.verifyRecordedChain(ctx, head, 0, "")
 }
 
-// verifyCommittedChain checks a fixed head snapshot from the operator's
+// verifyRecordedChain checks a fixed head snapshot from the operator's
 // attested floor. An immutable upload is not committed merely because its
 // sequence is below the head: failed head comparisons can leave orphan events
 // at the same sequence. Only a hash-linked path ending at the head is proof.
 // OCI pages and the reachable set are bounded; the caller bounds total work.
-func (s *Server) verifyCommittedChain(ctx context.Context, head JournalHead, targetSeq int64, targetHash string) error {
+func (s *Server) verifyRecordedChain(ctx context.Context, head JournalHead, targetSeq int64, targetHash string) error {
 	_, err := s.committedDeletionAccounts(ctx, head, targetSeq, targetHash, false)
 	return err
 }
@@ -626,7 +626,7 @@ func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error
 		return err
 	}
 	if head.Sequence >= event.Sequence {
-		err = s.verifyCommittedChain(ctx, head, event.Sequence, event.Hash)
+		err = s.verifyRecordedChain(ctx, head, event.Sequence, event.Hash)
 		if err == nil {
 			if err = s.proveEvent(ctx, fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID), data); err != nil {
 				return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
@@ -707,17 +707,14 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	if err = tx.QueryRow(ctx, `SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&week); err != nil {
 		return deletionDatabaseError(err)
 	}
-	usageQuery := `SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=$2`
-	if s.observedPolicy {
-		usageQuery = `SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=$2`
-	}
+	usageQuery := `SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=$2`
 	err = tx.QueryRow(ctx, usageQuery, x.Account, week).Scan(&committed)
 	if err != nil && err != pgx.ErrNoRows {
 		return deletionDatabaseError(err)
 	}
 	if err == nil {
 		digest := s.digest(s.CurrentPepper, "retained-quota", googleIssuer+"\x00"+*subject)
-		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,committed_bytes) VALUES($1,$2,$3,$4)`, s.CurrentPepper, digest, week, committed); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes) VALUES($1,$2,$3,$4)`, s.CurrentPepper, digest, week, committed); err != nil {
 			return deletionDatabaseError(err)
 		}
 	}
@@ -794,7 +791,7 @@ func (s *Server) importRetainedUsage(ctx context.Context, tx pgx.Tx, accountID, 
 	for version := range s.Peppers {
 		digest := s.digest(version, "retained-quota", googleIssuer+"\x00"+subject)
 		var amount int64
-		err = tx.QueryRow(ctx, `SELECT committed_bytes FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3 FOR UPDATE`, version, digest, week).Scan(&amount)
+		err = tx.QueryRow(ctx, `SELECT recorded_bytes FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3 FOR UPDATE`, version, digest, week).Scan(&amount)
 		if err == pgx.ErrNoRows {
 			continue
 		}
@@ -812,10 +809,7 @@ func (s *Server) importRetainedUsage(ctx context.Context, tx pgx.Tx, accountID, 
 	if matches == 0 {
 		return nil
 	}
-	openingQuery := `INSERT INTO public.weekly_quota_usage(account_id,week_start,committed_bytes,sequence,latest_operation_id,latest_granted_bytes) VALUES($1,$2,$3,0,NULL,0)`
-	if s.observedPolicy {
-		openingQuery = `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,$2,$3,0,NULL,0)`
-	}
+	openingQuery := `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,$2,$3,0,NULL,0)`
 	if _, err = tx.Exec(ctx, openingQuery, accountID, week, committed); err != nil {
 		return err
 	}

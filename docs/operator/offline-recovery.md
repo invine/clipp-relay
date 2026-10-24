@@ -76,7 +76,8 @@ logical deletion. Current-week registration imports the retained total once into
 a fresh Pending UUID with sequence zero and no invented receipt. Prior-week usage
 never moves into a new window. Ordinary current-time retention remains in force.
 
-The `recover` command is for recorded accounting. In the staged development
-revision, normal serving remains prepaid until the final accounting migration;
-this local tool does not select or activate a serving mode. The final cutover
-renames the legacy retained amount column along with its explicit prepaid reset.
+The `recover` command requires the current observed-accounting schema13. Complete
+[the offline cutover](accounting-migration.md) first when recovering an older
+prepaid test database. Cutover reset is explicit and one-time; recovery preserves
+confirmed `weekly_relay_usage` totals and latest retry receipts, and uses
+`retained_quota_usage.recorded_bytes` for current-week retained imports.

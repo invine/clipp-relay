@@ -158,7 +158,7 @@ func TestRecordedUsageSettlesAfterPolicyChangesButNeverResurrectsDeletedAccount(
 	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET status='Suspended',credential_generation=credential_generation+1,weekly_bytes_override=0,deletion_started_at=clock_timestamp() WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
-	q.Invalidate(id)
+	q.ApplyAccountingPolicy(id, 1<<30, true)
 	batch := Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: 999999, Sequence: 1}
 	if result, err := q.Settle(ctx, batch); err != nil || result.RecordedBytes != 999999 {
 		t.Fatalf("observations discarded on policy change=%+v %v", result, err)

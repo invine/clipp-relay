@@ -95,15 +95,16 @@ func (q *Quota) Observe(id string, n int64) error {
 
 // Eligibility is an authoritative admission assessment. Its caller holds Auth's
 // account guard and admitted database budget; it never reenters that guard.
-func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (AccountingEligibility, error) {
-	var result AccountingEligibility
+func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (result AccountingEligibility, err error) {
+	started := time.Now()
+	defer func() { q.accountingDiagnostic("quota.eligibility", err, started) }()
 	if !q.clockOK() {
 		return result, ErrTemporary
 	}
 	var status string
 	var actual int64
 	var now time.Time
-	err := q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND NOT a.recovery_review_hold AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &status, &actual, &result.CapBytes)
+	err = q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND NOT a.recovery_review_hold AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &status, &actual, &result.CapBytes)
 	if err != nil || status != "Active" || actual != generation {
 		return result, ErrTemporary
 	}
@@ -116,6 +117,9 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (A
 	defer q.periodic.mu.Unlock()
 	a := q.observedAccountLocked(id)
 	if a == nil {
+		return result, ErrTemporary
+	}
+	if !result.WeekStart.Equal(weekStart(q.now())) || result.WeekStart.Before(a.eligibleWeek) {
 		return result, ErrTemporary
 	}
 	a.generation = generation
@@ -195,10 +199,13 @@ func (q *Quota) accountingDeadlineLocked() time.Duration {
 // AccountingCurrent lets Relay reject an admission whose accounting authority
 // was invalidated between assessment and physical session installation.
 func (q *Quota) AccountingCurrent(id string, revision uint64) bool {
+	if !q.clockOK() {
+		return false
+	}
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[id]
-	return a != nil && !a.blocked && !a.invalidated && a.revision == revision
+	return a != nil && !a.blocked && !a.invalidated && a.revision == revision && a.eligibleWeek.Equal(weekStart(q.now()))
 }
 
 // FlushAccounting attempts each original observation week once. An immutable
@@ -392,8 +399,12 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 		}
 		if !older {
 			a.healthy = q.accountingNow()
-			a.blocked = false
-			a.reason = ""
+			// Persisting valid observations never restores continuing permission
+			// while the independent clock check is unsafe.
+			if q.clockOK() && !weekStart(q.now()).Before(a.eligibleWeek) {
+				a.blocked = false
+				a.reason = ""
+			}
 		}
 		q.periodic.mu.Unlock()
 	}
@@ -490,16 +501,23 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 // CheckAccountingHealth runs independently of database workers. Elapsed time is
 // monotonic even if the wall clock changes.
 func (q *Quota) CheckAccountingHealth() {
+	safeClock := q.clockOK()
+	currentWeek := weekStart(q.now())
 	q.periodic.mu.Lock()
-	ids := []string{}
+	reasons := map[string]string{}
 	for id, a := range q.periodic.accounts {
-		if !a.blocked && !a.healthy.IsZero() && q.accountingNow().Sub(a.healthy) >= q.accountingDeadlineLocked() {
-			ids = append(ids, id)
+		if a.blocked {
+			continue
+		}
+		if !safeClock || currentWeek.Before(a.eligibleWeek) {
+			reasons[id] = "clock_unavailable"
+		} else if !a.healthy.IsZero() && q.accountingNow().Sub(a.healthy) >= q.accountingDeadlineLocked() {
+			reasons[id] = "accounting_unavailable"
 		}
 	}
 	q.periodic.mu.Unlock()
-	for _, id := range ids {
-		q.cutoffChecked(id, "accounting_unavailable", true)
+	for id, reason := range reasons {
+		q.cutoffChecked(id, reason, reason == "accounting_unavailable")
 	}
 }
 func (q *Quota) cutoff(id, reason string) { q.cutoffChecked(id, reason, false) }
@@ -516,6 +534,7 @@ func (q *Quota) cutoffChecked(id, reason string, expiredOnly bool) {
 	out := ClosureOutcome{AccountID: id, Reason: reason, Revision: a.revision}
 	callback := q.periodic.close
 	q.periodic.mu.Unlock()
+	q.emit("quota.health", "refused", reason, time.Time{})
 	if callback != nil {
 		callback(out)
 	}

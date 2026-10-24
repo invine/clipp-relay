@@ -24,14 +24,18 @@ func (testAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCrede
 	return auth.RelayCredential{AccountID: "a", SessionLimit: 1, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
-type testCredit struct{}
+type testAccounting struct{}
 
-func (testCredit) Ensure(context.Context, string, int64) (quota.Result, error) {
-	return quota.Result{Committed: 65536, Usable: 65536}, nil
+func (testAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+	return quota.AccountingEligibility{}, nil
 }
-func (testCredit) Take(context.Context, string, int64, int64) (quota.Result, error) {
-	return quota.Result{Committed: 65536, Usable: 65536}, nil
-}
+func (testAccounting) Observe(string, int64) error              { return nil }
+func (testAccounting) AccountingFailed(string)                  {}
+func (testAccounting) AccountingReady(string) bool              { return true }
+func (testAccounting) AccountingCurrent(string, uint64) bool    { return true }
+func (testAccounting) AccountingSessions(string, int)           {}
+func (testAccounting) ClosureCurrent(quota.ClosureOutcome) bool { return true }
+func (testAccounting) FlushAllAccounting(context.Context) error { return nil }
 
 func TestServiceChangesAndOutagePublishCompleteSnapshot(t *testing.T) {
 	var mu sync.Mutex
@@ -56,7 +60,7 @@ func TestServiceChangesAndOutagePublishCompleteSnapshot(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "spec": map[string]any{"ports": []map[string]any{{"protocol": "TCP", "port": 4001}}}, "status": map[string]any{"loadBalancer": map[string]any{"ingress": ingress}}})
 	}))
 	defer api.Close()
-	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := relay.New(testAuthority{}, testAccounting{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +202,7 @@ func TestNamedServiceWatchRepublishesOnEvent(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "spec": map[string]any{"ports": []map[string]any{{"protocol": "TCP", "port": 4001}}}, "status": map[string]any{"loadBalancer": map[string]any{"ingress": []map[string]string{{"ip": ip}}}}})
 	}))
 	defer api.Close()
-	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := relay.New(testAuthority{}, testAccounting{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +260,7 @@ func TestWatchFailureExpiresPublicationUntilVerifiedResync(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "spec": map[string]any{"ports": []map[string]any{{"protocol": "TCP", "port": 4001}}}, "status": map[string]any{"loadBalancer": map[string]any{"ingress": []map[string]string{{"ip": "127.0.0.1"}}}}})
 	}))
 	defer api.Close()
-	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := relay.New(testAuthority{}, testAccounting{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +319,7 @@ func TestOverrideRemovesOnlyItsTransportDependencyAndMissingUDPWithdrawsAll(t *t
 		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "spec": map[string]any{"ports": []map[string]any{{"protocol": "UDP", "port": 4003}}}, "status": map[string]any{"loadBalancer": map[string]any{"ingress": ingress}}})
 	}))
 	defer api.Close()
-	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
+	s, err := relay.New(testAuthority{}, testAccounting{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +362,7 @@ func TestServiceHostnameKeepsDNSAddressFamilyOpen(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "spec": map[string]any{"ports": []map[string]any{{"protocol": "UDP", "port": 4003}}}, "status": map[string]any{"loadBalancer": map[string]any{"ingress": []map[string]string{{"hostname": "ipv6-only.example.test"}}}}})
 	}))
 	defer api.Close()
-	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
+	s, err := relay.New(testAuthority{}, testAccounting{}, relay.Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,12 +1,9 @@
 package relay
 
 import (
-	"context"
 	"sync/atomic"
 	"time"
 
-	"clipp-relay/internal/diagnostic"
-	"clipp-relay/internal/quota"
 	"github.com/libp2p/go-libp2p/core/metrics"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
@@ -51,41 +48,7 @@ func (r *endpointReporter) report(n int64, proto protocol.ID, p peer.ID) {
 		r.unattributed.Add(n)
 		return
 	}
-	remaining := n
-	for remaining > 0 {
-		started := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		balance, err := s.credit.Take(ctx, active.account, active.generation, 0)
-		if err == nil && balance.Usable == 0 {
-			balance, err = s.credit.Ensure(ctx, active.account, active.generation)
-		}
-		if err == nil {
-			chunk := remaining
-			if chunk > quota.BlockBytes {
-				chunk = quota.BlockBytes
-			}
-			if chunk > balance.Usable {
-				chunk = balance.Usable
-			}
-			if chunk <= 0 {
-				err = quota.ErrTemporary
-			} else {
-				_, err = s.credit.Take(ctx, active.account, active.generation, chunk)
-				remaining -= chunk
-			}
-		}
-		cancel()
-		if err != nil {
-			if s.diagnostics != nil {
-				// Stock byte callbacks carry only a Peer ID. Their account
-				// association is sampled at report time, so they cannot
-				// truthfully carry request or physical-session correlation.
-				s.diagnostics.Emit(diagnostic.Event{Event: "quota.reporting", Outcome: "failed", Reason: "reporting_failed", Duration: time.Since(started)})
-			}
-			s.detachAccount(active.account, "reporting_failed")()
-			return
-		}
-	}
+
 }
 func (r *endpointReporter) GetBandwidthForPeer(peer.ID) metrics.Stats         { return metrics.Stats{} }
 func (r *endpointReporter) GetBandwidthForProtocol(protocol.ID) metrics.Stats { return metrics.Stats{} }

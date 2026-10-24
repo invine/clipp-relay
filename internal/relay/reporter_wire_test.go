@@ -13,8 +13,8 @@ import (
 )
 
 func TestReporterChargesCurrentPeerAssociationAndRecordsUnattributedTail(t *testing.T) {
-	credit := &recordingCredit{counts: map[string]int64{}}
-	s, err := New(twoAuthority{}, credit, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	accounting := &recordingAccounting{counts: map[string]int64{}}
+	s, err := New(twoAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestReporterChargesCurrentPeerAssociationAndRecordsUnattributedTail(t *test
 	reporter.LogRecvMessageStream(11, hopProtocol, first.ID())
 	reporter.LogSentMessageStream(13, "/libp2p/circuit/relay/0.2.0/stop", first.ID())
 	reporter.LogSentMessageStream(17, AuthProtocol, first.ID())
-	if got := credit.count("a"); got != 24 {
+	if got := accounting.count("a"); got != 24 {
 		t.Fatalf("first association charged %d, want 24 HOP/STOP bytes", got)
 	}
 	if err := first.Close(); err != nil {
@@ -70,10 +70,10 @@ func TestReporterChargesCurrentPeerAssociationAndRecordsUnattributedTail(t *test
 	// The callback identifies a peer, not the original connection. A late
 	// callback for the old connection therefore uses the current association.
 	reporter.LogSentMessageStream(23, hopProtocol, first.ID())
-	if got := credit.count("a"); got != 24 {
+	if got := accounting.count("a"); got != 24 {
 		t.Fatalf("late bytes charged old account: %d", got)
 	}
-	if got := credit.count("b"); got != 23 {
+	if got := accounting.count("b"); got != 23 {
 		t.Fatalf("late bytes charged current account %d, want 23", got)
 	}
 }

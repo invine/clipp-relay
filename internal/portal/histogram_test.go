@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestQuotaHistogramPreservesWeeksAndScalesCommittedAmounts(t *testing.T) {
+func TestQuotaHistogramPreservesWeeksAndScalesRecordedAmounts(t *testing.T) {
 	history := []QuotaHistoryEntry{{"2026-10-05", 65536}, {"2026-09-28", 12345}, {"2026-09-21", 0}}
 	original := slices.Clone(history)
 	chart := quotaHistogram(history)
@@ -20,7 +20,7 @@ func TestQuotaHistogramPreservesWeeksAndScalesCommittedAmounts(t *testing.T) {
 		t.Fatalf("incorrect histogram amounts or scale: %+v", chart)
 	}
 	if math.Abs(chart.Bars[1].Height/chart.Bars[2].Height-float64(12345)/65536) > 1e-12 {
-		t.Fatal("bar height does not represent committed quota proportionally")
+		t.Fatal("bar height does not represent recorded usage proportionally")
 	}
 	for _, history := range [][]QuotaHistoryEntry{nil, {{"2026-10-05", 0}}, {{"2026-10-05", math.MaxInt64}}} {
 		chart := quotaHistogram(history)
@@ -29,7 +29,7 @@ func TestQuotaHistogramPreservesWeeksAndScalesCommittedAmounts(t *testing.T) {
 				t.Fatalf("invalid geometry for zero or maximum quota: %+v", bar)
 			}
 		}
-		if len(history) > 0 && history[0].Committed == 0 && !chart.AllZero {
+		if len(history) > 0 && history[0].Recorded == 0 && !chart.AllZero {
 			t.Fatal("all-zero history missing its zero-usage state")
 		}
 	}

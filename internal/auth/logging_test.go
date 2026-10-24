@@ -68,7 +68,7 @@ func TestCredentialRefusalsHaveIndependentSafeRequestDiagnostics(t *testing.T) {
 	}
 }
 
-func TestPortalAndOAuthDiagnosticsDescribeCommittedCredentials(t *testing.T) {
+func TestPortalAndOAuthDiagnosticsDescribeRecordedCredentials(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	provider := newProvider(t)

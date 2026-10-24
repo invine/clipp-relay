@@ -45,7 +45,7 @@ func testRelayRemovesLateAdmission(t *testing.T, stage string) {
 	a := &budgetAuthority{db: db}
 	a.failAfterWork.Store(stage == "outer")
 	a.failAccountAfterWork.Store(stage == "account")
-	s, err := New(a, budgetCredit{db: db}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(a, budgetAccounting{db: db}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,20 +103,19 @@ func (a *budgetAuthority) AuthenticateRelay(ctx context.Context, raw string) (au
 	return credential, err
 }
 
-type budgetCredit struct{ db *database.Runtime }
-
-func (c budgetCredit) Ensure(ctx context.Context, _ string, _ int64) (quota.Result, error) {
-	return quota.Result{}, c.db.WithUnit(ctx, func(context.Context) error { return nil })
+type budgetAccounting struct {
+	wireAccounting
+	db *database.Runtime
 }
 
-func (c budgetCredit) Take(ctx context.Context, _ string, _, _ int64) (quota.Result, error) {
-	return c.Ensure(ctx, "", 0)
+func (c budgetAccounting) Eligibility(ctx context.Context, _ string, _ int64) (quota.AccountingEligibility, error) {
+	return quota.AccountingEligibility{}, c.db.WithUnit(ctx, func(context.Context) error { return nil })
 }
 
 func TestRelayAuthAdmitsBeforePeerGuardAndReusesOneUnit(t *testing.T) {
 	db := database.NewRuntime(nil)
 	a := &budgetAuthority{db: db}
-	s, err := New(a, budgetCredit{db: db}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(a, budgetAccounting{db: db}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}

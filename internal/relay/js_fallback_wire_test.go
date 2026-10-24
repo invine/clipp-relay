@@ -46,8 +46,8 @@ func TestRealJSRelayTransportFallback(t *testing.T) {
 	}
 	for _, expected := range []string{"tcp", "websocket", "webrtc-direct"} {
 		t.Run(expected, func(t *testing.T) {
-			credit := &recordingCredit{counts: map[string]int64{}}
-			s, err := New(twoAuthority{}, credit, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", WebSocketHostname: "localhost", MaxSessions: 2})
+			accounting := &recordingAccounting{counts: map[string]int64{}}
+			s, err := New(twoAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", WebSocketHostname: "localhost", MaxSessions: 2})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,8 +131,8 @@ func TestRealJSRelayTransportFallback(t *testing.T) {
 			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &receipt); err != nil || !receipt.OK || receipt.SelectedFamily != expected {
 				t.Fatalf("missing %s JS fallback success receipt: %s", expected, out)
 			}
-			if credit.count("a") == 0 || credit.count("b") == 0 {
-				t.Fatalf("JS endpoint charges missing: a=%d b=%d", credit.count("a"), credit.count("b"))
+			if accounting.count("a") == 0 || accounting.count("b") == 0 {
+				t.Fatalf("JS endpoint charges missing: a=%d b=%d", accounting.count("a"), accounting.count("b"))
 			}
 			attemptsMu.Lock()
 			observed := attempts

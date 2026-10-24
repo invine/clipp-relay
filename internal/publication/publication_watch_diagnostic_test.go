@@ -38,7 +38,7 @@ func TestQuietServiceWatchDoesNotReportPublicationAPIOutage(t *testing.T) {
 		body := `{"metadata":{"resourceVersion":"1"},"spec":{"ports":[{"protocol":"TCP","port":4001}]},"status":{"loadBalancer":{"ingress":[{"ip":"127.0.0.1"}]}}}`
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}
-	s, err := relay.New(testAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := relay.New(testAuthority{}, testAccounting{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}

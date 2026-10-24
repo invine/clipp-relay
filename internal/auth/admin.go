@@ -666,14 +666,6 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		fail(w, 503)
 		return
 	}
-	var committed int64
-	if !s.observedPolicy && !security && newStatus == "Active" {
-		e = tx.QueryRow(ctx, `SELECT COALESCE((SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date),0)`, target).Scan(&committed)
-		if e != nil {
-			fail(w, 503)
-			return
-		}
-	}
 	var commitErr error
 	if s.commitAccount != nil {
 		commitErr = s.commitAccount(ctx, tx)
@@ -692,8 +684,8 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 	}
 	// Auth invalidates under account protection after SQL completion, then runs
 	// the returned connection-close I/O after releasing the logical guards.
-	closeAll := security || committed > weeklyBytes || commitErr != nil
-	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, DiscardCredit: security || committed > weeklyBytes || commitErr != nil}
+	closeAll := security || commitErr != nil
+	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, InvalidateEligibility: security || commitErr != nil}
 	*uncertain = commitErr != nil
 }
 

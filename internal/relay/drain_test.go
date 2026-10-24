@@ -16,7 +16,7 @@ import (
 
 func TestDrainWaitsForStockCircuitAndForceCloses(t *testing.T) {
 	for _, force := range []bool{false, true} {
-		s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+		s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -55,7 +55,7 @@ func TestDrainWaitsForStockCircuitAndForceCloses(t *testing.T) {
 }
 
 func TestDrainRejectsRenewalAndReservationOnExistingSession(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestDrainRejectsRenewalAndReservationOnExistingSession(t *testing.T) {
 }
 
 func TestExistingTCPCircuitCarriesBytesDuringDrain(t *testing.T) {
-	s, err := New(twoAuthority{}, wireCredit{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}

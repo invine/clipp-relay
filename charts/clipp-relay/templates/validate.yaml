@@ -27,7 +27,7 @@
   {{- if and $b.initialize (ne $v.deployment.phase "stopped") }}{{ fail "first initialization is allowed only while relay is stopped" }}{{ end -}}
 {{- end -}}
 {{- if or (eq $v.image.repository "") (not (regexMatch "^sha256:[0-9a-f]{64}$" $v.image.digest)) }}{{ fail "immutable relay image repository and sha256 digest required" }}{{ end -}}
-{{- if ne (int $v.deployment.expectedSchema) 10 }}{{ fail "chart requires application schema revision 10" }}{{ end -}}
+{{- if ne (int $v.deployment.expectedSchema) 13 }}{{ fail "chart requires application schema revision 13" }}{{ end -}}
 {{- if and (eq $v.deployment.phase "migrating") (eq $v.deployment.runId "") }}{{ fail "migration phase requires a run ID" }}{{ end -}}
 {{- if and (ne $v.deployment.phase "migrating") (ne $v.deployment.runId "") }}{{ fail "run ID only valid in migrating phase" }}{{ end -}}
 {{- $portalHost := trimPrefix "https://" $v.public.portalOrigin -}}

@@ -45,9 +45,15 @@ type Authority interface {
 	WithAccountGuards(context.Context, []string, func(context.Context)) bool
 	AuthenticateRelay(context.Context, string) (auth.RelayCredential, error)
 }
-type Credit interface {
-	Ensure(context.Context, string, int64) (quota.Result, error)
-	Take(context.Context, string, int64, int64) (quota.Result, error)
+type Accounting interface {
+	Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error)
+	Observe(string, int64) error
+	AccountingFailed(string)
+	AccountingReady(string) bool
+	AccountingCurrent(string, uint64) bool
+	AccountingSessions(string, int)
+	ClosureCurrent(quota.ClosureOutcome) bool
+	FlushAllAccounting(context.Context) error
 }
 
 // DiagnosticSink is the shared, catalog-validated application event boundary.
@@ -88,8 +94,7 @@ type Server struct {
 	authority         Authority
 	diagnostics       DiagnosticSink
 	connectionInfo    map[network.Conn]connectionDiagnostic
-	credit            Credit
-	accounting        *quota.Quota
+	accounting        Accounting
 	accountingCloses  chan struct{}
 	accountingPending map[network.Conn]struct{}
 	accountingStop    chan struct{}
@@ -214,33 +219,15 @@ func hopStatus(s network.Stream, status pbv2.Status) {
 	}
 }
 
-// NewProtected is the production composition used by the executable and
-// HTTP/libp2p acceptance tests. Required Auth protection is connected before
-// any protected protocol handlers are installed.
-func NewProtected(a *auth.Server, credit *quota.Quota, opts Options) (*Server, error) {
-	if a == nil || credit == nil {
-		return nil, errors.New("relay authority and quota required")
-	}
-	return newServer(a, credit, opts, func(s *Server) error {
-		if err := a.ConfigureRelayProtection(credit, s); err != nil {
-			return err
-		}
-		credit.SetSettlementProtection(a)
-		return nil
-	})
-}
-
-// NewObservedProtected composes the staged observed-usage path. The executable
-// continues to use NewProtected until the final accounting lifecycle cutover.
-func NewObservedProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server, error) {
+// NewProtected installs the sole production accounting and policy composition.
+func NewProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server, error) {
 	if a == nil || q == nil {
 		return nil, errors.New("relay authority and quota required")
 	}
 	return newServer(a, q, opts, func(s *Server) error {
-		if err := a.ConfigureObservedRelayProtection(q, s); err != nil {
+		if err := a.ConfigureRelayProtection(q, s); err != nil {
 			return err
 		}
-		a.EnableRecordedUsagePresentation()
 		q.SetSettlementProtection(a)
 		s.accounting = q
 		s.accountingCloses = make(chan struct{}, 1)
@@ -299,11 +286,11 @@ func (s *Server) accountingClosure(out quota.ClosureOutcome) {
 
 // New starts an inbound-only, Noise-authenticated relay with a new in-RAM
 // identity. Controlled authority adapters must provide all admission operations.
-func New(a Authority, credit Credit, opts Options) (*Server, error) {
-	return newServer(a, credit, opts, nil)
+func New(a Authority, accounting Accounting, opts Options) (*Server, error) {
+	return newServer(a, accounting, opts, nil)
 }
 
-func newServer(a Authority, credit Credit, opts Options, installProtection func(*Server) error) (*Server, error) {
+func newServer(a Authority, accounting Accounting, opts Options, installProtection func(*Server) error) (*Server, error) {
 	if opts.ListenAddress == "" && opts.WebSocketListenAddress == "" && opts.WebRTCListenAddress == "" {
 		return nil, errors.New("relay listener required")
 	}
@@ -327,7 +314,7 @@ func newServer(a Authority, credit Credit, opts Options, installProtection func(
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, credit: credit, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, accounting: accounting, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -778,7 +765,7 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 }
 
 // The account guard remains held from the authoritative recheck through local
-// credit funding and registry installation. A committed policy change therefore
+// accounting eligibility and registry installation. A committed policy change therefore
 // cannot be followed by installation of an older observed credential.
 func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn, reason *string) (time.Time, time.Duration, string) {
 	if ctx.Err() != nil {
@@ -795,11 +782,7 @@ func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, crede
 	}
 	var eligibility quota.AccountingEligibility
 	var quotaErr error
-	if s.accounting != nil {
-		eligibility, quotaErr = s.accounting.Eligibility(ctx, credential.AccountID, credential.Generation)
-	} else {
-		_, quotaErr = s.credit.Ensure(ctx, credential.AccountID, credential.Generation)
-	}
+	eligibility, quotaErr = s.accounting.Eligibility(ctx, credential.AccountID, credential.Generation)
 	if err := quotaErr; err != nil {
 		if errors.Is(err, quota.ErrExhausted) {
 			*reason = "" // The fixed authentication catalog has no quota-exhausted pair.

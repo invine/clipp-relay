@@ -175,7 +175,7 @@ func TestFakeServiceRealClientDrainRestartAndRediscovery(t *testing.T) {
 	cfg := Config{TCP: Transport{Enabled: true, PublicPort: tcpPort, Service: ServiceRef{Namespace: "clipp", Name: "relay-tcp"}}, WebRTC: Transport{Enabled: true, PublicPort: udpPort, Service: ServiceRef{Namespace: "clipp", Name: "relay-udp"}}}
 	start := func() (*relay.Server, *relay.Discovery, *Controller) {
 		t.Helper()
-		s, err := relay.New(lifecycleAuthority{}, testCredit{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/" + strconv.Itoa(tcpPort), WebRTCListenAddress: "/ip4/127.0.0.1/udp/" + strconv.Itoa(udpPort) + "/webrtc-direct"})
+		s, err := relay.New(lifecycleAuthority{}, testAccounting{}, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/" + strconv.Itoa(tcpPort), WebRTCListenAddress: "/ip4/127.0.0.1/udp/" + strconv.Itoa(udpPort) + "/webrtc-direct"})
 		if err != nil {
 			t.Fatal(err)
 		}

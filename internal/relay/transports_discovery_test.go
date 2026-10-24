@@ -8,7 +8,7 @@ import (
 )
 
 func TestDiscoveryPublishesCompleteWSSAndCurrentWebRTCCerthash(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", WebSocketHostname: "relay.example.test"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{WebSocketListenAddress: "/ip4/127.0.0.1/tcp/0/ws", WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct", WebSocketHostname: "relay.example.test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestDiscoveryPublishesCompleteWSSAndCurrentWebRTCCerthash(t *testing.T) {
 	if err := d.Publish([]ma.Multiaddr{ma.StringCast("/dns4/wrong.example.test/tcp/443/tls/ws"), webrtc}); err == nil {
 		t.Fatal("published wrong WSS host")
 	}
-	previous, err := New(wireAuthority{}, wireCredit{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
+	previous, err := New(wireAuthority{}, wireAccounting{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
 	if err != nil {
 		t.Fatal(err)
 	}

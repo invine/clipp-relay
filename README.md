@@ -9,7 +9,7 @@ Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
 Owner deletion uses a separate OCI deletion journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
-Current-week Quota Committed follows a fresh Pending registration by keyed
+Confirmed current-week Recorded Relay Usage follows a fresh Pending registration by keyed
 digest; old account state, plan, credentials, and presentation do not.
 With periodic accounting, deletion first invalidates credentials and physically
 closes sessions. After mandatory Recovery Journal proof, it attempts a bounded
@@ -19,14 +19,18 @@ the old account while capturing confirmed current-week usage and sealing further
 settlements in one transaction. A committed batch with a lost reply is included;
 late work cannot charge a replacement account. Re-registration imports only that
 current-week total once, as an opening total without a settlement receipt.
-The Quota operation commits at most 64 KiB of account-week credit per block
-before making it locally usable. Callers must split larger reporter counts and
-consume any smaller remaining local balance before requesting another block.
-Committed credit is retained in PostgreSQL across restart and never refunded;
-unused process-local credit is not restored. The owner profile shows Quota
-committed and 12 completed weekly totals. Its capacity table distinguishes
-configured limits from separately sampled live counts. Active Login Grants are
-sampled from PostgreSQL; live Relay Sessions are sampled from this process.
+Quota aggregates observed account-week traffic across sessions and settles nonempty
+immutable batches on a one-second target cadence. The confirmed total and latest
+retry receipt commit atomically; lost replies reconcile the identical operation
+once. Eligibility counts confirmed and locally unsettled usage once. The allowance
+is soft: full attributable overrun is recorded, and observations not persisted
+before a crash may be lost. No historical settlement replay or multi-instance
+writer coordination is supported. The accounting failure deadline defaults to
+three seconds and closes affected sessions independently of blocked SQL workers.
+The owner profile shows confirmed Recorded Relay Usage and twelve preceding
+weekly totals. Its capacity table distinguishes configured limits from separately
+sampled live counts. Active Login Grants are sampled from PostgreSQL; live Relay
+Sessions are sampled from this process.
 `/readyz` is `200 ok` only after every enabled relay listener and a complete
 public address snapshot are available; otherwise it is `503 unavailable`. `/livez` is
 `200 ok` while the process runs. Public relay discovery is withdrawn during
@@ -217,7 +221,7 @@ see [Relay image build](docs/image-build.md).
 
 ### Recorded usage query and weekly retention
 
-The staged observed-accounting composition displays **Recorded Relay Usage**:
+The service displays **Recorded Relay Usage**:
 confirmed durable traffic observations, with periodic confirmation lag. Recent
 pending traffic does not appear as confirmed. HOP and STOP endpoint observations
 count independently (including twice for one account), and control bytes may
@@ -241,4 +245,16 @@ bounded cleanup also removes hidden account children fairly. Local unresolved
 work stays attached to its original week until settlement or authoritative
 retirement. Ordinary disconnects and revocation do not discard pending usage;
 expired weeks cannot be recreated or charged to a newer week by a stale retry.
-The executable remains on prepaid accounting until the final cutover ticket.
+
+### Offline accounting migration and compatibility
+
+Schema revision **13** makes observed accounting the sole serving behavior. Stop
+and fence the old process before running the migration with the maintenance role;
+then start the new binary with its restricted serving role. There is no accounting
+mode switch and no mixed-version serving. See [offline accounting cutover](docs/operator/accounting-migration.md).
+The explicit migration drops obsolete prepaid totals and allocation receipts and
+clears test retained usage before renaming its amount to `recorded_bytes`. It
+preserves accounts, plans, credentials, audit, Recovery Journal/recovery state,
+and already confirmed observed totals and receipts. Migration reruns and ordinary
+restart never reset new usage. Exact schema/checksum verification rejects the old
+binary against revision13 and the new binary against unmigrated schemas.

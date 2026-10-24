@@ -259,3 +259,5 @@ The wizard copies that default from the bundled example and preserves edits to
 existing private values. It does not add an environment or flag policy override.
 The cutoff is independent of blocked persistence: unresolved writes close all
 affected sessions at the deadline and temporarily deny admission until recovery.
+
+Current schema13 accounting cutovers follow [offline accounting migration](accounting-migration.md). The schema10 observations above describe their dated run; the current wizard requires13.

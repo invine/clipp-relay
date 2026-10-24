@@ -7,11 +7,10 @@ import (
 	"time"
 
 	"clipp-relay/internal/quota"
-	"clipp-relay/internal/relay"
 )
 
 func TestObservedOwnerAndAdminShowConfirmedUsageAndHistory(t *testing.T) {
-	p := protectedPortalFixtureWithRelay(t, relay.NewObservedProtected)
+	p := protectedPortalFixture(t)
 	ctx := context.Background()
 	op, err := quota.NewOperationID()
 	if err != nil {
@@ -58,7 +57,7 @@ func TestObservedOwnerAndAdminShowConfirmedUsageAndHistory(t *testing.T) {
 			if strings.Contains(body, "21.82 KiB") {
 				t.Fatal("pending observations presented as recorded")
 			}
-			if strings.Contains(body, "unused funded credit") {
+			if strings.Contains(body, "unused funded accounting") {
 				t.Fatal("observed view retained prepaid wording")
 			}
 		}

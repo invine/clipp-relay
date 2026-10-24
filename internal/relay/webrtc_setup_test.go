@@ -16,7 +16,7 @@ import (
 // deliberately stops before DTLS/Noise, so the listener must release that
 // incomplete setup at its stock ten-second deadline.
 func TestIncompleteWebRTCSetupReleasesResourcesWithinTenSeconds(t *testing.T) {
-	s, err := New(wireAuthority{}, wireCredit{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{WebRTCListenAddress: "/ip4/127.0.0.1/udp/0/webrtc-direct"})
 	if err != nil {
 		t.Fatal(err)
 	}

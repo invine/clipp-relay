@@ -69,7 +69,6 @@ func Google() Provider {
 }
 
 type Server struct {
-	recordedUsagePresentation          bool
 	diagnostics                        *diagnostic.Logger
 	transitions                        *diagnostic.Transitions
 	Pool                               *pgxpool.Pool
@@ -113,8 +112,7 @@ type Server struct {
 	commitRecovery                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
-	observedPolicy                     bool
-	deletionAccounting                 ObservedQuotaProtection
+	deletionAccounting                 QuotaProtection
 	deletionJournal                    DeletionJournal
 	deletionRepository                 string
 	deletionFloor                      int64
@@ -201,11 +199,11 @@ func (s *Server) SetCapacitySampler(sample func(context.Context, string) (Capaci
 // Auth command. Local invalidation runs under account protection; connection
 // close I/O is deferred until all logical guards have been released.
 type AccountChange struct {
-	AccountID     string
-	WeeklyBytes   int64
-	SessionLimit  int
-	CloseAll      bool
-	DiscardCredit bool
+	AccountID             string
+	WeeklyBytes           int64
+	SessionLimit          int
+	CloseAll              bool
+	InvalidateEligibility bool
 }
 
 // SetAccountChangedForTest installs a controlled invalidation adapter. Production
@@ -214,66 +212,29 @@ func (s *Server) SetAccountChangedForTest(changed func(AccountChange) func()) {
 	s.accountChanged = changed
 }
 
-// QuotaProtection invalidates prepaid authority without changing durable usage.
-// It is replaced by periodic accounting in the accounting implementation ticket.
-type QuotaProtection interface {
-	Invalidate(string)
-	InvalidateAbove(string, int64) bool
-}
-
 // RelaySessions exposes physical operations, not account policy decisions.
 type RelaySessions interface {
 	AccountSessions(string) int
 	DetachAccount(string) func()
 }
 
-// ConfigureRelayProtection connects required collaborators before serving. Auth
-// owns the policy decision; Relay only detaches authority and defers close I/O.
-func (s *Server) ConfigureRelayProtection(credit QuotaProtection, sessions RelaySessions) error {
-	if credit == nil || sessions == nil {
-		return errors.New("relay account protection requires quota and sessions")
-	}
-	s.accountChanged = func(change AccountChange) func() {
-		if change.DiscardCredit {
-			credit.Invalidate(change.AccountID)
-		} else if !change.CloseAll && credit.InvalidateAbove(change.AccountID, change.WeeklyBytes) {
-			change.CloseAll = true
-		}
-		if change.CloseAll || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
-			return sessions.DetachAccount(change.AccountID)
-		}
-		return nil
-	}
-	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
-		sample, err := s.SampleActiveGrants(ctx, account)
-		if err != nil {
-			return sample, err
-		}
-		count := sessions.AccountSessions(account)
-		sample.LiveSessions = &count
-		return sample, nil
-	})
-	return nil
-}
-
-// ObservedQuotaProtection applies current policy without discarding observations.
-type ObservedQuotaProtection interface {
+// QuotaProtection applies current policy without discarding observations.
+type QuotaProtection interface {
 	ApplyAccountingPolicy(string, int64, bool) bool
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
 }
 
-// ConfigureObservedRelayProtection installs the staged complete observed policy
+// ConfigureRelayProtection installs the complete observed policy
 // operation. Policy collaboration is independent of presentation queries.
-func (s *Server) ConfigureObservedRelayProtection(accounting ObservedQuotaProtection, sessions RelaySessions) error {
+func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions RelaySessions) error {
 	if accounting == nil || sessions == nil {
 		return errors.New("relay account protection requires quota and sessions")
 	}
-	s.observedPolicy = true
 	s.deletionAccounting = accounting
 	s.accountChanged = func(change AccountChange) func() {
-		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.DiscardCredit)
+		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.InvalidateEligibility)
 		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
 			return sessions.DetachAccount(change.AccountID)
 		}
@@ -1046,7 +1007,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	var sessions *int
 	var verified bool
 	var hd *string
-	var committed int64
+	var recorded int64
 	var historyJSON []byte
 	if e == nil {
 		if s.beforeProfileRead != nil {
@@ -1055,7 +1016,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		profile, err := s.ownerUsageProfile(r, id, version)
 		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
 		recoveryHeld = profile.RecoveryHeld
-		weeklyBytes, sessions, committed, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
+		weeklyBytes, sessions, recorded, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
 		if err == pgx.ErrNoRows {
 			e = errInvalidSession
 		} else if err != nil {
@@ -1105,32 +1066,18 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	percent := int64(0)
-	usageState := "No Quota committed this week."
+	if bytesValue > 0 {
+		percent = min(100, int64(float64(recorded)*100/float64(bytesValue)))
+	}
+	usageState := "Remaining allowance: " + portal.FormatBytes(max(0, bytesValue-recorded)) + "."
 	if bytesValue == 0 {
 		usageState = "Zero allowance: relay use is unavailable."
-		if committed > 0 {
-			usageState += " Quota committed exceeds the current zero allowance."
-		}
-	} else if committed >= bytesValue {
-		percent = 100
-		if committed > bytesValue {
-			usageState = "Quota committed exceeds the current allowance after a plan reduction."
-		} else {
-			usageState = "Weekly allowance fully committed."
-		}
-	} else {
-		percent = int64(float64(committed) * 100 / float64(bytesValue))
-		usageState = "Remaining allowance: " + portal.FormatBytes(bytesValue-committed) + "."
 	}
-	if s.recordedUsagePresentation {
-		usageState = "Remaining allowance: " + portal.FormatBytes(max(0, bytesValue-committed)) + "."
-		if committed > bytesValue {
-			usageState += " Recorded Relay Usage exceeds the current allowance."
-		}
+	if recorded > bytesValue {
+		usageState += " Recorded Relay Usage exceeds the current allowance."
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	portal.Render(w, http.StatusOK, "account", struct {
-		Recorded                               bool
 		SignedIn                               bool
 		Status, Description, Email, CSRF       string
 		DiscoveryURL                           string
@@ -1138,12 +1085,12 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		RecoveryHeld                           bool
 		WeeklyBytes                            int64
 		Sessions                               int
-		Committed, Percent                     int64
+		Recorded, Percent                      int64
 		UsageState                             string
 		History                                []quotaHistory
 		LiveSessions, ActiveGrants, GrantLimit int
 		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{s.recordedUsagePresentation, e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active" && !recoveryHeld, admin, recoveryHeld, bytesValue, sessionsValue, committed, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
+	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active" && !recoveryHeld, admin, recoveryHeld, bytesValue, sessionsValue, recorded, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
@@ -1290,7 +1237,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, DiscardCredit: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, InvalidateEligibility: true})
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {
 			markGuardDiagnostic(r, guardErr)

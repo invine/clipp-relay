@@ -219,14 +219,14 @@ func TestClockUnavailabilityDoesNotWithdrawHTTPReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	credit := quota.New(pool)
-	defer credit.Close()
-	if safe, _, _ := credit.ClockHealth(); safe {
+	accounting := quota.New(pool)
+	defer accounting.Close()
+	if safe, _, _ := accounting.ClockHealth(); safe {
 		t.Fatal("unreachable database produced a usable clock sample")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := credit.Ensure(ctx, "unused-account", 0); !errors.Is(err, quota.ErrTemporary) {
+	if _, err := accounting.Eligibility(ctx, "unused-account", 0); !errors.Is(err, quota.ErrTemporary) {
 		t.Fatalf("clock-unsafe allocation was accepted: %v", err)
 	}
 	check("/readyz", http.StatusOK)
