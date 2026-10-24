@@ -5,6 +5,7 @@ import (
 	"clipp-relay/internal/database"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -107,8 +108,12 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	if got := portalRequest(s, "GET", "/", fresh, nil, ""); !strings.Contains(got.Body.String(), "Recovery Review Hold") {
 		t.Fatal("portal concealed recovery hold")
 	}
-	if out := tokenPost(s, url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "code": {oldCode}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_verifier": {strings.Repeat("a", 43)}}); out.Code == 200 {
-		t.Fatal("hold permitted credential issuance")
+	// Begin a fresh PKCE authorization with the new, valid held portal session.
+	// Reusing oldCode here would only prove the independent credential reset.
+	digest := sha256.Sum256([]byte(strings.Repeat("a", 43)))
+	authorize := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(digest[:])}, "state": {"fresh-held-authorization"}}
+	if out := portalRequest(s, "GET", "/oauth/authorize?"+authorize.Encode(), fresh, nil, ""); out.Code != http.StatusServiceUnavailable || !strings.Contains(out.Body.String(), "invalid_grant") || out.Header().Get("Location") != "" {
+		t.Fatalf("hold permitted fresh authorization: %d %s", out.Code, out.Body.String())
 	}
 	admin := loginAs(t, s, d, "recovery-admin-"+subject, "recovery-admin@gmail.com", "")
 	adminCSRF := csrfFrom(t, s, admin)
@@ -120,6 +125,10 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	}
 	if _, err := q.Eligibility(ctx, id, 1); err != nil {
 		t.Fatalf("review did not permit fresh eligibility: %v", err)
+	}
+	freshAccess, _ := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, fresh, "android", c.PublicClients.AndroidRedirect))
+	if _, _, err := s.AuthenticateAccess(ctx, freshAccess); err != nil {
+		t.Fatalf("review did not permit fresh credential issuance: %v", err)
 	}
 	if err := s.RecoverOffline(ctx, request); err != nil {
 		t.Fatal(err)
