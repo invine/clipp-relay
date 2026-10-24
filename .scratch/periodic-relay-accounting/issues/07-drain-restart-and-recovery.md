@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 — Delete accounts without waiting for failed accounting.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 Parent: [Relay, Quota and Auth specification](../spec.md), especially I4, I7 and I8. User stories: 9, 35–37. Breakdown approved 2026-10-24.
 

@@ -18,6 +18,8 @@ All eight tickets requested on 2026-10-24. See [run](run.md) for local implement
 
 - [04](issues/04-accounting-health-and-policy.md): deadline/config propagation and immediate recorded+pending policy effects integrated; combined readiness retains security fence.
 
+- [06](issues/06-deletion-and-retained-usage.md): retirement, bounded final settlement and serialized capture/seal/import integrated; isolated PG18/race passed.
+
 ## Fog
 
 No product decision remains open. Native/live acceptance is outside local implementation.
