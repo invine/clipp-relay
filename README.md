@@ -11,6 +11,14 @@ Owner deletion uses a separate OCI deletion journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
 Current-week Quota Committed follows a fresh Pending registration by keyed
 digest; old account state, plan, credentials, and presentation do not.
+With periodic accounting, deletion first invalidates credentials and physically
+closes sessions. After mandatory Recovery Journal proof, it attempts a bounded
+best-effort final settlement outside account protection and database row locks.
+A failed or unresolved flush alone cannot delay finalization. Finalization locks
+the old account while capturing confirmed current-week usage and sealing further
+settlements in one transaction. A committed batch with a lost reply is included;
+late work cannot charge a replacement account. Re-registration imports only that
+current-week total once, as an opening total without a settlement receipt.
 The Quota operation commits at most 64 KiB of account-week credit per block
 before making it locally usable. Callers must split larger reporter counts and
 consume any smaller remaining local balance before requesting another block.

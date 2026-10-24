@@ -51,6 +51,16 @@ type settlementState struct {
 	mu         sync.Mutex
 	refs       int
 	unresolved *Settlement
+	retired    bool
+}
+
+// SetSettlementHooksForTest controls persistence failures and acknowledgement
+// timing without replacing production composition or PostgreSQL.
+func (q *Quota) SetSettlementHooksForTest(before func(context.Context, pgx.Tx) error, after func(context.Context) error) {
+	q.settlementMu.Lock()
+	q.settlementBefore = before
+	q.settlementAfter = after
+	q.settlementMu.Unlock()
 }
 
 func (q *Quota) acquireSettlement(key settlementKey) *settlementState {
@@ -71,7 +81,7 @@ func (q *Quota) releaseSettlement(key settlementKey, s *settlementState) {
 	q.settlementMu.Lock()
 	defer q.settlementMu.Unlock()
 	s.refs--
-	if s.refs == 0 && s.unresolved == nil {
+	if s.refs == 0 && (s.unresolved == nil || s.retired) {
 		delete(q.settlements, key)
 	}
 }
@@ -181,6 +191,14 @@ func (q *Quota) settle(ctx context.Context, b Settlement) (RecordedUsage, error)
 	if err != nil {
 		return RecordedUsage{}, ErrTemporary
 	}
+	q.settlementMu.Lock()
+	before, after := q.settlementBefore, q.settlementAfter
+	q.settlementMu.Unlock()
+	if before != nil {
+		if err = before(ctx, tx); err != nil {
+			return RecordedUsage{}, ErrTemporary
+		}
+	}
 	if q.beforeCommit != nil {
 		if err = q.beforeCommit(ctx, tx); err != nil {
 			return RecordedUsage{}, ErrTemporary
@@ -191,6 +209,11 @@ func (q *Quota) settle(ctx context.Context, b Settlement) (RecordedUsage, error)
 			return RecordedUsage{}, ErrTemporary
 		}
 		return RecordedUsage{}, ErrSettlementUncertain
+	}
+	if after != nil {
+		if err = after(ctx); err != nil {
+			return RecordedUsage{}, ErrSettlementUncertain
+		}
 	}
 	if q.afterCommit != nil {
 		if err = q.afterCommit(); err != nil {
