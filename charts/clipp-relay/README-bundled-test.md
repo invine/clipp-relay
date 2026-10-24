@@ -61,3 +61,12 @@ Use the exact pair from a successful `Publish relay image` workflow's
 does not publish an image or supply its digest. The PostgreSQL image digest is a
 separate field. The wizard delegates linting to this preflight so every Helm call
 uses the required `relay-portal-test` namespace.
+
+`accounting.failureDeadline` renders as JSON `accounting_failure_deadline`.
+It defaults to `"3s"` and changes take effect on relay restart. Chart values
+accept whole seconds from `"1s"` through `"9223372036s"`; the runtime also accepts
+Go duration strings such as `"1500ms"`, always at least one second. Zero cannot
+disable cutoff. Select a bounded outage tolerance: when pending accounting stays
+unhealthy for the configured monotonic duration, all affected account sessions
+close and new admission fails temporarily. Successful reads cannot conceal
+unresolved writes. Confirmed exhaustion uses the separate quota outcome.

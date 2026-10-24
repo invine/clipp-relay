@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -143,5 +144,45 @@ func TestMigrationReadsOnlyDatabaseSecretFiles(t *testing.T) {
 	}
 	if _, err = c.ReadMaterial(); err == nil {
 		t.Fatal("serving accepted missing application Secret")
+	}
+}
+
+func TestAccountingDeadlineConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+		valid bool
+	}{
+		{"", 3 * time.Second, true}, {`"7s"`, 7 * time.Second, true}, {`"1500ms"`, 1500 * time.Millisecond, true},
+		{`""`, 0, false}, {`null`, 0, false}, {`"0s"`, 0, false}, {`"999ms"`, 0, false},
+		{`"-1s"`, 0, false}, {`"NaN"`, 0, false}, {`"Inf"`, 0, false}, {`"999999999999999s"`, 0, false}, {`3`, 0, false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			c := validTransportConfig()
+			data, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatal(err)
+			}
+			delete(raw, "accounting_failure_deadline")
+			if tc.value != "" {
+				raw["accounting_failure_deadline"] = json.RawMessage(tc.value)
+			}
+			data, _ = json.Marshal(raw)
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := config.Load(path)
+			if (err == nil) != tc.valid {
+				t.Fatalf("Load error=%v valid=%v", err, tc.valid)
+			}
+			if err == nil && got.AccountingDeadline() != tc.want {
+				t.Fatalf("deadline=%v want=%v", got.AccountingDeadline(), tc.want)
+			}
+		})
 	}
 }

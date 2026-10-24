@@ -657,7 +657,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		return
 	}
 	var committed int64
-	if !security && newStatus == "Active" {
+	if !s.observedPolicy && !security && newStatus == "Active" {
 		e = tx.QueryRow(ctx, `SELECT COALESCE((SELECT committed_bytes FROM public.weekly_quota_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date),0)`, target).Scan(&committed)
 		if e != nil {
 			fail(w, 503)

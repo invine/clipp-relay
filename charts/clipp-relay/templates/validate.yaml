@@ -1,4 +1,6 @@
 {{- $v := .Values -}}
+{{- if not (regexMatch "^[1-9][0-9]{0,9}s$" $v.accounting.failureDeadline) }}{{ fail "accounting.failureDeadline must be whole seconds of at least 1s" }}{{ end -}}
+{{- if gt (int64 (trimSuffix "s" $v.accounting.failureDeadline)) (int64 9223372036) }}{{ fail "accounting.failureDeadline exceeds the runtime duration limit" }}{{ end -}}
 {{- $name := include "clipp.name" . -}}
 {{- if not (has $v.database.mode (list "external" "bundled")) }}{{ fail "explicit external or bundled database mode required" }}{{ end -}}
 {{- if or (eq $v.database.name "") (eq $v.database.servingSecret "") (eq $v.database.migrationSecret "") (eq $v.database.caSecret "") }}{{ fail "database name and distinct credential/trust Secret references are required" }}{{ end -}}

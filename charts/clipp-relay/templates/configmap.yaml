@@ -1,6 +1,7 @@
 {{- $v := .Values -}}
 {{- $config := dict
       "version" 1
+      "accounting_failure_deadline" $v.accounting.failureDeadline
       "portal_origin" $v.public.portalOrigin
       "wss_hostname" $v.public.wssHostname
       "public_clients" (dict "android_redirect" $v.clients.androidRedirect "extension_redirect" $v.clients.extensionRedirect)

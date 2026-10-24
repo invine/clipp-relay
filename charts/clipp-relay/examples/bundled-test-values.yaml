@@ -76,3 +76,7 @@ networkPolicy:
   dnsPodSelector:
     k8s-app: kube-dns
   httpsCidrs: ["0.0.0.0/0"]
+
+# Accounting cutoff uses whole seconds (minimum 1s); changes require restart.
+accounting:
+  failureDeadline: "3s"
