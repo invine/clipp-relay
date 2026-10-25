@@ -419,6 +419,50 @@ func TestGrantRevocationRetiresValidationThatReturnsAfterNotification(t *testing
 	}
 }
 
+func TestAccountInvalidationRetiresValidationThatReturnsAfterNotification(t *testing.T) {
+	authority := &blockingGrantAuthority{entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(authority, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan string, 1)
+	go func() {
+		response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "grant-a")
+		result <- response
+	}()
+	select {
+	case <-authority.entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not enter token validation")
+	}
+	if err := s.InvalidateAccount("a"); err != nil {
+		t.Fatal(err)
+	}
+	close(authority.release)
+	select {
+	case response := <-result:
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("late validation result applied after account invalidation: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("late validation did not finish")
+	}
+	if got := s.AccountSessions("a"); got != 0 {
+		t.Fatalf("sessions after account invalidation=%d, want 0", got)
+	}
+}
+
 func TestGrantRevocationRetiresAuthenticationDuringInitialQuotaAssessment(t *testing.T) {
 	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
 	s, err := New(&grantAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})

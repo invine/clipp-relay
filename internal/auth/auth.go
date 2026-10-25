@@ -108,6 +108,8 @@ type Server struct {
 	commitRecovery                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
+	accountInvalidated                 func(string) error
+	accountInvalidationFallback        func(string) error
 	grantRevoked                       func(string) error
 	grantRevocationFallback            func(string) error
 	deletionAccounting                 QuotaProtection
@@ -208,6 +210,25 @@ type AccountChange struct {
 // must use ConfigureRelayProtection, which owns the complete policy operation.
 func (s *Server) SetAccountChangedForTest(changed func(AccountChange) func()) {
 	s.accountChanged = changed
+	if s.accountInvalidated == nil {
+		s.accountInvalidated = func(string) error { return nil }
+	}
+	if s.accountInvalidationFallback == nil {
+		s.accountInvalidationFallback = func(string) error { return nil }
+	}
+}
+
+// SetAccountInvalidatedForTest wraps the primary account notification while
+// retaining the configured manager as its fail-closed fallback.
+func (s *Server) SetAccountInvalidatedForTest(invalidated func(string) error) {
+	s.accountInvalidated = invalidated
+	if s.accountInvalidationFallback == nil {
+		s.accountInvalidationFallback = invalidated
+	}
+}
+
+func (s *Server) SetAccountInvalidationFallbackForTest(invalidated func(string) error) {
+	s.accountInvalidationFallback = invalidated
 }
 
 // RelaySessions exposes physical operations, not account policy decisions.
@@ -215,6 +236,7 @@ type RelaySessions interface {
 	AccountSessions(string) int
 	DetachAccount(string) func()
 	InvalidateGrant(string) error
+	InvalidateAccount(string) error
 }
 
 // SetGrantRevokedForTest installs the grant invalidation recipient for isolated
@@ -247,6 +269,8 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	// The recipient is a direct in-process manager call with no I/O. Retain the
 	// same idempotent operation as a fail-closed retry if a wrapper reports error.
 	s.grantRevocationFallback = func(grantID string) error { return sessions.InvalidateGrant(grantID) }
+	s.accountInvalidated = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
+	s.accountInvalidationFallback = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
 	s.accountChanged = func(change AccountChange) func() {
 		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.InvalidateEligibility)
 		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
@@ -264,6 +288,22 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 		return sample, nil
 	})
 	return nil
+}
+
+// deliverAccountInvalidation synchronously applies a confirmed account access
+// change to Session Manager. Cancellation of pending validation is independent
+// of the initiating HTTP request, and duplicate delivery is safe.
+func (s *Server) deliverAccountInvalidation(accountID string) error {
+	if accountID == "" || s.accountInvalidated == nil || s.accountInvalidationFallback == nil {
+		return errors.New("account invalidation is not configured")
+	}
+	if s.nativeIssuer != nil {
+		s.nativeIssuer.CancelPendingValidations()
+	}
+	if err := s.accountInvalidated(accountID); err == nil {
+		return nil
+	}
+	return s.accountInvalidationFallback(accountID)
 }
 
 // SampleActiveGrants reads only an aggregate live count, separately from the
@@ -514,7 +554,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, http.StatusServiceUnavailable)
 			return
 		}
-		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && s.accountChanged == nil {
+		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && (s.accountChanged == nil || s.accountInvalidated == nil || s.accountInvalidationFallback == nil) {
 			fail(w, http.StatusServiceUnavailable)
 			return
 		}
@@ -540,6 +580,12 @@ func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
 	}
 	if s.grantRevocationFallback == nil {
 		s.grantRevocationFallback = func(string) error { return nil }
+	}
+	if s.accountInvalidated == nil {
+		s.accountInvalidated = func(string) error { return nil }
+	}
+	if s.accountInvalidationFallback == nil {
+		s.accountInvalidationFallback = func(string) error { return nil }
 	}
 	base := s.Handler()
 	return base
@@ -1128,6 +1174,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var applied, uncertain bool
+	var invalidationFailed bool
 	var closeConnections func()
 	if s.beforeAccountActionGuard != nil {
 		s.beforeAccountActionGuard()
@@ -1143,8 +1190,9 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			}
 			defer tx.Rollback(ctx)
 			var locked, status string
-			var accountRevision, oldGeneration int64
-			e = tx.QueryRow(ctx, `SELECT id,status,revision,credential_generation FROM public.accounts WHERE id=$1 FOR UPDATE`, id).Scan(&locked, &status, &accountRevision, &oldGeneration)
+			var accountRevision, oldGeneration, weeklyBytes int64
+			var sessionLimit int
+			e = tx.QueryRow(ctx, `SELECT a.id,a.status,a.revision,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes,0),COALESCE(a.sessions_override,p.sessions,0) FROM public.accounts a LEFT JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 FOR UPDATE OF a`, id).Scan(&locked, &status, &accountRevision, &oldGeneration, &weeklyBytes, &sessionLimit)
 			if e != nil {
 				fail(w, 503)
 				return
@@ -1185,7 +1233,8 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, InvalidateEligibility: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true, InvalidateEligibility: true})
+			invalidationFailed = s.deliverAccountInvalidation(id) != nil
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {
 			markGuardDiagnostic(r, guardErr)
@@ -1205,6 +1254,9 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		if uncertain {
 			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			uncertainResponse(w)
+		} else if invalidationFailed {
+			markDiagnostic(r, "failed", "invalidation_incomplete")
+			http.Error(w, "Account revocation committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
 		} else {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 		}

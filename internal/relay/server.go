@@ -766,6 +766,22 @@ func (s *Server) InvalidateGrant(grantID string) error {
 	if grantID == "" {
 		return errors.New("grant ID is required")
 	}
+	return s.invalidateSessions("grant_revoked", func(session *session) bool { return session.grantID == grantID })
+}
+
+// InvalidateAccount processes account-wide revocation or restriction without
+// enumerating persisted grants.
+func (s *Server) InvalidateAccount(accountID string) error {
+	if accountID == "" {
+		return errors.New("account ID is required")
+	}
+	return s.invalidateSessions("account_access_changed", func(session *session) bool { return session.account == accountID })
+}
+
+// invalidateSessions retires pending attempts whose authorization scope may
+// not yet be known, then removes only matching established sessions. The same
+// lock serializes invalidation with successful authentication application.
+func (s *Server) invalidateSessions(reason string, matches func(*session) bool) error {
 	s.mu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(s.authAttempts))
 	for conn, attempt := range s.authAttempts {
@@ -776,8 +792,8 @@ func (s *Server) InvalidateGrant(grantID string) error {
 	}
 	connections := make([]network.Conn, 0)
 	for _, session := range s.byConn {
-		if session.grantID == grantID {
-			s.endSessionLocked(session, "grant_revoked")
+		if matches(session) {
+			s.endSessionLocked(session, reason)
 			connections = append(connections, session.conn)
 		}
 	}
