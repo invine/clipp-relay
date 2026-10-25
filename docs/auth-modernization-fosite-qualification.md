@@ -74,12 +74,12 @@ Int`), so it did not establish reachable-symbol results.
 - `go list -m`: Fosite v0.49.0, go-jose/v3 v3.0.5, Ristretto v1.0.0, x/crypto
   v0.57.0.
 - `go mod verify`: passed.
-- Integrated relay revision: `e9d2e0e29e6bc3a3a58232e838a6894730553c21`.
+- Final reviewed relay revision: `009eb0c4e57d45d8a7312ba6ea3e15c09563366a` (standards/spec-review dispositions are in the auth-modernization ticket tracker).
 - Disposable PostgreSQL 18.6.1 TLS/SCRAM:
   `CLIPP_TEST_MIGRATION_CONFIG=/private/tmp/clipp-auth-pg18-20261025/migration.json CLIPP_TEST_SERVING_CONFIG=/private/tmp/clipp-auth-pg18-20261025/serving.json GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./internal/database` passed on schema revision 16. The package resets schema/grants; serving-role grants were restored before auth tests.
 - `CLIPP_TEST_MIGRATION_CONFIG=/private/tmp/clipp-auth-pg18-20261025/migration.json CLIPP_TEST_SERVING_CONFIG=/private/tmp/clipp-auth-pg18-20261025/serving.json GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./internal/auth` passed against the same fixture, including native HTTP lifecycle, reset ambiguity and post-reset Portal Session reauthorization tests.
 - `GOCACHE=/private/tmp/clipp-go-cache bash scripts/verify.sh routine` and
-  `GOCACHE=/private/tmp/clipp-go-cache CGO_ENABLED=1 bash scripts/verify.sh race` passed on the integrated revision with loopback networking enabled.
+  `GOCACHE=/private/tmp/clipp-go-cache CGO_ENABLED=1 bash scripts/verify.sh race` passed on the final reviewed revision with loopback networking enabled.
 - Live provider login, Android-device and registered-extension runtime acceptance remain separate release gates.
 
 [GO-2026-4945]: https://pkg.go.dev/vuln/GO-2026-4945
