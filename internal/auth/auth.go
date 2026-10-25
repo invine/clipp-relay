@@ -108,6 +108,8 @@ type Server struct {
 	commitRecovery                     func(context.Context, pgx.Tx) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
+	grantRevoked                       func(string) error
+	grantRevocationFallback            func(string) error
 	deletionAccounting                 QuotaProtection
 	deletionJournal                    DeletionJournal
 	deletionRepository                 string
@@ -212,6 +214,16 @@ func (s *Server) SetAccountChangedForTest(changed func(AccountChange) func()) {
 type RelaySessions interface {
 	AccountSessions(string) int
 	DetachAccount(string) func()
+	InvalidateGrant(string) error
+}
+
+// SetGrantRevokedForTest installs the grant invalidation recipient for isolated
+// Auth tests. Production configures it through ConfigureRelayProtection.
+func (s *Server) SetGrantRevokedForTest(revoked func(string) error) {
+	s.grantRevoked = revoked
+	if s.grantRevocationFallback == nil {
+		s.grantRevocationFallback = revoked
+	}
 }
 
 // QuotaProtection applies current policy without discarding observations.
@@ -229,6 +241,12 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 		return errors.New("relay account protection requires quota and sessions")
 	}
 	s.deletionAccounting = accounting
+	s.grantRevoked = func(grantID string) error {
+		return sessions.InvalidateGrant(grantID)
+	}
+	// The recipient is a direct in-process manager call with no I/O. Retain the
+	// same idempotent operation as a fail-closed retry if a wrapper reports error.
+	s.grantRevocationFallback = func(grantID string) error { return sessions.InvalidateGrant(grantID) }
 	s.accountChanged = func(change AccountChange) func() {
 		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.InvalidateEligibility)
 		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
@@ -492,6 +510,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" && (s.grantRevoked == nil || s.grantRevocationFallback == nil) {
+			fail(w, http.StatusServiceUnavailable)
+			return
+		}
 		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && s.accountChanged == nil {
 			fail(w, http.StatusServiceUnavailable)
 			return
@@ -512,6 +534,12 @@ func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "native fixture unavailable", http.StatusServiceUnavailable)
 		})
+	}
+	if s.grantRevoked == nil {
+		s.grantRevoked = func(string) error { return nil }
+	}
+	if s.grantRevocationFallback == nil {
+		s.grantRevocationFallback = func(string) error { return nil }
 	}
 	base := s.Handler()
 	return base

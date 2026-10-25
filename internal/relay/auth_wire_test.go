@@ -307,6 +307,169 @@ func TestOlderAuthenticationCannotRetireOrOverwriteNewerAttempt(t *testing.T) {
 	}
 }
 
+func TestGrantRevocationClosesOnlySessionsUsingThatGrant(t *testing.T) {
+	s, err := New(&grantAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clients := make([]host.Host, 2)
+	for i := range clients {
+		clients[i], err = libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clients[i].Close()
+		if err = clients[i].Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, grant := range []string{"grant-a", "grant-b"} {
+		if response := authResponse(t, ctx, clients[i], s.Host.ID(), grant); !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("authenticate grant %s: %s", grant, response)
+		}
+	}
+
+	if err := s.InvalidateGrant("grant-a"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(clients[0].Network().ConnsToPeer(s.Host.ID())) != 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(clients[0].Network().ConnsToPeer(s.Host.ID())); got != 0 {
+		t.Fatalf("revoked grant retained %d physical connections", got)
+	}
+	if got := s.AccountSessions("a"); got != 1 {
+		t.Fatalf("sessions after grant revocation=%d, want unrelated grant's 1", got)
+	}
+	if got := len(clients[1].Network().ConnsToPeer(s.Host.ID())); got != 1 {
+		t.Fatalf("unrelated grant retained %d connections, want 1", got)
+	}
+}
+
+type blockingGrantAuthority struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (*blockingGrantAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
+	work(ctx)
+	return true
+}
+
+func (*blockingGrantAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
+	work(ctx)
+	return true
+}
+
+func (a *blockingGrantAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {
+	a.once.Do(func() {
+		close(a.entered)
+		<-a.release // Deliberately ignore cancellation to model a late DB result.
+	})
+	return auth.RelayCredential{AccountID: "a", GrantID: token, SessionLimit: 2, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
+}
+
+func TestGrantRevocationRetiresValidationThatReturnsAfterNotification(t *testing.T) {
+	authority := &blockingGrantAuthority{entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(authority, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan string, 1)
+	go func() {
+		response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "grant-a")
+		result <- response
+	}()
+	select {
+	case <-authority.entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not enter token validation")
+	}
+	if err := s.InvalidateGrant("grant-a"); err != nil {
+		t.Fatal(err)
+	}
+	close(authority.release)
+	select {
+	case response := <-result:
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("late validation result applied after revocation: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("late validation did not finish")
+	}
+	if got := s.AccountSessions("a"); got != 0 {
+		t.Fatalf("sessions after revocation=%d, want 0", got)
+	}
+}
+
+func TestGrantRevocationRetiresAuthenticationDuringInitialQuotaAssessment(t *testing.T) {
+	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(&grantAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	accounting.arm()
+	result := make(chan string, 1)
+	go func() {
+		response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "grant-a")
+		result <- response
+	}()
+	select {
+	case <-accounting.entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not enter quota assessment")
+	}
+	if err := s.InvalidateGrant("grant-a"); err != nil {
+		t.Fatal(err)
+	}
+	close(accounting.release)
+	select {
+	case response := <-result:
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("quota-pending result applied after revocation: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("quota-pending authentication did not finish")
+	}
+	if got := s.AccountSessions("a"); got != 0 {
+		t.Fatalf("sessions after revocation=%d, want 0", got)
+	}
+}
+
+type grantAuthority struct{ wireAuthority }
+
+func (*grantAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {
+	return auth.RelayCredential{AccountID: "a", GrantID: token, SessionLimit: 2, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
+}
+
 func TestDisconnectedConnectionCannotAuthenticateAfterQuotaCompletes(t *testing.T) {
 	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
 	s, err := New(wireAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
