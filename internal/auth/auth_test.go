@@ -237,6 +237,7 @@ func newProvider(t *testing.T) *providerDouble {
 			if invalid == "signature" {
 				sig[0] ^= 1
 			}
+			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"id_token": input + "." + base64.RawURLEncoding.EncodeToString(sig), "access_token": "SECRET_CANARY_ACCESS"})
 		default:
 			http.NotFound(w, r)
@@ -245,6 +246,22 @@ func newProvider(t *testing.T) *providerDouble {
 	t.Cleanup(d.server.Close)
 	return d
 }
+
+func TestProviderTokenEndpointReturnsJSONContentType(t *testing.T) {
+	d := newProvider(t)
+	response, err := http.PostForm(d.server.URL+"/token", url.Values{"code": {"callback-nonce"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("token endpoint status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if got := response.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("token endpoint Content-Type = %q, want application/json", got)
+	}
+}
+
 func (d *providerDouble) endpoints() auth.Provider {
 	return auth.Provider{AuthorizationURL: d.server.URL + "/authorize", TokenURL: d.server.URL + "/token", KeysURL: d.server.URL + "/keys"}
 }
