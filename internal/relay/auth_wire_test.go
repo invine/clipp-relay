@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"clipp-relay/internal/quota"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 )
@@ -29,6 +31,37 @@ func (a *countingAuthority) AuthenticateRelay(context.Context, string) (auth.Rel
 
 func (a failingAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCredential, error) {
 	return auth.RelayCredential{}, a.err
+}
+
+type blockingEligibility struct {
+	wireAccounting
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	armed   bool
+}
+
+func (c *blockingEligibility) arm() {
+	c.mu.Lock()
+	c.armed = true
+	c.mu.Unlock()
+}
+
+func (c *blockingEligibility) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+	c.mu.Lock()
+	armed := c.armed
+	if armed {
+		c.armed = false
+	}
+	c.mu.Unlock()
+	if armed {
+		c.once.Do(func() {
+			close(c.entered)
+			<-c.release
+		})
+	}
+	return quota.AccountingEligibility{}, nil
 }
 
 type failingAccounting struct{ err error }
@@ -183,6 +216,144 @@ func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 				t.Fatalf("failed initial auth retained %d connections", n)
 			}
 		})
+	}
+}
+
+type attemptAuthority struct{ unitCalls chan struct{} }
+
+func (a *attemptAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
+	select {
+	case a.unitCalls <- struct{}{}:
+	default:
+	}
+	work(ctx)
+	return true
+}
+func (*attemptAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
+	work(ctx)
+	return true
+}
+func (*attemptAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {
+	lifetime := 5 * time.Minute
+	switch token {
+	case "older":
+		lifetime = 2 * time.Minute
+	case "newer":
+		lifetime = 8 * time.Minute
+	}
+	return auth.RelayCredential{AccountID: "a", SessionLimit: 2, ExpiresAt: time.Now().Add(lifetime)}, nil
+}
+
+func TestOlderAuthenticationCannotRetireOrOverwriteNewerAttempt(t *testing.T) {
+	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
+	authority := &attemptAuthority{unitCalls: make(chan struct{}, 8)}
+	s, err := New(authority, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "initial"); !strings.Contains(response, `"ok":true`) {
+		t.Fatal(response)
+	}
+	<-authority.unitCalls
+	// Let the per-connection authentication limiter replenish before starting
+	// the two controlled renewals. The barriers below, not this interval, order them.
+	time.Sleep(time.Second)
+	accounting.arm()
+	older := make(chan string, 1)
+	go func() { response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "older"); older <- response }()
+	select {
+	case <-accounting.entered:
+	case <-ctx.Done():
+		t.Fatal("older attempt did not reach quota assessment")
+	}
+	<-authority.unitCalls
+	newer := make(chan string, 1)
+	go func() { response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "newer"); newer <- response }()
+	select {
+	case <-authority.unitCalls:
+	case <-ctx.Done():
+		t.Fatal("newer attempt did not reach the serving interface")
+	}
+	close(accounting.release)
+	select {
+	case response := <-older:
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("superseded older attempt response: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("older attempt did not finish after quota release")
+	}
+	select {
+	case response := <-newer:
+		if !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("newer attempt was retired or overwritten: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("newer attempt did not finish")
+	}
+	if got := s.AccountSessions("a"); got != 1 {
+		t.Fatalf("session count after newer completion=%d, want 1", got)
+	}
+}
+
+func TestDisconnectedConnectionCannotAuthenticateAfterQuotaCompletes(t *testing.T) {
+	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(wireAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if err = h.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	accounting.arm()
+	result := make(chan string, 1)
+	go func() {
+		response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "authorized")
+		result <- response
+	}()
+	select {
+	case <-accounting.entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not reach initial quota assessment")
+	}
+	if err = h.Network().ClosePeer(s.Host.ID()); err != nil {
+		t.Fatal(err)
+	}
+	for s.Host.Network().Connectedness(h.ID()) != network.NotConnected {
+		select {
+		case <-ctx.Done():
+			t.Fatal("relay did not observe physical disconnect before quota release")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	close(accounting.release)
+	select {
+	case <-result:
+	case <-ctx.Done():
+		t.Fatal("authentication did not finish after quota release")
+	}
+	if got := s.ActiveSessions(); got != 0 {
+		t.Fatalf("disconnected authentication result installed a Relay Session: %d", got)
 	}
 }
 
