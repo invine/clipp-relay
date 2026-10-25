@@ -779,6 +779,11 @@ func TestGoogleTokenExchangeUsesOneCodeExchangeAttempt(t *testing.T) {
 func TestGoogleTokenAudienceMustBeOneExactScalar(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
+	subjectNonce := make([]byte, 16)
+	if _, err := rand.Read(subjectNonce); err != nil {
+		t.Fatal(err)
+	}
+	d.subject = "audience-rejection-" + base64.RawURLEncoding.EncodeToString(subjectNonce)
 	d.audience = []string{"test-client"}
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	state, binding := start(t, s, nil)
