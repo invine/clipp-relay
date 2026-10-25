@@ -5,6 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -12,6 +15,25 @@ import (
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
 )
+
+func TestPublicClientsRejectJWTClientAssertionsBeforeJWKLookup(t *testing.T) {
+	provider := issuer.NewProvider(bytes.Repeat([]byte{0x42}, 32), nil, nil)
+	request := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(url.Values{
+		"grant_type":            {"refresh_token"},
+		"client_id":             {"android"},
+		"refresh_token":         {"ory_rt_" + strings.Repeat("a", 87)},
+		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+		"client_assertion":      {"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbmRyb2lkIn0.signature"},
+	}.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := request.ParseForm(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := provider.NewAccessRequest(context.Background(), request, &fosite.DefaultSession{})
+	if err == nil || !errors.Is(err, fosite.ErrInvalidClient) {
+		t.Fatalf("public client assertion was not rejected before JWK lookup: %v", err)
+	}
+}
 
 func TestCredentialLookupDigestSeparatesCredentialPurpose(t *testing.T) {
 	const signature = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
