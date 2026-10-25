@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"clipp-relay/internal/auth/issuer"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
@@ -101,6 +102,7 @@ type Server struct {
 	commitAccount                      func(context.Context, pgx.Tx) error
 	relayCredentialHook                func()
 	commitCredential                   func(context.Context, pgx.Tx) error
+	nativeIssuer                       *issuer.Issuer
 	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
 	commitRecovery                     func(context.Context, pgx.Tx) error
@@ -495,6 +497,26 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		s.observedRequest(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) }))
+	})
+}
+
+// NativeHandlerForTest exposes the not-yet-activated Fosite issuer only to an
+// explicitly constructed isolated auth fixture. Normal Handler() startup never
+// installs native issuance or token authentication.
+func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
+	if len(secret) != 32 {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "native fixture unavailable", http.StatusServiceUnavailable)
+		})
+	}
+	s.nativeIssuer = issuer.NewProvider(secret, issuer.Redirects{
+		issuer.Electron:  "http://127.0.0.1/oauth/callback",
+		issuer.Android:   s.AndroidRedirect,
+		issuer.Extension: s.ExtensionRedirect,
+	}, nil)
+	base := s.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), nativeOAuthContextKey{}, true)))
 	})
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {

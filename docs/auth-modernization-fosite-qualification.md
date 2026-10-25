@@ -27,11 +27,10 @@ Fosite issue [#882] reports unbounded allocation in
 `token/hmac.HMACStrategy.Signature` because it splits the whole attacker
 controlled token before checking segment count. The proposed fix remains in
 open PR [#890], rather than a released Fosite version. The project currently
-bounds OAuth POST bodies at 16 KiB; the native adapter must also reject token
-strings above its small protocol bound before calling any Fosite signature or
-validation method, including for tokens taken from bearer headers. The accepted
-native format is 94 characters, so a small fixed ceiling covers it with room
-for bounded parsing. The final adapter has not yet added this gate.
+bounds OAuth POST bodies at 16 KiB. The native adapter now requires the exact
+94-character native token shape and validates its fixed-size base64url message
+and signature segments before calling Fosite signature or validation methods.
+The same check protects tokens from bearer use through the private issuer API.
 
 The go-jose/v3 advisory is specifically reachable when untrusted JWK JSON with
 an RSA private key is unmarshaled: `JSONWebKey.UnmarshalJSON` calls
@@ -40,13 +39,19 @@ v0.49.0's `DefaultClientAuthenticationStrategy` only calls
 `findClientPublicJWK` for `private_key_jwt` client assertions; the registered
 client authentication method is checked first and clients with method `none`
 are rejected. Fosite's authorization-code and refresh token formats use the
-HMAC strategy and do not need JWK parsing. Clipp's clients are public clients,
-but the Fosite HTTP composition has not yet been implemented and exercised, so
-runtime non-reachability is conditional: the eventual composition must
-explicitly restrict authentication to the configured public clients and reject
-client assertions / `private_key_jwt`, and must not parse untrusted JWKs on
-these grant paths. If that boundary cannot be established in the real HTTP
-path, v0.49.0 with go-jose/v3 is incompatible with the advisory requirement.
+HMAC strategy and do not need JWK parsing. The isolated composition registers
+exactly the three public clients with `token_endpoint_auth_method=none` and
+supplies a Fosite client-authentication strategy that rejects Authorization
+credentials, client secrets, and client assertions before Fosite can parse a
+JWT assertion or call `findClientPublicJWK`. Authorization query validation
+admits only the six Clipp fields, so signed request objects are not passed
+through. A non-DB test exercises Fosite's `NewAccessRequest` boundary and
+confirms an assertion on a registered public client is rejected. The
+real-PostgreSQL HTTP lifecycle test is implemented but has not run because its
+disposable database fixture is unavailable. Runtime non-reachability at the
+complete HTTP boundary therefore remains unproven until that test runs. If the
+boundary cannot be established in the real HTTP path, v0.49.0 with go-jose/v3
+is incompatible with the advisory requirement.
 Fosite's published releases currently top out at v0.49.0, which still imports
 go-jose/v3; go-jose/v4 is not a drop-in import-path update for this Fosite
 revision. No released Fosite revision eliminating v3 was found.

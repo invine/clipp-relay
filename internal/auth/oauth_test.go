@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -65,6 +66,159 @@ func TestPublicClientCodeAndRefresh(t *testing.T) {
 		}
 	}
 	_ = http.MethodGet
+}
+
+func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
+	d := newProvider(t)
+	d.subject = "native-fosite-lifecycle"
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	cookie := loginAs(t, s, d, d.subject, "native@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	handler := s.NativeHandlerForTest(bytes.Repeat([]byte{0x73}, 32))
+	issueCode := func(state string) string {
+		verifier := strings.Repeat("a", 43)
+		hash := sha256.Sum256([]byte(verifier))
+		query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {state}}
+		begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
+		begin.AddCookie(cookie)
+		page := httptest.NewRecorder()
+		handler.ServeHTTP(page, begin)
+		if page.Code != 200 {
+			t.Fatalf("native authorize page: %d %s", page.Code, page.Body.String())
+		}
+		flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+		csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+		if len(flow) != 2 || len(csrf) != 2 {
+			t.Fatal("native consent form missing")
+		}
+		confirm := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(url.Values{"flow": {flow[1]}, "csrf": {csrf[1]}}.Encode()))
+		confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		confirm.Header.Set("Origin", s.Origin)
+		confirm.AddCookie(cookie)
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, confirm)
+		if out.Code != http.StatusFound {
+			t.Fatalf("native consent: %d %s", out.Code, out.Body.String())
+		}
+		callback, err := url.Parse(out.Header().Get("Location"))
+		if err != nil || callback.Query().Get("state") != state {
+			t.Fatalf("native callback mismatch: %s %v", out.Header().Get("Location"), err)
+		}
+		code := callback.Query().Get("code")
+		if len(code) != 94 || !strings.HasPrefix(code, "ory_ac_") {
+			t.Fatalf("native authorization code shape: %q", code)
+		}
+		return code
+	}
+	tokenPostNative := func(form url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, req)
+		return out
+	}
+	decode := func(out *httptest.ResponseRecorder) (string, string) {
+		var body struct {
+			Access  string `json:"access_token"`
+			Refresh string `json:"refresh_token"`
+		}
+		if err := json.Unmarshal(out.Body.Bytes(), &body); err != nil || body.Access == "" || body.Refresh == "" {
+			t.Fatalf("native token response: %d %s (%v)", out.Code, out.Body.String(), err)
+		}
+		return body.Access, body.Refresh
+	}
+	verifier := strings.Repeat("a", 43)
+	codeA := issueCode("native-state-0000000001")
+	wrongClient := tokenPostNative(url.Values{"grant_type": {"authorization_code"}, "client_id": {"electron"}, "redirect_uri": {"http://127.0.0.1:34567/oauth/callback"}, "code": {codeA}, "code_verifier": {verifier}})
+	if wrongClient.Code == 200 {
+		t.Fatal("a different public client redeemed the native code")
+	}
+	badVerifier := tokenPostNative(url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {codeA}, "code_verifier": {strings.Repeat("b", 43)}})
+	if badVerifier.Code == 200 {
+		t.Fatal("invalid S256 verifier was accepted")
+	}
+	first := tokenPostNative(url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {codeA}, "code_verifier": {verifier}})
+	if first.Code != 200 {
+		t.Fatalf("native code redemption: %d %s", first.Code, first.Body.String())
+	}
+	accessA, refreshA := decode(first)
+	if !strings.HasPrefix(accessA, "ory_at_") || len(accessA) != 94 || !strings.HasPrefix(refreshA, "ory_rt_") || len(refreshA) != 94 {
+		t.Fatal("Fosite native token format not returned")
+	}
+	usedCode := tokenPostNative(url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {codeA}, "code_verifier": {verifier}})
+	if usedCode.Code == 200 {
+		t.Fatal("consumed native code was accepted")
+	}
+	wrongRefreshClient := tokenPostNative(url.Values{"grant_type": {"refresh_token"}, "client_id": {"electron"}, "refresh_token": {refreshA}})
+	if wrongRefreshClient.Code == 200 {
+		t.Fatal("a different public client used the refresh token")
+	}
+	forgedRefresh := []byte(refreshA)
+	if forgedRefresh[7] == 'A' {
+		forgedRefresh[7] = 'B'
+	} else {
+		forgedRefresh[7] = 'A'
+	}
+	forged := tokenPostNative(url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {string(forgedRefresh)}})
+	if forged.Code == 200 {
+		t.Fatal("a refresh token with an invalid HMAC was accepted")
+	}
+	_, refreshA2 := decode(tokenPostNative(url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refreshA}}))
+	if _, _, err := s.AuthenticateAccess(context.Background(), accessA); err != nil {
+		t.Fatalf("ordinary refresh revoked prior access token: %v", err)
+	}
+	codeB := issueCode("native-state-0000000002")
+	second := tokenPostNative(url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {codeB}, "code_verifier": {verifier}})
+	if second.Code != 200 {
+		t.Fatalf("second native grant exchange: %d %s", second.Code, second.Body.String())
+	}
+	accessB, refreshB := decode(second)
+	if _, _, err := s.AuthenticateAccess(context.Background(), accessB); err != nil {
+		t.Fatalf("second grant access invalid: %v", err)
+	}
+	replay := tokenPostNative(url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refreshA}})
+	if replay.Code == 200 {
+		t.Fatal("consumed refresh credential was accepted")
+	}
+	if _, _, err := s.AuthenticateAccess(context.Background(), accessA); err == nil {
+		t.Fatal("refresh replay did not revoke the owning grant's access token")
+	}
+	if _, _, err := s.AuthenticateAccess(context.Background(), accessB); err != nil {
+		t.Fatalf("refresh replay revoked an unrelated grant: %v", err)
+	}
+	if continued := tokenPostNative(url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refreshB}}); continued.Code != 200 {
+		t.Fatalf("unrelated grant refresh failed: %d %s", continued.Code, continued.Body.String())
+	}
+	var replayAudits int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.audit_events a JOIN public.accounts c ON c.id=a.account_id WHERE c.subject=$1 AND a.event='refresh_reuse'`, d.subject).Scan(&replayAudits); err != nil || replayAudits != 1 {
+		t.Fatalf("refresh replay audit rows=%d err=%v", replayAudits, err)
+	}
+	concurrentCode := issueCode("native-state-0000000003")
+	concurrentForm := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {concurrentCode}, "code_verifier": {verifier}}
+	concurrentResults := make([]*httptest.ResponseRecorder, 2)
+	var redemptions sync.WaitGroup
+	for i := range concurrentResults {
+		redemptions.Add(1)
+		go func(i int) { defer redemptions.Done(); concurrentResults[i] = tokenPostNative(concurrentForm) }(i)
+	}
+	redemptions.Wait()
+	winners := 0
+	for _, out := range concurrentResults {
+		if out.Code == 200 {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("concurrent code redemption successes=%d, want one", winners)
+	}
+	if refreshA2 == refreshA {
+		t.Fatal("refresh rotation did not issue a successor")
+	}
 }
 
 func TestConsentSubmissionIsAtomicOneUse(t *testing.T) {
