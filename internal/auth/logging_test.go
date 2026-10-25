@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
@@ -73,16 +75,18 @@ func TestPortalAndOAuthDiagnosticsDescribeRecordedCredentials(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	provider := newProvider(t)
+	subject := fmt.Sprintf("SECRET_SUBJECT_CANARY_%d", time.Now().UnixNano())
+	email := strings.ToLower(subject) + "@example.test"
 	provider.mu.Lock()
-	provider.subject = "SECRET_SUBJECT_CANARY"
-	provider.email = "SECRET_EMAIL_CANARY@example.test"
+	provider.subject = subject
+	provider.email = email
 	provider.mu.Unlock()
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
 	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
-	session := loginAs(t, s, provider, "SECRET_SUBJECT_CANARY", "SECRET_EMAIL_CANARY@example.test", "")
-	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='SECRET_SUBJECT_CANARY'`); err != nil {
+	session := loginAs(t, s, provider, subject, email, "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, subject); err != nil {
 		t.Fatal(err)
 	}
 	code := authorizeClient(t, s, session, "android", c.PublicClients.AndroidRedirect)

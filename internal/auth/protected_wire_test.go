@@ -49,6 +49,9 @@ func protectedPortalFixtureWithAccounting(t *testing.T, configure func(*quota.Qu
 	}
 	d := newProvider(t)
 	s := auth.NewWithRuntime(db, c, m, d.endpoints())
+	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
+		t.Fatal(err)
+	}
 	q := quota.NewWithRuntime(db)
 	if configure != nil {
 		configure(q)

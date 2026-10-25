@@ -170,6 +170,9 @@ func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
 					t.Fatal(e)
 				}
 				restartedAuth := auth.New(p.auth.Pool, p.config, material, p.provider.endpoints())
+				if err := restartedAuth.EnableNativeOAuth(material.NativeSigningKey); err != nil {
+					t.Fatal(err)
+				}
 				restartedQuota := quota.New(p.auth.Pool)
 				defer restartedQuota.Close()
 				restartedRelay, e := relay.NewProtected(restartedAuth, restartedQuota, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
