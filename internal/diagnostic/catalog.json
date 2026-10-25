@@ -1846,10 +1846,6 @@
       "event": "quota.eligibility",
       "pairs": [
         [
-          "success",
-          "none"
-        ],
-        [
           "refused",
           "quota_exhausted"
         ],

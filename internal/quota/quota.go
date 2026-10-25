@@ -253,6 +253,12 @@ func (q *Quota) clockOK() bool {
 }
 
 func (q *Quota) accountingDiagnostic(event string, err error, started time.Time) {
+	// Eligibility runs for every protected admission and periodically for active
+	// accounts. Successful checks are routine and provide no useful diagnostic
+	// signal; keep refusals and accounting failures visible.
+	if event == "quota.eligibility" && err == nil {
+		return
+	}
 	outcome, reason := "success", "none"
 	switch {
 	case errors.Is(err, ErrExhausted):
