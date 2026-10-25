@@ -177,11 +177,11 @@ func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t
 	// Snapshot rows to memory as a logical local restore fixture. The independent
 	// journal deliberately remains outside this restored snapshot.
 	backup := map[string][]byte{}
-	tables := []string{"authorization_codes", "login_grants", "refresh_generations", "relay_access_tokens", "portal_sessions"}
+	tables := []string{"native_authorization_codes", "native_login_grants", "native_refresh_generations", "native_access_tokens", "portal_sessions"}
 	for _, table := range tables {
 		where := "t.account_id=$1"
-		if table == "refresh_generations" || table == "relay_access_tokens" {
-			where = "t.grant_id IN(SELECT id FROM public.login_grants WHERE account_id=$1)"
+		if table == "native_refresh_generations" || table == "native_access_tokens" {
+			where = "t.grant_id IN(SELECT id FROM public.native_login_grants WHERE account_id=$1)"
 		}
 		var data []byte
 		if err = pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM public.`+table+` t WHERE `+where, p.account).Scan(&data); err != nil {
@@ -201,10 +201,10 @@ func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t
 	if _, err = pool.Exec(ctx, `DELETE FROM public.deletion_operations WHERE account_id=$1`, p.account); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"relay_access_tokens", "refresh_generations", "login_grants", "authorization_codes", "portal_sessions"} {
+	for _, table := range []string{"native_access_tokens", "native_refresh_generations", "native_login_grants", "native_authorization_codes", "portal_sessions"} {
 		where := "account_id=$1"
-		if table == "relay_access_tokens" || table == "refresh_generations" {
-			where = "grant_id IN(SELECT id FROM public.login_grants WHERE account_id=$1)"
+		if table == "native_access_tokens" || table == "native_refresh_generations" {
+			where = "grant_id IN(SELECT id FROM public.native_login_grants WHERE account_id=$1)"
 		}
 		if _, err = pool.Exec(ctx, `DELETE FROM public.`+table+` WHERE `+where, p.account); err != nil {
 			t.Fatal(err)

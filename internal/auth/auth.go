@@ -255,7 +255,7 @@ func (s *Server) SampleActiveGrants(parent context.Context, accountID string) (C
 	ctx, cancel := context.WithTimeout(parent, 500*time.Millisecond)
 	defer cancel()
 	var count int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
 	if err != nil {
 		return CapacitySample{}, err
 	}
@@ -514,9 +514,7 @@ func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
 		})
 	}
 	base := s.Handler()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		base.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), nativeOAuthContextKey{}, true)))
-	})
+	return base
 }
 
 // EnableNativeOAuth installs the Fosite-only issuer after startup verifies the

@@ -24,53 +24,10 @@ type RelayCredential struct {
 // AuthenticateRelay checks the token, grant, account status and current plan
 // together. Database failure is distinct from a known invalid credential.
 func (s *Server) AuthenticateRelay(ctx context.Context, raw string) (RelayCredential, error) {
-	if s.nativeIssuer != nil {
-		return s.authenticateNativeRelay(ctx, raw)
-	}
-	if len(raw) != 43 {
+	if s.nativeIssuer == nil {
 		return RelayCredential{}, ErrInvalidAccess
 	}
-	for v := range s.Peppers {
-		var result RelayCredential
-		var status string
-		var grantGeneration int64
-		var dbNow time.Time
-		before := time.Now()
-		err := s.db.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,COALESCE(a.sessions_override,p.sessions),t.expires_at,clock_timestamp()
-			FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id
-			JOIN public.accounts a ON a.id=g.account_id JOIN public.quota_plans p ON p.id=a.plan_id
-			WHERE NOT a.recovery_review_hold AND t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp()
-			AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&result.AccountID, &status, &grantGeneration, &result.Generation, &result.SessionLimit, &result.ExpiresAt, &dbNow)
-		after := time.Now()
-		if err == nil {
-			if s.relayCredentialHook != nil {
-				s.relayCredentialHook()
-			}
-			if _, uncertain := s.uncertainAccounts.Load(result.AccountID); uncertain {
-				// Wait for a still-in-flight Commit to release the account row, then
-				// re-read authority. A failed reconciliation keeps admission closed.
-				var resolved string
-				if err := s.db.QueryRow(ctx, `SELECT id FROM public.accounts WHERE id=$1 FOR SHARE`, result.AccountID).Scan(&resolved); err != nil {
-					return RelayCredential{}, err
-				}
-				s.uncertainAccounts.Delete(result.AccountID)
-				return s.AuthenticateRelay(ctx, raw)
-			}
-			if status != "Active" || grantGeneration != result.Generation {
-				return RelayCredential{}, ErrInvalidAccess
-			}
-			remaining := result.ExpiresAt.Sub(dbNow) - after.Sub(before) - time.Second
-			if remaining <= 0 {
-				return RelayCredential{}, ErrInvalidAccess
-			}
-			result.ExpiresAt = after.Add(remaining)
-			return result, nil
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return RelayCredential{}, err
-		}
-	}
-	return RelayCredential{}, ErrInvalidAccess
+	return s.authenticateNativeRelay(ctx, raw)
 }
 
 // authenticateNativeRelay validates the library-managed Fosite access-token

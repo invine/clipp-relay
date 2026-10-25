@@ -42,7 +42,7 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 		t.Fatalf("profile: %d %s", out.Code, body)
 	}
 	const grantID = "312ff0d4-b531-4240-a0d5-9012805863fb"
-	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) SELECT $1,id,credential_generation,'android',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days' FROM public.accounts WHERE id=$2`, grantID, id); err != nil {
+	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.native_login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) SELECT $1,id,credential_generation,'android',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days' FROM public.accounts WHERE id=$2`, grantID, id); err != nil {
 		t.Fatal(err)
 	}
 	s.SetCapacitySampler(s.SampleActiveGrants)
@@ -50,7 +50,7 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 	if withGrant.Code != 200 || !strings.Contains(withGrant.Body.String(), "1 of 20") || !strings.Contains(withGrant.Body.String(), "Unavailable") {
 		t.Fatalf("live grant count: %d %s", withGrant.Code, withGrant.Body.String())
 	}
-	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.login_grants SET terminated_at=clock_timestamp() WHERE id=$1`, grantID); err != nil {
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.native_login_grants SET terminated_at=clock_timestamp() WHERE id=$1`, grantID); err != nil {
 		t.Fatal(err)
 	}
 	withoutGrant := portalRequest(s, "GET", "/", cookie, nil, "")
