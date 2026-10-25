@@ -228,6 +228,9 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 	}
 	d := newProvider(t)
 	s := auth.NewWithRuntime(db, c, m, d.endpoints())
+	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
+		t.Fatal(err)
+	}
 	accounting := quota.NewWithRuntime(db)
 	defer accounting.Close()
 	dataPlane, err := relay.NewProtected(s, accounting, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})

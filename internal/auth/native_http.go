@@ -51,6 +51,7 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
+	markClient(r, string(client))
 	grant := r.PostForm.Get("grant_type")
 	if grant == "refresh_token" {
 		if trace := diagnosticFor(r); trace != nil {
@@ -156,6 +157,7 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 				s.oauthError(w, 503)
 				return
 			}
+			markDiagnostic(r, "refused", "replay_detected")
 			s.oauthError(w, 401)
 			return
 		}
