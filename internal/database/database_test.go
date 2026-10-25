@@ -289,8 +289,20 @@ INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES('3333333
 		t.Fatal(e)
 	}
 
+	// Revision 13 is the transactional prepaid quota cutover. Keep failure
+	// injection pinned to that step even as later migrations are appended.
 	broken := append([]migration{}, migrations...)
-	broken[len(broken)-1].sql += "; SELECT 1/0"
+	cutoverFound := false
+	for i := range broken {
+		if broken[i].revision == 13 {
+			broken[i].sql += "; SELECT 1/0"
+			cutoverFound = true
+			break
+		}
+	}
+	if !cutoverFound {
+		t.Fatal("revision 13 cutover migration missing")
+	}
 	if e = migrate(ctx, p, broken); e == nil {
 		t.Fatal("failed cutover succeeded")
 	}
