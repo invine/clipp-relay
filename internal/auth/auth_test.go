@@ -508,10 +508,10 @@ func TestExpiredSessionsAndDatabaseOutageFailClosed(t *testing.T) {
 		t.Fatal("absolute-expired session accepted")
 	}
 	db.Pool.Close()
-	w = httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/auth/login", nil))
+	state, binding = start(t, s, nil)
+	w = complete(s, state, binding)
 	if w.Code != 503 || sessionFrom(w) != nil {
-		t.Fatalf("outage start: %d", w.Code)
+		t.Fatalf("outage callback issued a credential: %d", w.Code)
 	}
 }
 
