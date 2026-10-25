@@ -4,13 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/relay"
 	"github.com/jackc/pgx/v5"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 func TestZZNativeOAuthResetIsIdempotentAndPreservesAccountState(t *testing.T) {
@@ -164,5 +170,79 @@ VALUES('8670c193-8f45-49f3-a1d9-6e5dbe4ea82e',$1,0,'android',clock_timestamp(),c
 	}
 	if err := runtime.Pool.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants WHERE account_id=$1`, account).Scan(&grants); err != nil || grants != 0 {
 		t.Fatalf("restoring old key resurrected grants: %d %v", grants, err)
+	}
+}
+
+func TestZZZNativeResetPreservesPortalSessionForReauthorization(t *testing.T) {
+	c, serving, runtime := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	migrationConfig, err := config.Load(os.Getenv("CLIPP_TEST_MIGRATION_CONFIG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrationMaterial, err := migrationConfig.ReadMaterial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrationPool, err := database.NewPool(context.Background(), migrationConfig, migrationMaterial, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrationPool.Close()
+
+	provider := newProvider(t)
+	subject := fmt.Sprintf("reset-reauth-%d", time.Now().UnixNano())
+	provider.subject = subject
+	provider.email = subject + "@example.test"
+	beforeReset := newTestServer(t, runtime.Pool, c, serving, provider.endpoints())
+	portalSession := loginAs(t, beforeReset, provider, subject, provider.email, "")
+	if _, err := runtime.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, subject); err != nil {
+		t.Fatal(err)
+	}
+	provider.mu.Lock()
+	loginTokenCalls := provider.tokenCalls
+	provider.mu.Unlock()
+
+	newKey := make([]byte, 32)
+	if _, err := rand.Read(newKey); err != nil {
+		t.Fatal(err)
+	}
+	if reset, err := auth.ResetNativeOAuthCredentials(context.Background(), migrationPool, newKey); err != nil || !reset {
+		t.Fatalf("deliberate signing-key reset=%v err=%v", reset, err)
+	}
+
+	serving.NativeSigningKey = newKey
+	afterReset := newTestServer(t, runtime.Pool, c, serving, provider.endpoints())
+	code := authorizeClient(t, afterReset, portalSession, "android", c.PublicClients.AndroidRedirect)
+	access, _ := redeemClient(t, afterReset, "android", c.PublicClients.AndroidRedirect, code)
+	provider.mu.Lock()
+	postResetTokenCalls := provider.tokenCalls
+	provider.mu.Unlock()
+	if postResetTokenCalls != loginTokenCalls {
+		t.Fatalf("native reauthorization performed another Google token exchange: before=%d after=%d", loginTokenCalls, postResetTokenCalls)
+	}
+
+	if _, err := afterReset.AuthenticateRelay(context.Background(), access); err != nil {
+		t.Fatalf("new native access did not authenticate after key reset: %v", err)
+	}
+	relayServer, err := relay.New(afterReset, nil, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relayServer.Close()
+	address, err := relayServer.ListenAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := relay.NewDiscovery(relayServer, afterReset, "relay.example.test", []ma.Multiaddr{address})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://relay.example.test/v1/relay", nil)
+	request.Header.Set("Authorization", "Bearer "+access)
+	response := httptest.NewRecorder()
+	discovery.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("Discovery rejected reauthorized native token: %d %s", response.Code, response.Body.String())
 	}
 }
