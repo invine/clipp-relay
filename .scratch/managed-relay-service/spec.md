@@ -883,17 +883,17 @@ or fairness under attack. No auto-tuning/hidden host-scaled defaults.
 | RV global / authenticated connection rate | 500/s burst 1,000 /4/s burst 8 |
 | Google workflows/provider I/O | 8 concurrent, 8s combined within remaining parent 15s HTTP deadline |
 | Provider response bounds | Headers 16KiB, decoded body 256KiB including decompression |
-| Verification key limits | 32 keys, 256-byte key ID, no growing attacker-keyed negative cache |
-| Key freshness | Respect shorter provider cache lifetime, local max 6h; no expired fallback; still-fresh matching key valid after failed fetch, failure never extends freshness |
-| Unknown key refresh | Deduplicated bounded fetch with shared 60s cooldown, initial empty-cache fetch excepted |
+| Google verification keys | One stock go-oidc `RemoteKeySet`; its in-flight fetches are shared and its cached keys have no application-enforced freshness deadline |
 | Login RAM bounds | 1,024 continuations ×≤16KiB payload, 4,096 fences; existing 10m lifetime |
 
 No IP buckets or unbounded attacker-chosen account-key maps: rate state is global
 or bounded resolved account/live connection. These are control rates, not bytes.
 Acquire provider capacity before claiming one-use flow where possible; no queued
 provider work or unverified-claim fallback. Key fetch shares provider budget;
-configured endpoints only, no arbitrary redirects. Unknown-key cooldown can
-require fresh explicit login. No automatic retry of ambiguous one-use exchange.
+configured endpoints only, no arbitrary redirects. Stock key refresh-on-
+verification-failure can issue sequential requests after sequential misses;
+shared fetch capacity lasts through response closure. No automatic retry of
+ambiguous one-use exchange.
 
 Disable ordinary connection-manager trimming/ForceTrim. Use explicit admission,
 expiry/revocation/quota/replacement/drain, no valid-idle eviction for newcomer.
@@ -1093,8 +1093,8 @@ mock interface solely to test an internal helper.
   replacement, renewal failures, stale callbacks, same-connection account change;
   framing/bounds/redirect/downgrade/version/error/fallback behavior.
 - Deterministic hostile Google doubles: signature/issuer/audience/expiry/nonce/
-  state, callback/PKCE/replay, key cache/rotation/cooldown/oversize/outage and
-  ambiguous exchange. Real Google test-account flows in all runtimes before
+  state, callback/PKCE/replay, stock key cache/rotation/shared-fetch/
+  oversize/outage and ambiguous exchange. Real Google test-account flows in all runtimes before
   first serving and after material authorization changes.
 - Canonical identity/concurrent registration; all status transitions; authoritative
   admin email/current allowlist/malformed reload/recent auth/revision conflicts;
