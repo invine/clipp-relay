@@ -13,7 +13,7 @@ func revokeAccountCredentials(ctx context.Context, tx pgx.Tx, accountID string) 
 	if _, err := tx.Exec(ctx, `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE id=$1`, accountID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE public.login_grants SET terminated_at=clock_timestamp() WHERE account_id=$1 AND terminated_at IS NULL`, accountID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE public.native_login_grants SET terminated_at=clock_timestamp() WHERE account_id=$1 AND terminated_at IS NULL`, accountID); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id=$1`, accountID)

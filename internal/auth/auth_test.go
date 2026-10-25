@@ -33,6 +33,11 @@ import (
 func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.Material, provider auth.Provider) *auth.Server {
 	t.Helper()
 	s := auth.New(pool, c, m, provider)
+	if len(m.NativeSigningKey) == 32 {
+		if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
 	return s
 }

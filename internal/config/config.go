@@ -93,6 +93,7 @@ type Config struct {
 		GoogleClientSecretFile string `json:"google_client_secret_file"`
 		AdminAllowlistFile     string `json:"admin_allowlist_file"`
 		PepperKeyringFile      string `json:"pepper_keyring_file"`
+		NativeSigningKeyFile   string `json:"native_signing_key_file"`
 	} `json:"secrets"`
 }
 
@@ -104,6 +105,7 @@ type Material struct {
 	CurrentPepper          uint64
 	Peppers                map[uint64][]byte
 	JournalSigningKey      []byte
+	NativeSigningKey       []byte
 }
 
 // AdminAllowlist is read from the mounted Secret on each administrative request.
@@ -369,7 +371,7 @@ func (c Config) Validate() error {
 	if (c.Database.Mode != "external" && c.Database.Mode != "bundled") || !hostname(c.Database.Host) || c.Database.Port == 0 || c.Database.Name == "" || strings.ContainsAny(c.Database.Name, " /\t\n") {
 		return errors.New("invalid database target")
 	}
-	for _, path := range []string{c.Database.UsernameFile, c.Database.PasswordFile, c.Database.CAFile, c.Secrets.GoogleClientIDFile, c.Secrets.GoogleClientSecretFile, c.Secrets.AdminAllowlistFile, c.Secrets.PepperKeyringFile} {
+	for _, path := range []string{c.Database.UsernameFile, c.Database.PasswordFile, c.Database.CAFile, c.Secrets.GoogleClientIDFile, c.Secrets.GoogleClientSecretFile, c.Secrets.AdminAllowlistFile, c.Secrets.PepperKeyringFile, c.Secrets.NativeSigningKeyFile} {
 		if path == "" || !strings.HasPrefix(path, "/") {
 			return errors.New("missing or invalid Secret-file reference")
 		}
@@ -504,6 +506,20 @@ func readSecret(path string) ([]byte, error) {
 	return b, nil
 }
 
+// ReadNativeSigningKey reads the one persistent Fosite signing secret. It is
+// deliberately fixed at 32 bytes; callers must provision it rather than
+// allowing startup to generate a replacement.
+func ReadNativeSigningKey(path string) ([]byte, error) {
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return nil, errors.New("native OAuth signing key unavailable")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) != 32 {
+		return nil, errors.New("native OAuth signing key must contain 32 bytes")
+	}
+	return b, nil
+}
+
 func (c Config) ReadDatabaseMaterial() (Material, error) {
 	var m Material
 	username, err := readSecret(c.Database.UsernameFile)
@@ -550,6 +566,10 @@ func (c Config) ReadMaterial() (Material, error) {
 	if m.GoogleClientID == "" || m.GoogleClientSecret == "" {
 		return m, errors.New("Google client material empty")
 	}
+	m.NativeSigningKey, err = ReadNativeSigningKey(c.Secrets.NativeSigningKeyFile)
+	if err != nil {
+		return Material{}, err
+	}
 	if c.Journal.Region != "" {
 		m.JournalSigningKey, err = readSecret(c.Journal.PrivateKeyFile)
 		if err != nil || len(m.JournalSigningKey) > 16<<10 {
@@ -589,5 +609,19 @@ func (c Config) ReadMaterial() (Material, error) {
 		return m, errors.New("invalid pepper keyring")
 	}
 	m.CurrentPepper = ring.Current
+	return m, nil
+}
+
+// ReadResetMaterial loads only the database credentials and native signing
+// Secret needed by the explicit credential-reset command.
+func (c Config) ReadResetMaterial() (Material, error) {
+	m, err := c.ReadDatabaseMaterial()
+	if err != nil {
+		return m, err
+	}
+	m.NativeSigningKey, err = ReadNativeSigningKey(c.Secrets.NativeSigningKeyFile)
+	if err != nil {
+		return Material{}, err
+	}
 	return m, nil
 }

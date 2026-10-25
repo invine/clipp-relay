@@ -2,10 +2,8 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -21,12 +19,7 @@ import (
 	"github.com/ory/fosite"
 )
 
-type nativeOAuthContextKey struct{}
-
-func isNativeOAuth(r *http.Request) bool {
-	enabled, _ := r.Context().Value(nativeOAuthContextKey{}).(bool)
-	return enabled
-}
+func (s *Server) nativeOAuthEnabled(_ *http.Request) bool { return s.nativeIssuer != nil }
 
 func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
 	if s.commitCredential != nil {
@@ -79,17 +72,6 @@ func validPKCE(challenge string) bool {
 	b, e := base64.RawURLEncoding.DecodeString(challenge)
 	return e == nil && len(b) == 32 && base64.RawURLEncoding.EncodeToString(b) == challenge
 }
-func validVerifier(v string) bool {
-	if len(v) < 43 || len(v) > 128 {
-		return false
-	}
-	for _, c := range v {
-		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~') {
-			return false
-		}
-	}
-	return true
-}
 func (s *Server) oauthError(w http.ResponseWriter, status int) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
@@ -105,6 +87,10 @@ func (s *Server) auditCredential(ctx context.Context, tx pgx.Tx, event, account,
 	return e
 }
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
+	if !s.nativeOAuthEnabled(r) {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return
+	}
 	q := r.URL.Query()
 	if len(q) != 6 {
 		s.oauthError(w, 400)
@@ -121,7 +107,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
-	if isNativeOAuth(r) {
+	if s.nativeOAuthEnabled(r) {
 		if _, err := s.nativeAuthorizeRequest(r.Context(), oauthIntent{client, redirect, state, challenge}); err != nil {
 			s.oauthError(w, 400)
 			return
@@ -164,9 +150,13 @@ func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthInten
 }
 
 func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, version uint64, subject string, intent oauthIntent) {
+	if !s.nativeOAuthEnabled(r) {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return
+	}
 	var authorizeRequest fosite.AuthorizeRequester
 	var grantID string
-	if isNativeOAuth(r) {
+	if s.nativeOAuthEnabled(r) {
 		var err error
 		authorizeRequest, err = s.nativeAuthorizeRequest(r.Context(), intent)
 		if err != nil {
@@ -303,6 +293,10 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	portal.Render(w, http.StatusOK, "consent", struct{ Client, Flow, CSRF string }{intent.client, id, s.csrf(version, credential)})
 }
 func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
+	if !s.nativeOAuthEnabled(r) {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return
+	}
 	if r.Header.Get("Origin") != s.Origin || r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
 		s.oauthError(w, 403)
 		return
@@ -362,68 +356,12 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
-	if consent.authorizeRequest != nil && isNativeOAuth(r) {
-		s.issueNativeCode(w, r, consent.authorizeRequest, account, consent.generation, consent.intent)
+	if consent.authorizeRequest == nil {
+		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	s.issueCode(w, r, account, consent.generation, consent.intent)
+	s.issueNativeCode(w, r, consent.authorizeRequest, account, consent.generation, consent.intent)
 }
-func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, account string, expectedGeneration int64, intent oauthIntent) {
-	code, e := opaque()
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	tx, e := s.db.Begin(r.Context())
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	var status string
-	var generation int64
-	e = tx.QueryRow(r.Context(), `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation)
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if generation != expectedGeneration {
-		s.oauthError(w, 401)
-		return
-	}
-	if status != "Active" {
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, intent.client) != nil {
-			s.oauthError(w, 503)
-			return
-		}
-		if tx.Commit(r.Context()) != nil {
-			markDiagnostic(r, "uncertain", "commit_unconfirmed")
-			s.oauthError(w, 503)
-			return
-		}
-		markDiagnostic(r, "refused", "account_blocked")
-		denyAuthorization(w, r, intent)
-		return
-	}
-	_, e = tx.Exec(r.Context(), `INSERT INTO public.authorization_codes(credential_digest,pepper_version,account_id,credential_generation,client_type,redirect_uri,challenge,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),clock_timestamp()+interval '5 minutes')`, s.digest(s.CurrentPepper, "authorization-code", code), s.CurrentPepper, account, generation, intent.client, intent.redirect, intent.challenge)
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if s.commitCredentialTx(r.Context(), tx) != nil {
-		markDiagnostic(r, "uncertain", "commit_unconfirmed")
-		s.oauthError(w, 503)
-		return
-	}
-	target, _ := url.Parse(intent.redirect)
-	params := target.Query()
-	params.Set("code", code)
-	params.Set("state", intent.state)
-	target.RawQuery = params.Encode()
-	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, target.String(), http.StatusFound)
-}
-
 func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, authorize fosite.AuthorizeRequester, account string, expectedGeneration int64, intent oauthIntent) {
 	unitCtx := r.Context()
 	var err error
@@ -483,351 +421,18 @@ func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, authori
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
-type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int    `json:"expires_in"`
-	RefreshToken string `json:"refresh_token"`
-}
-
-func (s *Server) lockCredentialAccount(ctx context.Context, tx pgx.Tx, account string) (string, int64, error) {
-	var status, subject string
-	var generation int64
-	if e := tx.QueryRow(ctx, `SELECT status,credential_generation,subject FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation, &subject); e != nil {
-		return "", 0, e
-	}
-	if !s.allowAccount(subject) {
-		return "", 0, errRateLimit
-	}
-	return status, generation, nil
-}
-func (s *Server) insertCredentialTokens(ctx context.Context, tx pgx.Tx, grant, refresh, access string, refreshGeneration int64) error {
-	_, e := tx.Exec(ctx, `INSERT INTO public.refresh_generations(credential_digest,pepper_version,grant_id,generation,issued_at) VALUES($1,$2,$3,$4,clock_timestamp())`, s.digest(s.CurrentPepper, "refresh-token", refresh), s.CurrentPepper, grant, refreshGeneration)
-	if e != nil {
-		return e
-	}
-	_, e = tx.Exec(ctx, `INSERT INTO public.relay_access_tokens(credential_digest,pepper_version,grant_id,issued_at,expires_at) VALUES($1,$2,$3,clock_timestamp(),clock_timestamp()+interval '15 minutes')`, s.digest(s.CurrentPepper, "relay-access", access), s.CurrentPepper, grant)
-	return e
-}
-
-func writeTokens(w http.ResponseWriter, access, refresh string) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(tokenResponse{access, "Bearer", 900, refresh})
-}
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
-	if isNativeOAuth(r) {
-		s.nativeToken(w, r)
+	if s.nativeIssuer == nil {
+		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.Header.Get("Content-Encoding") != "" || r.URL.RawQuery != "" {
-		s.oauthError(w, 400)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-	if r.ParseForm() != nil {
-		s.oauthError(w, 400)
-		return
-	}
-	client := r.PostForm.Get("client_id")
-	if trace := diagnosticFor(r); trace != nil && r.PostForm.Get("grant_type") == "refresh_token" {
-		trace.event = "oauth.refresh"
-	}
-	allowed := map[string]bool{"grant_type": true, "client_id": true}
-	switch r.PostForm.Get("grant_type") {
-	case "authorization_code":
-		allowed["code"] = true
-		allowed["redirect_uri"] = true
-		allowed["code_verifier"] = true
-	case "refresh_token":
-		allowed["refresh_token"] = true
-	}
-	for key, values := range r.PostForm {
-		if !allowed[key] || len(values) != 1 {
-			s.oauthError(w, 400)
-			return
-		}
-	}
-	for key := range allowed {
-		if len(r.PostForm[key]) != 1 {
-			s.oauthError(w, 400)
-			return
-		}
-	}
-	if client != "electron" && client != "android" && client != "extension" {
-		s.oauthError(w, 400)
-		return
-	}
-	markClient(r, client)
-	switch r.PostForm.Get("grant_type") {
-	case "authorization_code":
-		s.exchangeCode(w, r, client)
-	case "refresh_token":
-		s.refresh(w, r, client)
-	default:
-		s.oauthError(w, 400)
-	}
-}
-func (s *Server) exchangeCode(w http.ResponseWriter, r *http.Request, client string) {
-	code, redirect, verifier := r.PostForm.Get("code"), r.PostForm.Get("redirect_uri"), r.PostForm.Get("code_verifier")
-	if len(code) != 43 || !s.registeredRedirect(client, redirect) || !validVerifier(verifier) {
-		s.oauthError(w, 400)
-		return
-	}
-	sum := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	var account string
-	var version uint64
-	var digest []byte
-	for v := range s.Peppers {
-		d := s.digest(v, "authorization-code", code)
-		e := s.db.QueryRow(r.Context(), `SELECT account_id FROM public.authorization_codes WHERE credential_digest=$1 AND pepper_version=$2`, d, v).Scan(&account)
-		if e == nil {
-			version = v
-			digest = d
-			break
-		}
-		if e != pgx.ErrNoRows {
-			s.oauthError(w, 503)
-			return
-		}
-	}
-	if account == "" {
-		s.oauthError(w, 401)
-		return
-	}
-	tx, e := s.db.Begin(r.Context())
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	status, generation, e := s.lockCredentialAccount(r.Context(), tx, account)
-	if e != nil {
-		if errors.Is(e, errRateLimit) {
-			s.oauthError(w, 429)
-		} else {
-			s.oauthError(w, 503)
-		}
-		return
-	}
-	var codeGeneration int64
-	var storedClient, storedRedirect, storedChallenge string
-	var fresh bool
-	e = tx.QueryRow(r.Context(), `SELECT credential_generation,client_type,redirect_uri,challenge,consumed_at IS NULL AND expires_at>clock_timestamp() FROM public.authorization_codes WHERE credential_digest=$1 AND pepper_version=$2 FOR UPDATE`, digest, version).Scan(&codeGeneration, &storedClient, &storedRedirect, &storedChallenge, &fresh)
-	if e == nil && !fresh {
-		markDiagnostic(r, "refused", "expired_credentials")
-	}
-	if e != nil || !fresh || storedClient != client || storedRedirect != redirect || subtle.ConstantTimeCompare([]byte(storedChallenge), []byte(challenge)) != 1 || codeGeneration != generation {
-		s.oauthError(w, 401)
-		return
-	}
-	if status != "Active" {
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, client) != nil {
-			s.oauthError(w, 503)
-			return
-		}
-		if tx.Commit(r.Context()) != nil {
-			markDiagnostic(r, "uncertain", "commit_unconfirmed")
-			s.oauthError(w, 503)
-			return
-		}
-		markDiagnostic(r, "refused", "account_blocked")
-		s.oauthError(w, 403)
-		return
-	}
-	var count int
-	if e = tx.QueryRow(r.Context(), `SELECT count(*) FROM public.login_grants WHERE account_id=$1 AND credential_generation=$2 AND terminated_at IS NULL AND idle_expires_at>clock_timestamp() AND absolute_expires_at>clock_timestamp()`, account, generation).Scan(&count); e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if count >= 20 {
-		if s.auditCredential(r.Context(), tx, "grant_cap", account, client) != nil {
-			s.oauthError(w, 503)
-			return
-		}
-		if tx.Commit(r.Context()) != nil {
-			markDiagnostic(r, "uncertain", "commit_unconfirmed")
-			s.oauthError(w, 503)
-			return
-		}
-		markDiagnostic(r, "refused", "grant_limit")
-		s.oauthError(w, 429)
-		return
-	}
-	grant, e := uuid()
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	access, e := opaque()
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	refresh, e := opaque()
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	_, e = tx.Exec(r.Context(), `UPDATE public.authorization_codes SET consumed_at=clock_timestamp() WHERE credential_digest=$1`, digest)
-	if e == nil {
-		_, e = tx.Exec(r.Context(), `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES($1,$2,$3,$4,clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days')`, grant, account, generation, client)
-	}
-	if e == nil {
-		e = s.insertCredentialTokens(r.Context(), tx, grant, refresh, access, 1)
-	}
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if s.commitCredentialTx(r.Context(), tx) != nil {
-		markDiagnostic(r, "uncertain", "commit_unconfirmed")
-		s.oauthError(w, 503)
-		return
-	}
-	writeTokens(w, access, refresh)
-}
-func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) {
-	raw := r.PostForm.Get("refresh_token")
-	if len(raw) != 43 {
-		s.oauthError(w, 400)
-		return
-	}
-	var account string
-	var version uint64
-	var digest []byte
-	for v := range s.Peppers {
-		d := s.digest(v, "refresh-token", raw)
-		e := s.db.QueryRow(r.Context(), `SELECT g.account_id FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE f.credential_digest=$1 AND f.pepper_version=$2`, d, v).Scan(&account)
-		if e == nil {
-			version = v
-			digest = d
-			break
-		}
-		if e != pgx.ErrNoRows {
-			s.oauthError(w, 503)
-			return
-		}
-	}
-	if account == "" {
-		s.oauthError(w, 401)
-		return
-	}
-	tx, e := s.db.Begin(r.Context())
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	status, generation, e := s.lockCredentialAccount(r.Context(), tx, account)
-	if e != nil {
-		if errors.Is(e, errRateLimit) {
-			s.oauthError(w, 429)
-		} else {
-			s.oauthError(w, 503)
-		}
-		return
-	}
-	var grant, storedClient string
-	var grantGeneration, refreshGeneration, currentRefreshGeneration int64
-	var active, consumed bool
-	e = tx.QueryRow(r.Context(), `SELECT g.id,g.client_type,g.credential_generation,g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp(),f.consumed_at IS NOT NULL,f.generation,g.current_refresh_generation FROM public.refresh_generations f JOIN public.login_grants g ON g.id=f.grant_id WHERE f.credential_digest=$1 AND f.pepper_version=$2 FOR UPDATE OF g,f`, digest, version).Scan(&grant, &storedClient, &grantGeneration, &active, &consumed, &refreshGeneration, &currentRefreshGeneration)
-	if e == nil && !active {
-		markDiagnostic(r, "refused", "expired_credentials")
-	}
-	if e != nil || storedClient != client || !active || generation != grantGeneration {
-		s.oauthError(w, 401)
-		return
-	}
-	if consumed {
-		_, e = tx.Exec(r.Context(), `UPDATE public.login_grants SET terminated_at=clock_timestamp() WHERE id=$1`, grant)
-		if e == nil {
-			e = s.auditCredential(r.Context(), tx, "refresh_reuse", account, client)
-		}
-		if e != nil {
-			s.oauthError(w, 503)
-			return
-		}
-		if tx.Commit(r.Context()) != nil {
-			markDiagnostic(r, "uncertain", "commit_unconfirmed")
-			s.oauthError(w, 503)
-			return
-		}
-		markDiagnostic(r, "refused", "replay_detected")
-		s.oauthError(w, 401)
-		return
-	}
-	if refreshGeneration != currentRefreshGeneration {
-		s.oauthError(w, 401)
-		return
-	}
-	if status != "Active" {
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, client) != nil {
-			s.oauthError(w, 503)
-			return
-		}
-		if tx.Commit(r.Context()) != nil {
-			markDiagnostic(r, "uncertain", "commit_unconfirmed")
-			s.oauthError(w, 503)
-			return
-		}
-		markDiagnostic(r, "refused", "account_blocked")
-		s.oauthError(w, 403)
-		return
-	}
-	access, e := opaque()
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	next, e := opaque()
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	_, e = tx.Exec(r.Context(), `UPDATE public.refresh_generations SET consumed_at=clock_timestamp() WHERE credential_digest=$1`, digest)
-	if e == nil {
-		_, e = tx.Exec(r.Context(), `UPDATE public.login_grants SET last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 days'),current_refresh_generation=current_refresh_generation+1 WHERE id=$1`, grant)
-	}
-	if e == nil {
-		e = s.insertCredentialTokens(r.Context(), tx, grant, next, access, currentRefreshGeneration+1)
-	}
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if s.commitCredentialTx(r.Context(), tx) != nil {
-		markDiagnostic(r, "uncertain", "commit_unconfirmed")
-		s.oauthError(w, 503)
-		return
-	}
-	writeTokens(w, access, next)
+	s.nativeToken(w, r)
 }
 
 // AuthenticateAccess authorizes only local Discovery and Relay Authentication.
 func (s *Server) AuthenticateAccess(ctx context.Context, raw string) (string, time.Time, error) {
-	if s.nativeIssuer != nil {
-		return s.authenticateNativeAccess(ctx, raw)
-	}
-	if len(raw) != 43 {
+	if s.nativeIssuer == nil {
 		return "", time.Time{}, errInvalidSession
 	}
-	for v := range s.Peppers {
-		var account, status string
-		var tokenGeneration, accountGeneration int64
-		var until time.Time
-		e := s.db.QueryRow(ctx, `SELECT g.account_id,a.status,g.credential_generation,a.credential_generation,t.expires_at FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE NOT a.recovery_review_hold AND t.credential_digest=$1 AND t.pepper_version=$2 AND t.expires_at>clock_timestamp() AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, s.digest(v, "relay-access", raw), v).Scan(&account, &status, &tokenGeneration, &accountGeneration, &until)
-		if e == nil {
-			if status != "Active" || tokenGeneration != accountGeneration {
-				return "", time.Time{}, errInvalidSession
-			}
-			return account, until, nil
-		}
-		if e != pgx.ErrNoRows {
-			return "", time.Time{}, e
-		}
-	}
-	return "", time.Time{}, errInvalidSession
+	return s.authenticateNativeAccess(ctx, raw)
 }

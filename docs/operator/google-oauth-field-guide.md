@@ -160,12 +160,12 @@ The portal host must be a real public DNS name under a domain you control. Googl
 | Helm release name | A name you choose for this test installation, such as `clipp-relay-test`. Check `helm --kube-context <context> -n <namespace> list` for conflicts. |
 | Chrome extension ID | Build and load the isolated unpacked extension, then copy the 32-letter ID shown on `chrome://extensions`. The wizard derives its relay callback. |
 | OCI journal env and config | The completed journal wizard wrote `~/.config/clipp-relay/oci-test-journal.env` and `oci-test-journal-config.json`. The relay wizard reads the journal configuration and fills its chart values. |
-| Four application Kubernetes Secrets | The wizard proposes `clipp-google-v1`, `clipp-admin-v1`, `clipp-peppers-v1`, and `clipp-journal-v1`. It leaves existing objects untouched and offers to create only missing ones after you confirm the context and namespace. |
+| Five application Kubernetes Secrets | The wizard proposes `clipp-google-v1`, `clipp-admin-v1`, `clipp-peppers-v1`, `clipp-native-oauth-v1`, and `clipp-journal-v1`. The native OAuth Secret contains the one stable 32-byte signing key used by serving and the explicit reset Job. It leaves existing objects untouched and offers to create only missing ones after you confirm the context and namespace. |
 | Clipp and Go checkout paths | Existing isolated integration worktrees. The wizard offers known paths and checks that they exist. |
 
 ## Chart values that an operator must supply (stage 7)
 
-The wizard fills the hosts, callbacks, four Secret names, and journal identity/floor when it first copies the example. It leaves the following values for the isolated cluster operator. The chart example is **not deployable** as written.
+The wizard fills the hosts, callbacks, five Secret names, and journal identity/floor when it first copies the example. It leaves the following values for the isolated cluster operator. The chart example is **not deployable** as written.
 
 | Values group | Source |
 | --- | --- |
@@ -260,4 +260,4 @@ existing private values. It does not add an environment or flag policy override.
 The cutoff is independent of blocked persistence: unresolved writes close all
 affected sessions at the deadline and temporarily deny admission until recovery.
 
-Current schema13 accounting cutovers follow [offline accounting migration](accounting-migration.md). The schema10 observations above describe their dated run; the current wizard requires13.
+Current application cutovers require schema16 and the explicit native OAuth reset; follow [native OAuth cutover](native-oauth-cutover.md) and [offline accounting migration](accounting-migration.md). The schema10 and schema13 observations above describe their dated runs.

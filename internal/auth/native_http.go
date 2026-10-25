@@ -52,6 +52,11 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grant := r.PostForm.Get("grant_type")
+	if grant == "refresh_token" {
+		if trace := diagnosticFor(r); trace != nil {
+			trace.event = "oauth.refresh"
+		}
+	}
 	var purpose issuer.Purpose
 	allowed := map[string]bool{"grant_type": true, "client_id": true}
 	switch grant {

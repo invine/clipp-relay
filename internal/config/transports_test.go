@@ -26,6 +26,7 @@ func validTransportConfig() config.Config {
 	c.Secrets.GoogleClientSecretFile = "/b"
 	c.Secrets.AdminAllowlistFile = "/c"
 	c.Secrets.PepperKeyringFile = "/d"
+	c.Secrets.NativeSigningKeyFile = "/e"
 	return c
 }
 

@@ -1,6 +1,6 @@
 deployment:
   phase: stopped
-  expectedSchema: 13
+  expectedSchema: 16
   runId: ""
 image:
   repository: ""
@@ -64,6 +64,7 @@ credentials:
   googleSecret: ""
   adminSecret: ""
   pepperSecret: ""
+  nativeSigningKeySecret: ""
   journalSecret: ""
 journal:
   region: ""

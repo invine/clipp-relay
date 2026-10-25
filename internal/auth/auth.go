@@ -255,7 +255,7 @@ func (s *Server) SampleActiveGrants(parent context.Context, accountID string) (C
 	ctx, cancel := context.WithTimeout(parent, 500*time.Millisecond)
 	defer cancel()
 	var count int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
 	if err != nil {
 		return CapacitySample{}, err
 	}
@@ -500,24 +500,35 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// NativeHandlerForTest exposes the not-yet-activated Fosite issuer only to an
-// explicitly constructed isolated auth fixture. Normal Handler() startup never
-// installs native issuance or token authentication.
+// NativeHandlerForTest marks OAuth requests as native in isolated tests. Normal
+// startup installs the issuer from the required persistent signing Secret.
 func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
 	if len(secret) != 32 {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "native fixture unavailable", http.StatusServiceUnavailable)
 		})
 	}
+	if err := s.EnableNativeOAuth(secret); err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "native fixture unavailable", http.StatusServiceUnavailable)
+		})
+	}
+	base := s.Handler()
+	return base
+}
+
+// EnableNativeOAuth installs the Fosite-only issuer after startup verifies the
+// signing key against the completed durable reset state.
+func (s *Server) EnableNativeOAuth(secret []byte) error {
+	if len(secret) != 32 {
+		return errors.New("native OAuth signing key must contain 32 bytes")
+	}
 	s.nativeIssuer = issuer.NewProvider(secret, issuer.Redirects{
 		issuer.Electron:  "http://127.0.0.1/oauth/callback",
 		issuer.Android:   s.AndroidRedirect,
 		issuer.Extension: s.ExtensionRedirect,
 	}, nil)
-	base := s.Handler()
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		base.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), nativeOAuthContextKey{}, true)))
-	})
+	return nil
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.loginFlow(w, r, nil)

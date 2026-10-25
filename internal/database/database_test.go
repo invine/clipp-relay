@@ -246,7 +246,7 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	}
 	defer p.Close()
 	// The fixture is intentionally disposable. Reset only this owned test table.
-	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.recovery_runs, public.weekly_relay_usage, public.cleanup_breach_record, public.native_access_tokens, public.native_refresh_generations, public.native_login_grants, public.native_authorization_codes, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.weekly_quota_usage, public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
+	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.oauth_issuer_state, public.recovery_runs, public.weekly_relay_usage, public.cleanup_breach_record, public.native_access_tokens, public.native_refresh_generations, public.native_login_grants, public.native_authorization_codes, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.weekly_quota_usage, public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
 		t.Fatal(e)
 	}
 	if e = Migrate(ctx, p); e != nil {
@@ -255,14 +255,17 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	if e = VerifySchema(ctx, p); e != nil {
 		t.Fatalf("fresh installation: %v", e)
 	}
-	var flowTable, migration15 bool
+	var flowTable, migration15, migration16 bool
 	if e = p.QueryRow(ctx, `SELECT to_regclass('public.authorization_transactions') IS NOT NULL`).Scan(&flowTable); e != nil || flowTable {
 		t.Fatalf("RAM-only continuation table survives migration: %v %v", flowTable, e)
 	}
 	if e = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.schema_migrations WHERE revision=15)`).Scan(&migration15); e != nil || !migration15 {
 		t.Fatalf("native Fosite grant migration missing: %v %v", migration15, e)
 	}
-	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.recovery_runs, public.weekly_relay_usage, public.cleanup_breach_record, public.native_access_tokens, public.native_refresh_generations, public.native_login_grants, public.native_authorization_codes, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.weekly_quota_usage, public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
+	if e = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.schema_migrations WHERE revision=16) AND to_regclass('public.oauth_issuer_state') IS NOT NULL`).Scan(&migration16); e != nil || !migration16 {
+		t.Fatalf("recoverable native issuer reset schema missing: %v %v", migration16, e)
+	}
+	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.oauth_issuer_state, public.recovery_runs, public.weekly_relay_usage, public.cleanup_breach_record, public.native_access_tokens, public.native_refresh_generations, public.native_login_grants, public.native_authorization_codes, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.weekly_quota_usage, public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
 		t.Fatal(e)
 	}
 	// Original prepaid installs require explicit offline migration. A failed
@@ -285,6 +288,9 @@ INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES('3333333
 	if _, e = p.Exec(ctx, `UPDATE public.accounts SET recovery_review_hold=true WHERE id='11111111-1111-4111-8111-111111111111';
  INSERT INTO public.weekly_relay_usage VALUES('11111111-1111-4111-8111-111111111111',date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,67890,1,'22222222-2222-4222-8222-222222222222',67890);
  INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES('44444444-4444-4444-8444-444444444444','11111111-1111-4111-8111-111111111111',7,'android',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '1 day',clock_timestamp()+interval '2 days');
+ INSERT INTO public.authorization_codes(credential_digest,pepper_version,account_id,credential_generation,client_type,redirect_uri,challenge,issued_at,expires_at) VALUES(decode(repeat('11',32),'hex'),1,'11111111-1111-4111-8111-111111111111',7,'android','clipp-relay://oauth/callback',repeat('a',43),clock_timestamp(),clock_timestamp()+interval '5 minutes');
+ INSERT INTO public.refresh_generations(credential_digest,pepper_version,grant_id,generation,issued_at) VALUES(decode(repeat('22',32),'hex'),1,'44444444-4444-4444-8444-444444444444',1,clock_timestamp());
+ INSERT INTO public.relay_access_tokens(credential_digest,pepper_version,grant_id,issued_at,expires_at) VALUES(decode(repeat('33',32),'hex'),1,'44444444-4444-4444-8444-444444444444',clock_timestamp(),clock_timestamp()+interval '15 minutes');
  INSERT INTO public.recovery_runs(run_id,source,target,schema_revision,journal_head) VALUES('55555555-5555-4555-8555-555555555555','backup','target',12,'{}')`); e != nil {
 		t.Fatal(e)
 	}
@@ -351,8 +357,8 @@ INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES('3333333
 	if e = p.QueryRow(ctx, `SELECT (SELECT count(*)=0 FROM public.retained_quota_usage) AND EXISTS(SELECT 1 FROM public.accounts WHERE credential_generation=7 AND subject='migration-owner') AND EXISTS(SELECT 1 FROM public.audit_events WHERE id='33333333-3333-4333-8333-333333333333')`).Scan(&preserved); e != nil || !preserved {
 		t.Fatalf("reset/preservation: %v %v", preserved, e)
 	}
-	if e = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.weekly_relay_usage WHERE recorded_bytes=67890 AND sequence=1 AND latest_delta_bytes=67890) AND EXISTS(SELECT 1 FROM public.accounts WHERE recovery_review_hold) AND EXISTS(SELECT 1 FROM public.login_grants WHERE credential_generation=7) AND EXISTS(SELECT 1 FROM public.recovery_runs WHERE schema_revision=12)`).Scan(&preserved); e != nil || !preserved {
-		t.Fatalf("confirmed usage/credentials/recovery lost: %v %v", preserved, e)
+	if e = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.weekly_relay_usage WHERE recorded_bytes=67890 AND sequence=1 AND latest_delta_bytes=67890) AND EXISTS(SELECT 1 FROM public.accounts WHERE recovery_review_hold) AND NOT EXISTS(SELECT 1 FROM public.login_grants WHERE credential_generation=7) AND NOT EXISTS(SELECT 1 FROM public.authorization_codes) AND NOT EXISTS(SELECT 1 FROM public.refresh_generations) AND NOT EXISTS(SELECT 1 FROM public.relay_access_tokens) AND EXISTS(SELECT 1 FROM public.recovery_runs WHERE schema_revision=12)`).Scan(&preserved); e != nil || !preserved {
+		t.Fatalf("cutover did not retain service data and invalidate legacy credentials: %v %v", preserved, e)
 	}
 	if _, e = p.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id='11111111-1111-4111-8111-111111111111'`); e != nil {
 		t.Fatal(e)

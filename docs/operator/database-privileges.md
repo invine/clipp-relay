@@ -13,7 +13,9 @@ serving identity needs these data privileges:
 | `native_login_grants` | `SELECT`, `INSERT`, `UPDATE` | Create a grant, rotate its refresh generation, track idle expiry and terminate on replay. |
 | `native_refresh_generations` | `SELECT`, `INSERT`, `UPDATE` | Resolve refresh digests, record successors and consume generations. |
 | `native_access_tokens` | `SELECT`, `INSERT`, `DELETE` | Resolve active tokens, issue tokens and revoke a grant's tokens on replay. |
+| `oauth_issuer_state` | `SELECT` | Verify that the provisioned signing key matches the last completed reset before serving. |
 
 The disposable PostgreSQL setup in `scripts/smoke-postgres.sh` applies this
 allowlist to each supported server version. Do not grant access to `PUBLIC` or
-give the serving role ownership of these tables.
+give the serving role ownership of these tables. Only the migration identity
+may update reset state or delete native credentials during a deliberate reset.

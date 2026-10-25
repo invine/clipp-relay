@@ -23,12 +23,13 @@ func TestCredentialRefusalsHaveIndependentSafeRequestDiagnostics(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
 	s := newTestServer(t, nil, config.Config{}, config.Material{}, auth.Provider{})
+	handler := s.NativeHandlerForTest(bytes.Repeat([]byte{0x41}, 32))
 	s.SetDiagnostics(logger)
 	for _, path := range []string{"/auth/callback?state=SECRET_STATE_CANARY&code=SECRET_CODE_CANARY", "/auth/callback?state=SECRET_STATE_CANARY&code=SECRET_CODE_CANARY"} {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.Header.Set("X-Request-Id", strings.Repeat("a", 32))
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, r)
+		handler.ServeHTTP(w, r)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status %d", w.Code)
 		}
@@ -37,7 +38,7 @@ func TestCredentialRefusalsHaveIndependentSafeRequestDiagnostics(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/oauth/token?SECRET_QUERY_CANARY", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
+	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("token status %d", w.Code)
 	}

@@ -28,54 +28,6 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-func TestPublicClientCodeAndRefresh(t *testing.T) {
-	c, m, db := fixture(t)
-	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
-	d := newProvider(t)
-	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	session := loginAs(t, s, d, "oauth-account", "oauth@example.test", "")
-	_, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='oauth-account'`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	verifier := strings.Repeat("a", 43)
-	code := authorizeClient(t, s, session, "android", c.PublicClients.AndroidRedirect)
-	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {"clipp-relay://oauth/callback"}, "code": {"wrong"}, "code_verifier": {verifier}}
-	post := func(f url.Values) *httptest.ResponseRecorder {
-		r := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(f.Encode()))
-		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, r)
-		return w
-	}
-	if w := post(form); w.Code == 200 {
-		t.Fatal("wrong code succeeded")
-	}
-	form.Set("code", code)
-	if w := post(form); w.Code != 200 {
-		t.Fatalf("exchange: %d %s", w.Code, w.Body.String())
-	} else {
-		var token struct {
-			Access  string `json:"access_token"`
-			Refresh string `json:"refresh_token"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &token); err != nil || token.Access == "" || token.Refresh == "" {
-			t.Fatalf("tokens: %v", err)
-		}
-		if w := post(form); w.Code == 200 {
-			t.Fatal("code replay succeeded")
-		}
-		refresh := url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {token.Refresh}}
-		if w := post(refresh); w.Code != 200 {
-			t.Fatalf("refresh: %d %s", w.Code, w.Body.String())
-		}
-		if w := post(refresh); w.Code == 200 {
-			t.Fatal("consumed refresh succeeded")
-		}
-	}
-	_ = http.MethodGet
-}
-
 func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	c, db, s, d, cookie, handler := activeNativeFixture(t)
 	verifier := strings.Repeat("a", 43)
@@ -577,7 +529,7 @@ func TestConsentSubmissionIsAtomicOneUse(t *testing.T) {
 		t.Fatalf("duplicate consent submission was not refused: %d", second.Code)
 	}
 	var codes int
-	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil {
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil {
 		t.Fatal(err)
 	}
 	if codes != 1 {
@@ -624,7 +576,7 @@ func TestConsentUsesCapturedCredentialGeneration(t *testing.T) {
 		t.Fatalf("stale consent generation issued authorization: %d %s", response.Code, response.Body.String())
 	}
 	var codes int
-	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil {
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil {
 		t.Fatal(err)
 	}
 	if codes != 0 {
@@ -669,7 +621,7 @@ func TestRestartCancelsUnfinishedConsent(t *testing.T) {
 		t.Fatalf("consent survived process restart: %d", response.Code)
 	}
 	var codes int
-	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil || codes != 0 {
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil || codes != 0 {
 		t.Fatalf("restart issued code from unfinished consent: %d %v", codes, err)
 	}
 }
@@ -929,7 +881,7 @@ func TestCodeBindingExpiryAndGeneration(t *testing.T) {
 		t.Fatalf("parallel code redemption succeeded %d times", successes)
 	}
 	expired := authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect)
-	_, e = db.Pool.Exec(context.Background(), `UPDATE public.authorization_codes SET expires_at=clock_timestamp()-interval '1 second' WHERE account_id=(SELECT id FROM public.accounts WHERE subject='binding-account') AND consumed_at IS NULL`)
+	_, e = db.Pool.Exec(context.Background(), `UPDATE public.native_authorization_codes SET expires_at=clock_timestamp()-interval '1 second' WHERE account_id=(SELECT id FROM public.accounts WHERE subject='binding-account') AND consumed_at IS NULL`)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -1058,7 +1010,7 @@ func TestGrantCapAndDeadlines(t *testing.T) {
 		t.Fatal(e)
 	}
 	code := authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect)
-	_, e = db.Pool.Exec(context.Background(), `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) SELECT gen_random_uuid(),a.id,a.credential_generation,'android',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days' FROM public.accounts a,generate_series(1,20) WHERE a.subject='cap-account'`)
+	_, e = db.Pool.Exec(context.Background(), `INSERT INTO public.native_login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) SELECT gen_random_uuid(),a.id,a.credential_generation,'android',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days' FROM public.accounts a,generate_series(1,20) WHERE a.subject='cap-account'`)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -1070,12 +1022,12 @@ func TestGrantCapAndDeadlines(t *testing.T) {
 	if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.audit_events e JOIN public.accounts a ON a.id=e.account_id WHERE a.subject='cap-account' AND e.event='grant_cap'`).Scan(&audits); e != nil || audits != 1 {
 		t.Fatalf("cap audit: %d %v", audits, e)
 	}
-	_, e = db.Pool.Exec(context.Background(), `UPDATE public.login_grants SET terminated_at=clock_timestamp() WHERE account_id=(SELECT id FROM public.accounts WHERE subject='cap-account')`)
+	_, e = db.Pool.Exec(context.Background(), `UPDATE public.native_login_grants SET terminated_at=clock_timestamp() WHERE account_id=(SELECT id FROM public.accounts WHERE subject='cap-account')`)
 	if e != nil {
 		t.Fatal(e)
 	}
 	access, refresh := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, code)
-	_, e = db.Pool.Exec(context.Background(), `UPDATE public.login_grants SET idle_expires_at=clock_timestamp()-interval '1 second' WHERE account_id=(SELECT id FROM public.accounts WHERE subject='cap-account') AND terminated_at IS NULL`)
+	_, e = db.Pool.Exec(context.Background(), `UPDATE public.native_login_grants SET idle_expires_at=clock_timestamp()-interval '1 second' WHERE account_id=(SELECT id FROM public.accounts WHERE subject='cap-account') AND terminated_at IS NULL`)
 	if e != nil {
 		t.Fatal(e)
 	}
