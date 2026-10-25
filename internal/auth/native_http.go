@@ -131,7 +131,10 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(unitCtx)
 	var status string
 	var generation int64
-	if err = tx.QueryRow(unitCtx, `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); err != nil {
+	if err = tx.QueryRow(unitCtx, `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); errors.Is(err, pgx.ErrNoRows) {
+		s.oauthError(w, 401)
+		return
+	} else if err != nil {
 		s.oauthError(w, 503)
 		return
 	}
@@ -158,6 +161,27 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if grant == "authorization_code" {
+		var activeGrants int
+		if err = tx.QueryRow(unitCtx, `SELECT count(*) FROM public.native_login_grants WHERE account_id=$1 AND credential_generation=$2 AND terminated_at IS NULL AND idle_expires_at>clock_timestamp() AND absolute_expires_at>clock_timestamp()`, account, generation).Scan(&activeGrants); err != nil {
+			s.oauthError(w, 503)
+			return
+		}
+		if activeGrants >= 20 {
+			if err = s.auditCredential(unitCtx, tx, "grant_cap", account, string(client)); err != nil {
+				s.oauthError(w, 503)
+				return
+			}
+			if err = s.commitCredentialTx(unitCtx, tx); err != nil {
+				markDiagnostic(r, "uncertain", "commit_unconfirmed")
+				s.oauthError(w, 503)
+				return
+			}
+			markDiagnostic(r, "refused", "grant_limit")
+			s.oauthError(w, http.StatusTooManyRequests)
+			return
+		}
+	}
 	response, err := s.nativeIssuer.NewAccessResponse(ctx, fositeRequest)
 	if err != nil {
 		if errors.Is(err, fosite.ErrServerError) {
@@ -172,6 +196,7 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 503)
 		return
 	}
+	response.SetTokenType("Bearer")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	s.nativeIssuer.WriteAccessResponse(unitCtx, w, fositeRequest, response)
