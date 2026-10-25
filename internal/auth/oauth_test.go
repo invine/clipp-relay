@@ -73,7 +73,7 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
 	d := newProvider(t)
-	d.subject = "native-fosite-lifecycle"
+	d.subject = fmt.Sprintf("native-fosite-lifecycle-%d", time.Now().UnixNano())
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	cookie := loginAs(t, s, d, d.subject, "native@example.test", "")
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
@@ -181,12 +181,30 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	if _, _, err := s.AuthenticateAccess(context.Background(), accessB); err != nil {
 		t.Fatalf("second grant access invalid: %v", err)
 	}
-	replay := tokenPostNative(url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refreshA}})
-	if replay.Code == 200 {
-		t.Fatal("consumed refresh credential was accepted")
+	concurrentRefresh := url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refreshA2}}
+	refreshResults := make([]*httptest.ResponseRecorder, 2)
+	var refreshes sync.WaitGroup
+	for i := range refreshResults {
+		refreshes.Add(1)
+		go func(i int) { defer refreshes.Done(); refreshResults[i] = tokenPostNative(concurrentRefresh) }(i)
+	}
+	refreshes.Wait()
+	refreshWinners := 0
+	var replayedAccess string
+	for _, out := range refreshResults {
+		if out.Code == 200 {
+			refreshWinners++
+			replayedAccess, _ = decode(out)
+		}
+	}
+	if refreshWinners != 1 {
+		t.Fatalf("concurrent refresh redemption successes=%d, want one", refreshWinners)
 	}
 	if _, _, err := s.AuthenticateAccess(context.Background(), accessA); err == nil {
-		t.Fatal("refresh replay did not revoke the owning grant's access token")
+		t.Fatal("authenticated concurrent refresh replay did not revoke the owning grant's old access token")
+	}
+	if _, _, err := s.AuthenticateAccess(context.Background(), replayedAccess); err == nil {
+		t.Fatal("authenticated concurrent refresh replay did not revoke the winning response's access token")
 	}
 	if _, _, err := s.AuthenticateAccess(context.Background(), accessB); err != nil {
 		t.Fatalf("refresh replay revoked an unrelated grant: %v", err)
@@ -196,7 +214,7 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	}
 	var replayAudits int
 	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.audit_events a JOIN public.accounts c ON c.id=a.account_id WHERE c.subject=$1 AND a.event='refresh_reuse'`, d.subject).Scan(&replayAudits); err != nil || replayAudits != 1 {
-		t.Fatalf("refresh replay audit rows=%d err=%v", replayAudits, err)
+		t.Fatalf("concurrent refresh replay audit rows=%d err=%v", replayAudits, err)
 	}
 	concurrentCode := issueCode("native-state-0000000003")
 	concurrentForm := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {concurrentCode}, "code_verifier": {verifier}}
