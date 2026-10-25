@@ -19,8 +19,6 @@ import (
 	"github.com/ory/fosite"
 )
 
-func (s *Server) nativeOAuthEnabled(_ *http.Request) bool { return s.nativeIssuer != nil }
-
 func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
 	if s.commitCredential != nil {
 		return s.commitCredential(ctx, tx)
@@ -87,7 +85,7 @@ func (s *Server) auditCredential(ctx context.Context, tx pgx.Tx, event, account,
 	return e
 }
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
-	if !s.nativeOAuthEnabled(r) {
+	if s.nativeIssuer == nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
@@ -107,11 +105,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
-	if s.nativeOAuthEnabled(r) {
-		if _, err := s.nativeAuthorizeRequest(r.Context(), oauthIntent{client, redirect, state, challenge}); err != nil {
-			s.oauthError(w, 400)
-			return
-		}
+	if _, err := s.nativeAuthorizeRequest(r.Context(), oauthIntent{client, redirect, state, challenge}); err != nil {
+		s.oauthError(w, 400)
+		return
 	}
 	markClient(r, client)
 	account, version, _, _, _, e := s.session(r)
@@ -150,26 +146,24 @@ func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthInten
 }
 
 func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, version uint64, subject string, intent oauthIntent) {
-	if !s.nativeOAuthEnabled(r) {
+	if s.nativeIssuer == nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
 	var authorizeRequest fosite.AuthorizeRequester
 	var grantID string
-	if s.nativeOAuthEnabled(r) {
-		var err error
-		authorizeRequest, err = s.nativeAuthorizeRequest(r.Context(), intent)
-		if err != nil {
-			s.oauthError(w, 400)
-			return
-		}
-		grantID, err = uuid()
-		if err != nil {
-			s.oauthError(w, 503)
-			return
-		}
-		authorizeRequest.SetID(grantID)
+	var err error
+	authorizeRequest, err = s.nativeAuthorizeRequest(r.Context(), intent)
+	if err != nil {
+		s.oauthError(w, 400)
+		return
 	}
+	grantID, err = uuid()
+	if err != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	authorizeRequest.SetID(grantID)
 	id, e := opaque()
 	if e != nil {
 		s.oauthError(w, 503)
@@ -293,7 +287,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	portal.Render(w, http.StatusOK, "consent", struct{ Client, Flow, CSRF string }{intent.client, id, s.csrf(version, credential)})
 }
 func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
-	if !s.nativeOAuthEnabled(r) {
+	if s.nativeIssuer == nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}

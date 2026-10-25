@@ -36,9 +36,13 @@ It reported one module-only result, `GO-2026-5932`, for the unmaintained
 application does not import that package. This scan covered the auth package's
 reachable graph, not every package in the repository.
 
-## Remaining qualification
+## Integrated local evidence (2026-10-25)
 
-The auth HTTP tests use a disposable PostgreSQL fixture selected by
-`CLIPP_TEST_SERVING_CONFIG`. That variable was unavailable for this handoff, so
-the callback tests skipped. Their public-operation behavior, database-backed
-transaction guarantees, and full repository verification remain unqualified.
+- Relay revision: `e9d2e0e29e6bc3a3a58232e838a6894730553c21`.
+- PostgreSQL 18.6.1 TLS/SCRAM fixture under `/private/tmp/clipp-auth-pg18-20261025/`:
+  `CLIPP_TEST_MIGRATION_CONFIG=/private/tmp/clipp-auth-pg18-20261025/migration.json CLIPP_TEST_SERVING_CONFIG=/private/tmp/clipp-auth-pg18-20261025/serving.json GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./internal/database` passed on schema revision 16; after restoring serving-role grants,
+  `CLIPP_TEST_MIGRATION_CONFIG=/private/tmp/clipp-auth-pg18-20261025/migration.json CLIPP_TEST_SERVING_CONFIG=/private/tmp/clipp-auth-pg18-20261025/serving.json GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./internal/auth` passed, including Google callback signature/claim, provider outage, RAM-continuation, native-reset and OAuth lifecycle coverage.
+- `GOCACHE=/private/tmp/clipp-go-cache bash scripts/verify.sh routine` and
+  `GOCACHE=/private/tmp/clipp-go-cache CGO_ENABLED=1 bash scripts/verify.sh race`
+  passed with loopback networking enabled.
+- This verifies configured local fixtures, not live Google account authorization or end-to-end runtime relay transfers. Those remain unqualified without provider/relay credentials, an Android device, and a registered extension ID.

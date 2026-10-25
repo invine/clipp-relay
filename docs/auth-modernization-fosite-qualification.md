@@ -1,6 +1,6 @@
 # Fosite dependency qualification (ticket 01)
 
-Status: candidate pinned; full auth qualification is incomplete.
+Status: candidate pinned; integrated PostgreSQL and routine/race qualification passed on relay revision `e9d2e0e` (2026-10-25). The broader module vulnerability scan caveat below remains.
 
 ## Selected revisions
 
@@ -46,12 +46,15 @@ credentials, client secrets, and client assertions before Fosite can parse a
 JWT assertion or call `findClientPublicJWK`. Authorization query validation
 admits only the six Clipp fields, so signed request objects are not passed
 through. A non-DB test exercises Fosite's `NewAccessRequest` boundary and
-confirms an assertion on a registered public client is rejected. The
-real-PostgreSQL HTTP lifecycle test is implemented but has not run because its
-disposable database fixture is unavailable. Runtime non-reachability at the
-complete HTTP boundary therefore remains unproven until that test runs. If the
-boundary cannot be established in the real HTTP path, v0.49.0 with go-jose/v3
-is incompatible with the advisory requirement.
+confirms an assertion on a registered public client is rejected. The HTTP
+endpoint also rejects client assertions at its strict form-field boundary
+before Fosite; this is covered by
+`TestNativeTokenHTTPRejectsClientAssertionsBeforeFosite`. The real-PostgreSQL
+HTTP code/PKCE/refresh lifecycle and native access-auth tests passed on the
+integrated revision below. This establishes the configured public-client HTTP
+path, but does not replace the separate full-repository vulnerability scan
+caveat below. If future configuration enables assertion client authentication,
+requalify the JOSE reachability boundary.
 Fosite's published releases currently top out at v0.49.0, which still imports
 go-jose/v3; go-jose/v4 is not a drop-in import-path update for this Fosite
 revision. No released Fosite revision eliminating v3 was found.
@@ -71,11 +74,13 @@ Int`), so it did not establish reachable-symbol results.
 - `go list -m`: Fosite v0.49.0, go-jose/v3 v3.0.5, Ristretto v1.0.0, x/crypto
   v0.57.0.
 - `go mod verify`: passed.
-- `go test ./internal/auth/...`: passed. Auth tests needing durable PostgreSQL
-  skipped because `CLIPP_TEST_SERVING_CONFIG` was not configured.
-- A real PostgreSQL lifecycle proof was unavailable: Docker CLI could not reach
-  a daemon, and no local PostgreSQL server was present. This does not satisfy
-  ticket 01's database acceptance requirement.
+- Integrated relay revision: `e9d2e0e29e6bc3a3a58232e838a6894730553c21`.
+- Disposable PostgreSQL 18.6.1 TLS/SCRAM:
+  `CLIPP_TEST_MIGRATION_CONFIG=/private/tmp/clipp-auth-pg18-20261025/migration.json CLIPP_TEST_SERVING_CONFIG=/private/tmp/clipp-auth-pg18-20261025/serving.json GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./internal/database` passed on schema revision 16. The package resets schema/grants; serving-role grants were restored before auth tests.
+- `CLIPP_TEST_MIGRATION_CONFIG=/private/tmp/clipp-auth-pg18-20261025/migration.json CLIPP_TEST_SERVING_CONFIG=/private/tmp/clipp-auth-pg18-20261025/serving.json GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./internal/auth` passed against the same fixture, including native HTTP lifecycle, reset ambiguity and post-reset Portal Session reauthorization tests.
+- `GOCACHE=/private/tmp/clipp-go-cache bash scripts/verify.sh routine` and
+  `GOCACHE=/private/tmp/clipp-go-cache CGO_ENABLED=1 bash scripts/verify.sh race` passed on the integrated revision with loopback networking enabled.
+- Live provider login, Android-device and registered-extension runtime acceptance remain separate release gates.
 
 [GO-2026-4945]: https://pkg.go.dev/vuln/GO-2026-4945
 [GHSA-mgcc-cww5-fp2q]: https://github.com/go-jose/go-jose/security/advisories/GHSA-mgcc-cww5-fp2q
