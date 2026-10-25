@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 14
+const ExpectedRevision = 15
 
 type migration struct {
 	revision int

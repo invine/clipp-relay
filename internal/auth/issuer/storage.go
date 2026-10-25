@@ -135,7 +135,7 @@ func (s *Storage) CreateAuthorizeCodeSession(ctx context.Context, signature stri
 		return err
 	}
 	challenge := req.GetRequestForm().Get("code_challenge")
-	if len(challenge) != 43 || p.AccountID == "" || p.Generation <= 0 || req.GetClient().GetID() != string(p.Client) {
+	if len(challenge) != 43 || p.AccountID == "" || p.Generation < 0 || req.GetClient().GetID() != string(p.Client) {
 		return errors.New("incomplete native authorization request")
 	}
 	expires := req.GetSession().GetExpiresAt(fosite.AuthorizeCode)
@@ -490,7 +490,7 @@ func principalFrom(req fosite.Requester) (Principal, error) {
 	if grantID == "" {
 		grantID = req.GetID()
 	}
-	if account == "" || generation <= 0 || client != Electron && client != Android && client != Extension || grantID == "" {
+	if account == "" || generation < 0 || client != Electron && client != Android && client != Extension || grantID == "" {
 		return Principal{}, errors.New("native request session fields invalid")
 	}
 	return Principal{AccountID: account, Generation: generation, Client: client, GrantID: grantID}, nil
