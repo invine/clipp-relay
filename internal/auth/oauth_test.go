@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestPublicClientCodeAndRefresh(t *testing.T) {
@@ -75,7 +77,7 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	d := newProvider(t)
 	d.subject = fmt.Sprintf("native-fosite-lifecycle-%d", time.Now().UnixNano())
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	cookie := loginAs(t, s, d, d.subject, "native@example.test", "")
+	cookie := loginAs(t, s, d, d.subject, d.subject+"@example.test", "")
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +91,7 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 		page := httptest.NewRecorder()
 		handler.ServeHTTP(page, begin)
 		if page.Code != 200 {
-			t.Fatalf("native authorize page: %d %s", page.Code, page.Body.String())
+			t.Fatalf("native authorize page for %q: %d %s", state, page.Code, page.Body.String())
 		}
 		flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
 		csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
@@ -120,6 +122,10 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		out := httptest.NewRecorder()
 		handler.ServeHTTP(out, req)
+		// Leave room for the per-account token bucket while this lifecycle makes
+		// many sequential protocol requests. Concurrent requests still enter the
+		// handler together; the wait only occurs after each response is complete.
+		time.Sleep(100 * time.Millisecond)
 		return out
 	}
 	decode := func(out *httptest.ResponseRecorder) (string, string) {
@@ -236,6 +242,152 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	}
 	if refreshA2 == refreshA {
 		t.Fatal("refresh rotation did not issue a successor")
+	}
+}
+
+func TestNativeFositeUncertainCommitAcknowledgements(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
+	d := newProvider(t)
+	d.subject = fmt.Sprintf("native-fosite-uncertain-%d", time.Now().UnixNano())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	cookie := loginAs(t, s, d, d.subject, d.subject+"@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	handler := s.NativeHandlerForTest(bytes.Repeat([]byte{0x52}, 32))
+	issueCode := func(state string) string {
+		t.Helper()
+		verifier := strings.Repeat("a", 43)
+		hash := sha256.Sum256([]byte(verifier))
+		query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {state}}
+		begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
+		begin.AddCookie(cookie)
+		page := httptest.NewRecorder()
+		handler.ServeHTTP(page, begin)
+		if page.Code != http.StatusOK {
+			t.Fatalf("native authorize page: %d %s", page.Code, page.Body.String())
+		}
+		flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+		csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+		if len(flow) != 2 || len(csrf) != 2 {
+			t.Fatal("native consent form missing")
+		}
+		confirm := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(url.Values{"flow": {flow[1]}, "csrf": {csrf[1]}}.Encode()))
+		confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		confirm.Header.Set("Origin", s.Origin)
+		confirm.AddCookie(cookie)
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, confirm)
+		if out.Code != http.StatusFound {
+			t.Fatalf("native consent: %d %s", out.Code, out.Body.String())
+		}
+		callback, err := url.Parse(out.Header().Get("Location"))
+		if err != nil || callback.Query().Get("state") != state {
+			t.Fatalf("native callback mismatch: %s %v", out.Header().Get("Location"), err)
+		}
+		return callback.Query().Get("code")
+	}
+	tokenPost := func(form url.Values) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, req)
+		return out
+	}
+	assertNoCredentials := func(out *httptest.ResponseRecorder) {
+		t.Helper()
+		if strings.Contains(out.Body.String(), "access_token") || strings.Contains(out.Body.String(), "refresh_token") {
+			t.Fatalf("uncertain token response exposed credentials: %s", out.Body.String())
+		}
+	}
+	decode := func(out *httptest.ResponseRecorder) (string, string) {
+		t.Helper()
+		var body struct {
+			Access  string `json:"access_token"`
+			Refresh string `json:"refresh_token"`
+		}
+		if err := json.Unmarshal(out.Body.Bytes(), &body); err != nil || body.Access == "" || body.Refresh == "" {
+			t.Fatalf("native token response: %d %s (%v)", out.Code, out.Body.String(), err)
+		}
+		return body.Access, body.Refresh
+	}
+	verifier := strings.Repeat("a", 43)
+	code := issueCode("uncertain-code-state-00000001")
+	codeForm := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}}
+	codeCommitCalls := 0
+	s.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+		codeCommitCalls++
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("simulated authorization-code commit acknowledgment loss")
+	})
+	uncertainCodeResponse := tokenPost(codeForm)
+	if uncertainCodeResponse.Code != http.StatusServiceUnavailable || codeCommitCalls != 1 {
+		t.Fatalf("uncertain code exchange status=%d commit attempts=%d", uncertainCodeResponse.Code, codeCommitCalls)
+	}
+	assertNoCredentials(uncertainCodeResponse)
+	s.SetCredentialCommitHookForTest(nil)
+	if retry := tokenPost(codeForm); retry.Code != http.StatusUnauthorized {
+		t.Fatalf("committed authorization code retry status=%d, want unauthorized", retry.Code)
+	} else {
+		assertNoCredentials(retry)
+	}
+	var consumedCodes, grants, accesses, refreshes int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes x JOIN public.accounts a ON a.id=x.account_id WHERE a.subject=$1 AND x.consumed_at IS NOT NULL`, d.subject).Scan(&consumedCodes); err != nil || consumedCodes != 1 {
+		t.Fatalf("uncertain code commit consumed rows=%d err=%v", consumedCodes, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE a.subject=$1`, d.subject).Scan(&grants); err != nil || grants != 1 {
+		t.Fatalf("uncertain code commit grant rows=%d err=%v", grants, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_access_tokens x JOIN public.native_login_grants g ON g.id=x.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE a.subject=$1`, d.subject).Scan(&accesses); err != nil || accesses != 1 {
+		t.Fatalf("uncertain code commit access rows=%d err=%v", accesses, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_refresh_generations x JOIN public.native_login_grants g ON g.id=x.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE a.subject=$1`, d.subject).Scan(&refreshes); err != nil || refreshes != 1 {
+		t.Fatalf("uncertain code commit refresh rows=%d err=%v", refreshes, err)
+	}
+
+	refreshCode := issueCode("uncertain-refresh-state-00001")
+	grantResponse := tokenPost(url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {refreshCode}, "code_verifier": {verifier}})
+	if grantResponse.Code != http.StatusOK {
+		t.Fatalf("uncertain-refresh fixture grant exchange: %d %s", grantResponse.Code, grantResponse.Body.String())
+	}
+	oldAccess, oldRefresh := decode(grantResponse)
+	refreshCommitCalls := 0
+	s.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+		refreshCommitCalls++
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("simulated refresh commit acknowledgment loss")
+	})
+	uncertainRefreshResponse := tokenPost(url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {oldRefresh}})
+	if uncertainRefreshResponse.Code != http.StatusServiceUnavailable || refreshCommitCalls != 1 {
+		t.Fatalf("uncertain refresh status=%d commit attempts=%d", uncertainRefreshResponse.Code, refreshCommitCalls)
+	}
+	assertNoCredentials(uncertainRefreshResponse)
+	s.SetCredentialCommitHookForTest(nil)
+	var currentGeneration, generationRows, consumedGenerations int64
+	if err := db.Pool.QueryRow(context.Background(), `SELECT g.current_refresh_generation,count(r.credential_digest),count(r.consumed_at) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id JOIN public.native_refresh_generations r ON r.grant_id=g.id WHERE g.id=(SELECT newest.id FROM public.native_login_grants newest JOIN public.accounts owner ON owner.id=newest.account_id WHERE owner.subject=$1 ORDER BY newest.created_at DESC,newest.id DESC LIMIT 1) GROUP BY g.id`, d.subject).Scan(&currentGeneration, &generationRows, &consumedGenerations); err != nil || currentGeneration != 2 || generationRows != 2 || consumedGenerations != 1 {
+		t.Fatalf("uncertain refresh commit generation=%d rows=%d consumed=%d err=%v", currentGeneration, generationRows, consumedGenerations, err)
+	}
+	if retry := tokenPost(url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {oldRefresh}}); retry.Code != http.StatusUnauthorized {
+		t.Fatalf("explicit old refresh generation retry status=%d, want unauthorized", retry.Code)
+	} else {
+		assertNoCredentials(retry)
+	}
+	if refreshCommitCalls != 1 {
+		t.Fatalf("uncertain refresh automatically retried commit hook %d times", refreshCommitCalls)
+	}
+	if _, _, err := s.AuthenticateAccess(context.Background(), oldAccess); err == nil {
+		t.Fatal("old refresh generation replay did not revoke its grant's access token")
+	}
+	var replayAudits int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.audit_events a JOIN public.accounts c ON c.id=a.account_id WHERE c.subject=$1 AND a.event='refresh_reuse'`, d.subject).Scan(&replayAudits); err != nil || replayAudits != 1 {
+		t.Fatalf("uncertain refresh replay audit rows=%d err=%v", replayAudits, err)
 	}
 }
 
