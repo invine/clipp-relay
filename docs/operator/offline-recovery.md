@@ -76,7 +76,7 @@ logical deletion. Current-week registration imports the retained total once into
 a fresh Pending UUID with sequence zero and no invented receipt. Prior-week usage
 never moves into a new window. Ordinary current-time retention remains in force.
 
-The `recover` command requires the current observed-accounting schema13. Complete
+The `recover` command requires the current observed-accounting schema16. Complete
 [the offline cutover](accounting-migration.md) first when recovering an older
 prepaid test database. Cutover reset is explicit and one-time; recovery preserves
 confirmed `weekly_relay_usage` totals and latest retry receipts, and uses

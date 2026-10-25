@@ -89,9 +89,10 @@ func (s *Server) RecoverOffline(ctx context.Context, request RecoveryRequest) er
 	if err != nil {
 		return err
 	}
-	// Delete unfinished flows too: a restored Google callback must not mint a new
-	// portal credential using authority from before the restore.
-	for _, table := range []string{"authorization_transactions", "authorization_codes", "relay_access_tokens", "refresh_generations", "login_grants", "portal_sessions"} {
+	// Issued credentials and Portal Sessions are durable and must be invalidated
+	// on restore. Unfinished Google/consent continuations are RAM-only and vanish
+	// with the process, so there is no flow table to clear here.
+	for _, table := range []string{"native_access_tokens", "native_refresh_generations", "native_authorization_codes", "native_login_grants", "portal_sessions"} {
 		if _, err = tx.Exec(ctx, `DELETE FROM public.`+table); err != nil {
 			return err
 		}

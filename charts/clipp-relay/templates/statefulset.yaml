@@ -94,6 +94,7 @@ spec:
             - {name: google, mountPath: /run/secrets/google, readOnly: true}
             - {name: admin, mountPath: /run/secrets/admin, readOnly: true}
             - {name: peppers, mountPath: /run/secrets/peppers, readOnly: true}
+            - {name: native-oauth, mountPath: /run/secrets/native-oauth, readOnly: true}
             - {name: journal, mountPath: /run/secrets/journal, readOnly: true}
       volumes:
         - name: config
@@ -120,6 +121,10 @@ spec:
           secret:
             secretName: {{ $v.credentials.pepperSecret | quote }}
             items: [{key: keyring.json, path: keyring.json}]
+        - name: native-oauth
+          secret:
+            secretName: {{ $v.credentials.nativeSigningKeySecret | quote }}
+            items: [{key: signing-key, path: signing-key}]
         - name: journal
           secret:
             secretName: {{ $v.credentials.journalSecret | quote }}

@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +48,9 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 	}
 	t.Cleanup(pool.Close)
 	s := New(pool, c, m, Provider{})
+	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
+		t.Fatal(err)
+	}
 	s.SetAccountChangedForTest(func(AccountChange) func() { return nil })
 	id, err := uuid()
 	if err != nil {
@@ -85,6 +91,65 @@ func internalRequest(s *Server, method, path string, cookie *http.Cookie, form u
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	return w
+}
+
+func nativeAccessForAccount(t *testing.T, s *Server, db *database.Runtime, account string, origin string) (string, *http.Cookie) {
+	t.Helper()
+	credential, err := opaque()
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrf := s.csrf(s.CurrentPepper, credential)
+	_, err = db.Pool.Exec(context.Background(), `INSERT INTO public.portal_sessions(credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES($1,$2,$3,0,$4,clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 minutes',clock_timestamp()+interval '12 hours')`, s.digest(s.CurrentPepper, "portal-session", credential), s.CurrentPepper, account, s.digest(s.CurrentPepper, "csrf-store", csrf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: sessionCookie, Value: credential}
+	verifier := strings.Repeat("a", 43)
+	hash := sha256.Sum256([]byte(verifier))
+	query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {"clipp-relay://oauth/callback"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {"admin-native-state-12345"}}
+	begin := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+query.Encode(), nil)
+	begin.AddCookie(cookie)
+	page := httptest.NewRecorder()
+	s.Handler().ServeHTTP(page, begin)
+	if page.Code != http.StatusOK {
+		t.Fatalf("native authorization page: %d %s", page.Code, page.Body.String())
+	}
+	flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	formCSRF := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	if len(flow) != 2 || len(formCSRF) != 2 {
+		t.Fatal("native consent form missing flow or csrf")
+	}
+	form := url.Values{"flow": {flow[1]}, "csrf": {formCSRF[1]}}
+	confirm := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(form.Encode()))
+	confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirm.Header.Set("Origin", origin)
+	confirm.AddCookie(cookie)
+	callback := httptest.NewRecorder()
+	s.Handler().ServeHTTP(callback, confirm)
+	if callback.Code != http.StatusFound {
+		t.Fatalf("native consent submission: %d %s", callback.Code, callback.Body.String())
+	}
+	redirect, err := url.Parse(callback.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := redirect.Query().Get("code")
+	tokenForm := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {"clipp-relay://oauth/callback"}, "code": {code}, "code_verifier": {verifier}}
+	token := httptest.NewRecorder()
+	tokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	s.Handler().ServeHTTP(token, tokenRequest)
+	if token.Code != http.StatusOK {
+		t.Fatalf("native token exchange: %d %s", token.Code, token.Body.String())
+	}
+	var response struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(token.Body.Bytes(), &response); err != nil || response.AccessToken == "" {
+		t.Fatalf("native access token response: %v", err)
+	}
+	return response.AccessToken, cookie
 }
 
 func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
@@ -168,33 +233,21 @@ func TestSuspensionWaitsForAccountRowLockAndRevokesRelayCredential(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, err := uuid()
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := opaque()
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx := context.Background()
 	_, err = db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at,status,plan_id) VALUES($1,'https://accounts.google.com',$2,'target@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp(),'Active','6dd09395-51a0-451c-96b3-716e6038e870')`, target, target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.relay_access_tokens WHERE grant_id=$1`, grant)
-		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.login_grants WHERE id=$1`, grant)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.native_access_tokens WHERE grant_id IN(SELECT id FROM public.native_login_grants WHERE account_id=$1)`, target)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.native_refresh_generations WHERE grant_id IN(SELECT id FROM public.native_login_grants WHERE account_id=$1)`, target)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.native_authorization_codes WHERE account_id=$1`, target)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.native_login_grants WHERE account_id=$1`, target)
+		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id=$1`, target)
 		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.audit_events WHERE account_id=$1`, target)
 		_, _ = db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id=$1`, target)
 	})
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES($1,$2,0,'electron',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days')`, grant, target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.relay_access_tokens(credential_digest,pepper_version,grant_id,issued_at,expires_at) VALUES($1,$2,$3,clock_timestamp(),clock_timestamp()+interval '15 minutes')`, s.digest(s.CurrentPepper, "relay-access", raw), s.CurrentPepper, grant)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw, _ := nativeAccessForAccount(t, s, db, target, origin)
 	if _, err := s.AuthenticateRelay(ctx, raw); err != nil {
 		t.Fatalf("credential before suspension: %v", err)
 	}
@@ -232,7 +285,7 @@ func TestSuspensionWaitsForAccountRowLockAndRevokesRelayCredential(t *testing.T)
 	var status string
 	var generation int64
 	var terminated bool
-	if err := db.Pool.QueryRow(ctx, `SELECT a.status,a.credential_generation,g.terminated_at IS NOT NULL FROM public.accounts a JOIN public.login_grants g ON g.account_id=a.id WHERE a.id=$1`, target).Scan(&status, &generation, &terminated); err != nil || status != "Suspended" || generation != 1 || !terminated {
+	if err := db.Pool.QueryRow(ctx, `SELECT a.status,a.credential_generation,g.terminated_at IS NOT NULL FROM public.accounts a JOIN public.native_login_grants g ON g.account_id=a.id WHERE a.id=$1`, target).Scan(&status, &generation, &terminated); err != nil || status != "Suspended" || generation != 1 || !terminated {
 		t.Fatalf("status=%s generation=%d terminated=%t err=%v", status, generation, terminated, err)
 	}
 }

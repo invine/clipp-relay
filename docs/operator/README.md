@@ -54,3 +54,9 @@ faulty dependency ignores cancellation. Confirmed totals and compact receipts
 survive restart; restart never reconstructs lost observations or live sessions.
 
 Offline accounting schema transitions: [observed accounting cutover](accounting-migration.md).
+
+Native OAuth startup, first cutover, signing-key replacement and uncertain
+reset recovery: [native OAuth cutover](native-oauth-cutover.md).
+
+For the least-privilege database role table allowlists, see [serving role
+privileges](database-privileges.md).

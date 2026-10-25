@@ -12,27 +12,30 @@ func TestPepperRetirementRequiresCredentialCoverage(t *testing.T) {
 	c, m, db := fixture(t)
 	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
-	_, err := db.Pool.Exec(ctx, `INSERT INTO public.authorization_transactions(id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at) VALUES('868d6764-6d30-4c82-8bb9-93e039dc1101',decode(repeat('ab',32),'hex'),decode(repeat('cd',32),'hex'),decode(repeat('ef',32),'hex'),992,clock_timestamp(),clock_timestamp()+interval '5 minutes')`)
+	_, err := db.Pool.Exec(ctx, `INSERT INTO public.accounts(id,issuer,subject,email,email_verified,validated_at,created_at,last_portal_login_at)
+VALUES('868d6764-6d30-4c82-8bb9-93e039dc1101','https://accounts.google.com','pepper-session-coverage','pepper@example.test',true,clock_timestamp(),clock_timestamp(),clock_timestamp());
+INSERT INTO public.portal_sessions(credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+VALUES(decode(repeat('ab',32),'hex'),992,'868d6764-6d30-4c82-8bb9-93e039dc1101',0,decode(repeat('cd',32),'hex'),clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '1 hour')`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Pool.Exec(ctx, `DELETE FROM public.authorization_transactions WHERE id='868d6764-6d30-4c82-8bb9-93e039dc1101'`)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.portal_sessions WHERE account_id='868d6764-6d30-4c82-8bb9-93e039dc1101'; DELETE FROM public.accounts WHERE id='868d6764-6d30-4c82-8bb9-93e039dc1101'`)
 	if err := s.ValidatePepperCoverage(ctx); err == nil {
 		t.Fatal("premature pepper retirement accepted")
 	}
-	if _, err := db.Pool.Exec(ctx, `UPDATE public.authorization_transactions SET expires_at=clock_timestamp()-interval '23 hours' WHERE id='868d6764-6d30-4c82-8bb9-93e039dc1101'`); err != nil {
+	if _, err := db.Pool.Exec(ctx, `UPDATE public.portal_sessions SET idle_expires_at=clock_timestamp()-interval '23 hours' WHERE account_id='868d6764-6d30-4c82-8bb9-93e039dc1101'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ValidatePepperCoverage(ctx); err == nil {
 		t.Fatal("pepper removed inside cleanup window")
 	}
-	if _, err := db.Pool.Exec(ctx, `UPDATE public.authorization_transactions SET expires_at=clock_timestamp()-interval '25 hours' WHERE id='868d6764-6d30-4c82-8bb9-93e039dc1101'`); err != nil {
+	if _, err := db.Pool.Exec(ctx, `UPDATE public.portal_sessions SET idle_expires_at=clock_timestamp()-interval '25 hours' WHERE account_id='868d6764-6d30-4c82-8bb9-93e039dc1101'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ValidatePepperCoverage(ctx); err != nil {
 		t.Fatalf("expired dependent still blocks retirement: %v", err)
 	}
-	if _, err := db.Pool.Exec(ctx, `UPDATE public.authorization_transactions SET expires_at=clock_timestamp()+interval '5 minutes' WHERE id='868d6764-6d30-4c82-8bb9-93e039dc1101'`); err != nil {
+	if _, err := db.Pool.Exec(ctx, `UPDATE public.portal_sessions SET idle_expires_at=clock_timestamp()+interval '5 minutes' WHERE account_id='868d6764-6d30-4c82-8bb9-93e039dc1101'`); err != nil {
 		t.Fatal(err)
 	}
 	s.Peppers[992] = make([]byte, 32)

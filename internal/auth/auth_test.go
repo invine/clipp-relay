@@ -1,6 +1,8 @@
 package auth_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -8,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -30,6 +33,11 @@ import (
 func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.Material, provider auth.Provider) *auth.Server {
 	t.Helper()
 	s := auth.New(pool, c, m, provider)
+	if len(m.NativeSigningKey) == 32 {
+		if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
 	return s
 }
@@ -60,24 +68,33 @@ func fixture(t *testing.T) (config.Config, config.Material, *database.Runtime) {
 }
 
 type providerDouble struct {
-	server         *httptest.Server
-	key            *rsa.PrivateKey
-	mu             sync.Mutex
-	nonce          string
-	invalid        string
-	calls          int
-	subject        string
-	email          string
-	hostedDomain   string
-	keyAge         string
-	keyID          string
-	issuers        map[string]string
-	onKeys         func()
-	tokenCalls     int
-	oversizeBody   bool
-	oversizeHeader bool
-	tokenGate      chan struct{}
-	tokenStarted   chan struct{}
+	server                 *httptest.Server
+	key                    *rsa.PrivateKey
+	rotatedKey             *rsa.PrivateKey
+	mu                     sync.Mutex
+	nonce                  string
+	invalid                string
+	calls                  int
+	subject                string
+	email                  string
+	hostedDomain           string
+	keyAge                 string
+	keyID                  string
+	tokenKeyID             string
+	audience               any
+	keyStatus              int
+	oversizeKeyBody        bool
+	oversizeKeyHeader      bool
+	compressedKeyBody      bool
+	issuers                map[string]string
+	onKeys                 func()
+	tokenCalls             int
+	oversizeBody           bool
+	compressedOversizeBody bool
+	oversizeHeader         bool
+	tokenStatus            int
+	tokenGate              chan struct{}
+	tokenStarted           chan struct{}
 }
 
 func newProvider(t *testing.T) *providerDouble {
@@ -86,7 +103,7 @@ func newProvider(t *testing.T) *providerDouble {
 	if e != nil {
 		t.Fatal(e)
 	}
-	d := &providerDouble{key: key, subject: "stable-subject", email: "latest@example.test", keyAge: "60", keyID: "test-key"}
+	d := &providerDouble{key: key, subject: "stable-subject", email: "latest@example.test", keyAge: "60", keyID: "test-key", tokenKeyID: "test-key"}
 	d.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/keys":
@@ -94,10 +111,46 @@ func newProvider(t *testing.T) *providerDouble {
 			d.calls++
 			keyAge := d.keyAge
 			keyID := d.keyID
+			keyStatus := d.keyStatus
+			oversizeKeyBody := d.oversizeKeyBody
+			oversizeKeyHeader := d.oversizeKeyHeader
+			compressedKeyBody := d.compressedKeyBody
+			key := d.key
+			if keyID == "rotated-key" && d.rotatedKey != nil {
+				key = d.rotatedKey
+			}
 			onKeys := d.onKeys
 			d.mu.Unlock()
+			if keyStatus != 0 && keyStatus != http.StatusOK {
+				w.WriteHeader(keyStatus)
+				return
+			}
+			if oversizeKeyHeader {
+				w.Header().Set("X-Canary", strings.Repeat("H", 17<<10))
+			}
 			w.Header().Set("Cache-Control", "public, max-age="+keyAge)
-			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": keyID, "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": "AQAB"}}})
+			if oversizeKeyBody {
+				if compressedKeyBody {
+					w.Header().Set("Content-Encoding", "gzip")
+					compressed := gzip.NewWriter(w)
+					_, _ = compressed.Write(bytes.Repeat([]byte("B"), (256<<10)+1))
+					_ = compressed.Close()
+				} else {
+					_, _ = w.Write([]byte(strings.Repeat("B", (256<<10)+1)))
+				}
+			} else {
+				encodeKey := func(dst io.Writer) {
+					_ = json.NewEncoder(dst).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": keyID, "n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": "AQAB"}}})
+				}
+				if compressedKeyBody {
+					w.Header().Set("Content-Encoding", "gzip")
+					compressed := gzip.NewWriter(w)
+					encodeKey(compressed)
+					_ = compressed.Close()
+				} else {
+					encodeKey(w)
+				}
+			}
 			if onKeys != nil {
 				onKeys()
 			}
@@ -106,16 +159,29 @@ func newProvider(t *testing.T) *providerDouble {
 			d.mu.Lock()
 			nonce, invalid, subject := r.Form.Get("code"), d.invalid, d.subject
 			email, hostedDomain := d.email, d.hostedDomain
+			tokenStatus := d.tokenStatus
 			d.tokenCalls++
 			issuer := d.issuers[nonce]
 			gate, started := d.tokenGate, d.tokenStarted
 			oversizeBody, oversizeHeader := d.oversizeBody, d.oversizeHeader
+			compressedOversizeBody := d.compressedOversizeBody
 			d.mu.Unlock()
+			if tokenStatus != 0 && tokenStatus != http.StatusOK {
+				w.WriteHeader(tokenStatus)
+				return
+			}
 			if oversizeHeader {
 				w.Header().Set("X-Canary", strings.Repeat("H", 17<<10))
 			}
 			if oversizeBody {
 				_, _ = w.Write([]byte(strings.Repeat("B", (256<<10)+1)))
+				return
+			}
+			if compressedOversizeBody {
+				w.Header().Set("Content-Encoding", "gzip")
+				compressed := gzip.NewWriter(w)
+				_, _ = compressed.Write(bytes.Repeat([]byte("B"), (256<<10)+1))
+				_ = compressed.Close()
 				return
 			}
 			if started != nil {
@@ -128,6 +194,17 @@ func newProvider(t *testing.T) *providerDouble {
 				issuer = "accounts.google.com"
 			}
 			claims := map[string]any{"iss": issuer, "sub": subject, "aud": "test-client", "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(), "nonce": nonce, "email": email, "email_verified": true, "name": "SECRET_CANARY_NAME"}
+			d.mu.Lock()
+			audience := d.audience
+			tokenKeyID := d.tokenKeyID
+			signingKey := d.key
+			if tokenKeyID == "rotated-key" && d.rotatedKey != nil {
+				signingKey = d.rotatedKey
+			}
+			d.mu.Unlock()
+			if audience != nil {
+				claims["aud"] = audience
+			}
 			if hostedDomain != "" {
 				claims["hd"] = hostedDomain
 			}
@@ -136,19 +213,36 @@ func newProvider(t *testing.T) *providerDouble {
 				claims["nonce"] = "wrong"
 			case "expired":
 				claims["exp"] = time.Now().Add(-time.Second).Unix()
+			case "expiry-boundary":
+				claims["exp"] = time.Now().Unix()
+			case "future-iat":
+				claims["iat"] = time.Now().Add(2 * time.Minute).Unix()
+			case "empty-subject":
+				claims["sub"] = ""
+			case "long-subject":
+				claims["sub"] = strings.Repeat("s", 256)
+			case "empty-email":
+				claims["email"] = ""
+			case "long-email":
+				claims["email"] = strings.Repeat("e", 321)
 			case "audience":
 				claims["aud"] = "other-client"
 			case "issuer":
 				claims["iss"] = "https://evil.example"
 			}
-			h, _ := json.Marshal(map[string]any{"alg": "RS256", "kid": "test-key"})
+			algorithm := "RS256"
+			if invalid == "algorithm" {
+				algorithm = "HS256"
+			}
+			h, _ := json.Marshal(map[string]any{"alg": algorithm, "kid": tokenKeyID})
 			p, _ := json.Marshal(claims)
 			input := base64.RawURLEncoding.EncodeToString(h) + "." + base64.RawURLEncoding.EncodeToString(p)
 			digest := sha256.Sum256([]byte(input))
-			sig, _ := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+			sig, _ := rsa.SignPKCS1v15(rand.Reader, signingKey, crypto.SHA256, digest[:])
 			if invalid == "signature" {
 				sig[0] ^= 1
 			}
+			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"id_token": input + "." + base64.RawURLEncoding.EncodeToString(sig), "access_token": "SECRET_CANARY_ACCESS"})
 		default:
 			http.NotFound(w, r)
@@ -157,6 +251,22 @@ func newProvider(t *testing.T) *providerDouble {
 	t.Cleanup(d.server.Close)
 	return d
 }
+
+func TestProviderTokenEndpointReturnsJSONContentType(t *testing.T) {
+	d := newProvider(t)
+	response, err := http.PostForm(d.server.URL+"/token", url.Values{"code": {"callback-nonce"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("token endpoint status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if got := response.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("token endpoint Content-Type = %q, want application/json", got)
+	}
+}
+
 func (d *providerDouble) endpoints() auth.Provider {
 	return auth.Provider{AuthorizationURL: d.server.URL + "/authorize", TokenURL: d.server.URL + "/token", KeysURL: d.server.URL + "/keys"}
 }
@@ -285,7 +395,7 @@ func TestGoogleRegistrationAndSessionPersistAcrossRestart(t *testing.T) {
 	}
 }
 func TestProviderAndBrowserFailuresDoNotCreateAccount(t *testing.T) {
-	for _, kind := range []string{"signature", "nonce", "expired", "audience", "issuer", "state", "binding", "replay"} {
+	for _, kind := range []string{"signature", "algorithm", "nonce", "expired", "expiry-boundary", "future-iat", "empty-subject", "long-subject", "empty-email", "long-email", "audience", "issuer", "state", "binding", "replay", "body", "header", "compressed-body", "jwks-status", "jwks-body", "jwks-header", "jwks-compressed-body"} {
 		t.Run(kind, func(t *testing.T) {
 			c, m, db := fixture(t)
 			d := newProvider(t)
@@ -295,6 +405,15 @@ func TestProviderAndBrowserFailuresDoNotCreateAccount(t *testing.T) {
 			d.mu.Lock()
 			d.nonce = strings.Split(state, "|")[1]
 			d.invalid = kind
+			d.oversizeBody = kind == "body"
+			d.oversizeHeader = kind == "header"
+			d.compressedOversizeBody = kind == "compressed-body"
+			if kind == "jwks-status" {
+				d.keyStatus = http.StatusNoContent
+			}
+			d.oversizeKeyBody = kind == "jwks-body" || kind == "jwks-compressed-body"
+			d.oversizeKeyHeader = kind == "jwks-header"
+			d.compressedKeyBody = kind == "jwks-compressed-body"
 			d.mu.Unlock()
 			if kind == "binding" {
 				binding = &http.Cookie{Name: binding.Name, Value: strings.Repeat("x", 43)}
@@ -394,10 +513,10 @@ func TestExpiredSessionsAndDatabaseOutageFailClosed(t *testing.T) {
 		t.Fatal("absolute-expired session accepted")
 	}
 	db.Pool.Close()
-	w = httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/auth/login", nil))
+	state, binding = start(t, s, nil)
+	w = complete(s, state, binding)
 	if w.Code != 503 || sessionFrom(w) != nil {
-		t.Fatalf("outage start: %d", w.Code)
+		t.Fatalf("outage callback issued a credential: %d", w.Code)
 	}
 }
 
@@ -425,20 +544,25 @@ func TestGlobalRateAndRequestBoundsRejectImmediately(t *testing.T) {
 	}
 }
 
-func TestExpiredVerificationKeysCannotCompleteLogin(t *testing.T) {
+func TestStockRemoteKeySetCachesKeysWithoutApplicationTTL(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.keyAge = "0"
-	d.subject = "expired-key-subject"
+	d.subject = "zero-age-stock-cache"
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	state, binding := start(t, s, nil)
-	w := complete(s, state, binding)
-	if w.Code == 303 {
-		t.Fatal("expired key accepted")
+	first, binding := start(t, s, nil)
+	if w := complete(s, first, binding); w.Code != 303 {
+		t.Fatalf("first login: %d", w.Code)
 	}
-	var count int
-	if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&count); e != nil || count != 0 {
-		t.Fatalf("unverified account persisted: %d %v", count, e)
+	second, binding := start(t, s, binding)
+	if w := complete(s, second, binding); w.Code != 303 {
+		t.Fatalf("login using cached key: %d", w.Code)
+	}
+	d.mu.Lock()
+	calls := d.calls
+	d.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("stock key cache fetched %d times, want one", calls)
 	}
 }
 
@@ -530,18 +654,74 @@ func TestProviderCapacityRejectsWithoutQueue(t *testing.T) {
 	}
 }
 
-func TestContinuationCapacityRefusesNewLogin(t *testing.T) {
+func TestCombinedContinuationCapacityRefusesWithoutEviction(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	d := newProvider(t)
+	d.subject = "combined-continuation-capacity"
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	session := loginAs(t, s, d, d.subject, "capacity@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("a", 43)
+	challenge := sha256.Sum256([]byte(verifier))
+	query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "state": {"capacity-consent-state"}}
+	begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
+	begin.AddCookie(session)
+	page := httptest.NewRecorder()
+	s.Handler().ServeHTTP(page, begin)
+	if page.Code != http.StatusOK {
+		t.Fatalf("consent page: %d %s", page.Code, page.Body.String())
+	}
+	consentFlow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	if len(consentFlow) != 2 || len(csrf) != 2 {
+		t.Fatal("consent form missing flow or csrf")
+	}
+	consentForm := url.Values{"flow": {consentFlow[1]}, "csrf": {csrf[1]}}
+	var firstFlow string
+	var firstBinding *http.Cookie
+	for i := 0; i < 1023; i++ {
+		flow, binding := start(t, s, nil)
+		if i == 0 {
+			firstFlow, firstBinding = flow, binding
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	refused := httptest.NewRecorder()
+	s.Handler().ServeHTTP(refused, httptest.NewRequest("GET", "/auth/login", nil))
+	if refused.Code != 503 {
+		t.Fatalf("full combined continuation store admitted newcomer: %d", refused.Code)
+	}
+	if response := complete(s, firstFlow, firstBinding); response.Code != 303 {
+		t.Fatalf("capacity refusal evicted existing Google continuation: %d", response.Code)
+	}
+	confirm := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(consentForm.Encode()))
+	confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirm.Header.Set("Origin", s.Origin)
+	confirm.AddCookie(session)
+	accepted := httptest.NewRecorder()
+	s.Handler().ServeHTTP(accepted, confirm)
+	if accepted.Code != 302 {
+		t.Fatalf("capacity refusal evicted existing consent: %d %s", accepted.Code, accepted.Body.String())
+	}
+}
+
+func TestGoogleLoginContinuationIsRamOnly(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	for i := 0; i < 1024; i++ {
-		start(t, s, nil)
-		time.Sleep(5 * time.Millisecond)
+	state, binding := start(t, s, nil)
+	var tableExists bool
+	if err := db.Pool.QueryRow(context.Background(), `SELECT to_regclass('public.authorization_transactions') IS NOT NULL`).Scan(&tableExists); err != nil {
+		t.Fatal(err)
 	}
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/auth/login", nil))
-	if w.Code != 503 {
-		t.Fatalf("full continuation store: %d", w.Code)
+	if tableExists {
+		t.Fatal("unfinished Google login still has a database continuation table")
+	}
+	if response := complete(s, state, binding); response.Code != 303 {
+		t.Fatalf("RAM continuation did not complete through callback: %d", response.Code)
 	}
 }
 
@@ -563,11 +743,11 @@ func TestRestartCancelsUnfinishedLogin(t *testing.T) {
 	}
 }
 
-func TestUnknownKeyFetchHasSharedCooldown(t *testing.T) {
+func TestStockRemoteKeySetRetriesSequentialUnknownKeyMisses(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "unknown-key"
-	d.keyID = "other-key"
+	d.tokenKeyID = "other-key"
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	for i := 0; i < 2; i++ {
 		state, binding := start(t, s, nil)
@@ -579,8 +759,45 @@ func TestUnknownKeyFetchHasSharedCooldown(t *testing.T) {
 	d.mu.Lock()
 	calls := d.calls
 	d.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("sequential unknown-key misses fetched %d times, want two", calls)
+	}
+}
+
+func TestGoogleTokenExchangeUsesOneCodeExchangeAttempt(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.tokenStatus = http.StatusUnauthorized
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	state, binding := start(t, s, nil)
+	if w := complete(s, state, binding); w.Code != http.StatusUnauthorized {
+		t.Fatalf("failed provider exchange status: %d", w.Code)
+	}
+	d.mu.Lock()
+	calls := d.tokenCalls
+	d.mu.Unlock()
 	if calls != 1 {
-		t.Fatalf("unknown key fetched %d times", calls)
+		t.Fatalf("single-use Google code exchanged %d times", calls)
+	}
+}
+
+func TestGoogleTokenAudienceMustBeOneExactScalar(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	subjectNonce := make([]byte, 16)
+	if _, err := rand.Read(subjectNonce); err != nil {
+		t.Fatal(err)
+	}
+	d.subject = "audience-rejection-" + base64.RawURLEncoding.EncodeToString(subjectNonce)
+	d.audience = []string{"test-client"}
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	state, binding := start(t, s, nil)
+	if w := complete(s, state, binding); w.Code != http.StatusUnauthorized {
+		t.Fatalf("array audience was accepted: %d", w.Code)
+	}
+	var count int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unverified account persisted: %d %v", count, err)
 	}
 }
 
@@ -686,20 +903,27 @@ func TestSuccessfulCallbackPreservesSharedBrowserBindingForAnotherTab(t *testing
 	}
 }
 
-func TestExpiredKnownVerificationKeyRefreshesBeforeUnknownKeyCooldown(t *testing.T) {
+func TestStockRemoteKeySetRefreshesForNewSigningKey(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "known-key-refresh"
-	d.keyAge = "1"
+	rotatedKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.rotatedKey = rotatedKey
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	first, binding := start(t, s, nil)
 	if w := complete(s, first, binding); w.Code != 303 {
 		t.Fatalf("first login: %d", w.Code)
 	}
-	time.Sleep(1200 * time.Millisecond)
+	d.mu.Lock()
+	d.keyID = "rotated-key"
+	d.tokenKeyID = "rotated-key"
+	d.mu.Unlock()
 	second, binding := start(t, s, binding)
 	if w := complete(s, second, binding); w.Code != 303 {
-		t.Fatalf("expired known key was not refreshed: %d", w.Code)
+		t.Fatalf("new signing key was not loaded: %d", w.Code)
 	}
 	d.mu.Lock()
 	calls := d.calls
@@ -747,7 +971,7 @@ func TestRepeatedSuccessfulCallbacksRespectResolvedAccountRate(t *testing.T) {
 	}
 }
 
-func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
+func TestExpiredPortalSessionCleanupCatchesUpInBoundedBatches(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "cleanup-owner"
@@ -757,12 +981,7 @@ func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
 		t.Fatalf("setup: %d", w.Code)
 	}
 	ctx := context.Background()
-	_, e := db.Pool.Exec(ctx, `INSERT INTO public.authorization_transactions (id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at)
- SELECT lpad(to_hex(i+100000),32,'0')::uuid,decode(md5('state'||i)||md5('state2'||i),'hex'),decode(repeat('aa',32),'hex'),decode(repeat('bb',32),'hex'),$1,clock_timestamp()-interval '3 hours',clock_timestamp()-interval '2 hours' FROM generate_series(1,1200) AS i`, m.CurrentPepper)
-	if e != nil {
-		t.Fatal(e)
-	}
-	_, e = db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions (credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+	_, e := db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions (credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
  SELECT decode(md5('session'||i)||md5('session2'||i),'hex'),$1,a.id,0,decode(repeat('cc',32),'hex'),clock_timestamp()-interval '3 hours',clock_timestamp()-interval '3 hours',clock_timestamp()-interval '3 hours',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour' FROM generate_series(1,1200) AS i CROSS JOIN public.accounts a WHERE a.subject=$2`, m.CurrentPepper, d.subject)
 	if e != nil {
 		t.Fatal(e)
@@ -780,21 +999,18 @@ func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
 	}()
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		var flows, sessions int
-		err1 := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour'`).Scan(&flows)
-		err2 := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions)
-		if err1 != nil || err2 != nil {
-			t.Fatalf("cleanup query: %v %v", err1, err2)
+		var sessions int
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions); err != nil {
+			t.Fatalf("cleanup query: %v", err)
 		}
-		if flows == 0 && sessions == 0 {
+		if sessions == 0 {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	var flows, sessions int
-	_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour'`).Scan(&flows)
+	var sessions int
 	_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions)
-	t.Fatalf("cleanup backlog after catch-up window: flows=%d sessions=%d", flows, sessions)
+	t.Fatalf("cleanup backlog after catch-up window: sessions=%d", sessions)
 }
 
 func TestDatabaseOutageAfterVerifiedProviderResponseCreatesNoFallbackState(t *testing.T) {

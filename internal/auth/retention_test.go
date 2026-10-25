@@ -40,18 +40,18 @@ VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*$2,10,
 		}
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id=$1`, id)
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.login_grants(id,account_id,credential_generation,client_type,current_refresh_generation,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.native_login_grants(id,account_id,credential_generation,client_type,current_refresh_generation,created_at,last_used_at,idle_expires_at,absolute_expires_at)
 VALUES($1,$2,0,'electron',2,clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '7 days',clock_timestamp()+interval '30 days')`, grant, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Pool.Exec(ctx, `DELETE FROM public.login_grants WHERE id=$1`, grant)
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.refresh_generations(credential_digest,pepper_version,grant_id,generation,issued_at,consumed_at)
-VALUES(decode(repeat('ab',32),'hex'),$1,$2,1,clock_timestamp()-interval '2 days',clock_timestamp()-interval '2 days')`, s.CurrentPepper, grant)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.native_login_grants WHERE id=$1`, grant)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.native_refresh_generations(credential_digest,grant_id,generation,issued_at,consumed_at)
+VALUES(decode(repeat('ab',32),'hex'),$1,1,clock_timestamp()-interval '2 days',clock_timestamp()-interval '2 days')`, grant)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Pool.Exec(ctx, `DELETE FROM public.refresh_generations WHERE grant_id=$1`, grant)
+	defer db.Pool.Exec(ctx, `DELETE FROM public.native_refresh_generations WHERE grant_id=$1`, grant)
 	_, err = db.Pool.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes)
 VALUES($1,decode(repeat('cd',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7,10),
 ($1,decode(repeat('ef',32),'hex'),date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,10)`, s.CurrentPepper)
@@ -91,7 +91,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('cd',32),'hex')`).Scan(&expiredRetained); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.refresh_generations WHERE grant_id=$1`, grant).Scan(&liveHash); err != nil {
+	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.native_refresh_generations WHERE grant_id=$1`, grant).Scan(&liveHash); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.accounts WHERE id=$1`, id).Scan(&account); err != nil {

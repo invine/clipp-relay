@@ -54,7 +54,7 @@ func TestLoadRejectsCaseInsensitiveAliasKeys(t *testing.T) {
 func TestLoadRejectsNoncanonicalOrigin(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	body := `{"version":1,"portal_origin":"https://example.com/path","wss_hostname":"wss.example.com","listeners":{"public":"127.0.0.1:0","private":"127.0.0.1:0"},"database":{"host":"db.example.com","port":5432,"name":"relay","username_file":"/x","password_file":"/y","ca_file":"/z"},"secrets":{"google_client_id_file":"/a","google_client_secret_file":"/b","admin_allowlist_file":"/c","pepper_keyring_file":"/d"}}`
+	body := `{"version":1,"portal_origin":"https://example.com/path","wss_hostname":"wss.example.com","listeners":{"public":"127.0.0.1:0","private":"127.0.0.1:0"},"database":{"host":"db.example.com","port":5432,"name":"relay","username_file":"/x","password_file":"/y","ca_file":"/z"},"secrets":{"google_client_id_file":"/a","google_client_secret_file":"/b","admin_allowlist_file":"/c","pepper_keyring_file":"/d","native_signing_key_file":"/e"}}`
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestLoadRejectsNoncanonicalOrigin(t *testing.T) {
 }
 
 func TestRelayTCPConfigurationRejectsIncompleteAddresses(t *testing.T) {
-	base := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/x","password_file":"/y","ca_file":"/z"},"secrets":{"google_client_id_file":"/a","google_client_secret_file":"/b","admin_allowlist_file":"/c","pepper_keyring_file":"/d"}}`
+	base := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/x","password_file":"/y","ca_file":"/z"},"secrets":{"google_client_id_file":"/a","google_client_secret_file":"/b","admin_allowlist_file":"/c","pepper_keyring_file":"/d","native_signing_key_file":"/e"}}`
 	for _, entry := range []string{
 		`"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/18082","public_addresses":["/ip4/127.0.0.1"]}`,
 		`"relay_tcp":{"listen":"/ip4/127.0.0.1/tcp/0"}`,
@@ -83,7 +83,7 @@ func TestRelayTCPConfigurationRejectsIncompleteAddresses(t *testing.T) {
 }
 
 func TestJournalConfigurationRequiresExplicitIdentityAndCoverage(t *testing.T) {
-	base := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/x","password_file":"/y","ca_file":"/z"},"secrets":{"google_client_id_file":"/a","google_client_secret_file":"/b","admin_allowlist_file":"/c","pepper_keyring_file":"/d"}}`
+	base := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/x","password_file":"/y","ca_file":"/z"},"secrets":{"google_client_id_file":"/a","google_client_secret_file":"/b","admin_allowlist_file":"/c","pepper_keyring_file":"/d","native_signing_key_file":"/e"}}`
 	for _, journal := range []string{
 		`{"region":"us-ashburn-1"}`,
 		`{"region":"us-ashburn-1","namespace":"ns","bucket":"bucket","repository_id":"repo","coverage_floor":0,"coverage_hash":"wrong","tenancy_ocid":"ocid1.tenancy.oc1..test","user_ocid":"ocid1.user.oc1..test","fingerprint":"aa:bb","private_key_file":"/secret"}`,
@@ -103,7 +103,7 @@ func TestJournalConfigurationRequiresExplicitIdentityAndCoverage(t *testing.T) {
 func TestMissingSecretFailsWithoutPathDisclosure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	body := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/missing/private-identity","password_file":"/missing/private-password","ca_file":"/missing/ca"},"secrets":{"google_client_id_file":"/missing/google-id","google_client_secret_file":"/missing/google-secret","admin_allowlist_file":"/missing/allowlist","pepper_keyring_file":"/missing/keyring"}}`
+	body := `{"version":1,"portal_origin":"https://example.com","wss_hostname":"wss.example.com","public_clients":{"android_redirect":"clipp-relay://oauth/callback","extension_redirect":"https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"},"listeners":{"public":"127.0.0.1:18080","private":"127.0.0.1:18081"},"database":{"mode":"external","host":"localhost","port":5432,"name":"relay","username_file":"/missing/private-identity","password_file":"/missing/private-password","ca_file":"/missing/ca"},"secrets":{"google_client_id_file":"/missing/google-id","google_client_secret_file":"/missing/google-secret","admin_allowlist_file":"/missing/allowlist","pepper_keyring_file":"/missing/keyring","native_signing_key_file":"/missing/signing"}}`
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +114,77 @@ func TestMissingSecretFailsWithoutPathDisclosure(t *testing.T) {
 	_, err = c.ReadMaterial()
 	if err == nil || strings.Contains(err.Error(), "private-identity") {
 		t.Fatalf("material error = %v", err)
+	}
+}
+
+func TestNativeSigningKeyRequiresExactly32SecretBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "oauth-signing-key")
+	for _, tc := range []struct {
+		name  string
+		value []byte
+		valid bool
+	}{
+		{name: "exact", value: make([]byte, 32), valid: true},
+		{name: "short", value: make([]byte, 31)},
+		{name: "long", value: make([]byte, 33)},
+		{name: "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.Remove(path)
+			if tc.value != nil {
+				if err := os.WriteFile(path, tc.value, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := config.ReadNativeSigningKey(path)
+			if (err == nil) != tc.valid || tc.valid && len(got) != 32 {
+				t.Fatalf("key length=%d err=%v", len(got), err)
+			}
+		})
+	}
+}
+
+func TestResetMaterialNeedsOnlyDatabaseAndSigningSecrets(t *testing.T) {
+	dir := t.TempDir()
+	key := make([]byte, 32)
+	keyPath := filepath.Join(dir, "native-key")
+	if err := os.WriteFile(keyPath, key, 0600); err != nil {
+		t.Fatal(err)
+	}
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTemplate := x509.Certificate{SerialNumber: big.NewInt(7), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	caDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPath := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var c config.Config
+	c.Database.UsernameFile = filepath.Join(dir, "user")
+	c.Database.PasswordFile = filepath.Join(dir, "pass")
+	c.Database.CAFile = caPath
+	c.Secrets.NativeSigningKeyFile = keyPath
+	if err := os.WriteFile(c.Database.UsernameFile, []byte("migration"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(c.Database.PasswordFile, []byte("password"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The reset job does not need Google, allowlist, portal pepper or journal
+	// Secret contents merely to compare key identity and write reset evidence.
+	c.Secrets.GoogleClientIDFile = filepath.Join(dir, "absent-google-id")
+	c.Secrets.GoogleClientSecretFile = filepath.Join(dir, "absent-google-secret")
+	c.Secrets.PepperKeyringFile = filepath.Join(dir, "absent-keyring")
+	c.Secrets.AdminAllowlistFile = filepath.Join(dir, "absent-allowlist")
+	m, err := c.ReadResetMaterial()
+	if err != nil || m.DBUsername != "migration" || m.DBPassword != "password" || len(m.NativeSigningKey) != 32 {
+		t.Fatalf("reset material=%+v err=%v", m, err)
 	}
 }
 

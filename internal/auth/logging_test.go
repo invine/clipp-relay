@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
@@ -23,12 +25,13 @@ func TestCredentialRefusalsHaveIndependentSafeRequestDiagnostics(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
 	s := newTestServer(t, nil, config.Config{}, config.Material{}, auth.Provider{})
+	handler := s.NativeHandlerForTest(bytes.Repeat([]byte{0x41}, 32))
 	s.SetDiagnostics(logger)
 	for _, path := range []string{"/auth/callback?state=SECRET_STATE_CANARY&code=SECRET_CODE_CANARY", "/auth/callback?state=SECRET_STATE_CANARY&code=SECRET_CODE_CANARY"} {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.Header.Set("X-Request-Id", strings.Repeat("a", 32))
 		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, r)
+		handler.ServeHTTP(w, r)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status %d", w.Code)
 		}
@@ -37,7 +40,7 @@ func TestCredentialRefusalsHaveIndependentSafeRequestDiagnostics(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/oauth/token?SECRET_QUERY_CANARY", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
+	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("token status %d", w.Code)
 	}
@@ -72,16 +75,18 @@ func TestPortalAndOAuthDiagnosticsDescribeRecordedCredentials(t *testing.T) {
 	c, m, db := fixture(t)
 	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
 	provider := newProvider(t)
+	subject := fmt.Sprintf("SECRET_SUBJECT_CANARY_%d", time.Now().UnixNano())
+	email := strings.ToLower(subject) + "@example.test"
 	provider.mu.Lock()
-	provider.subject = "SECRET_SUBJECT_CANARY"
-	provider.email = "SECRET_EMAIL_CANARY@example.test"
+	provider.subject = subject
+	provider.email = email
 	provider.mu.Unlock()
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
 	s := newTestServer(t, db.Pool, c, m, provider.endpoints())
 	s.SetDiagnostics(logger)
-	session := loginAs(t, s, provider, "SECRET_SUBJECT_CANARY", "SECRET_EMAIL_CANARY@example.test", "")
-	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject='SECRET_SUBJECT_CANARY'`); err != nil {
+	session := loginAs(t, s, provider, subject, email, "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, subject); err != nil {
 		t.Fatal(err)
 	}
 	code := authorizeClient(t, s, session, "android", c.PublicClients.AndroidRedirect)
@@ -214,7 +219,7 @@ func TestJWKSDependencyInvalidResponseAndRecovery(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
 	s := newTestServer(t, db.Pool, c, m, endpoints)
-	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
+	s.SetDiagnostics(logger)
 	state, binding := start(t, s, nil)
 	if out := complete(s, state, binding); out.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid JWKS status %d", out.Code)
@@ -225,9 +230,31 @@ func TestJWKSDependencyInvalidResponseAndRecovery(t *testing.T) {
 		t.Fatalf("recovered JWKS status %d", out.Code)
 	}
 	logger.Close()
-	rows := output.String()
-	if strings.Contains(rows, "JWKS_BODY_CANARY") || !strings.Contains(rows, `"event":"dependency.google_jwks"`) || !strings.Contains(rows, `"reason":"invalid_response"`) || !strings.Contains(rows, `"outcome":"recovered"`) {
-		t.Fatalf("JWKS rows: %s", rows)
+	rows := strings.TrimSpace(output.String())
+	if strings.Contains(rows, "JWKS_BODY_CANARY") {
+		t.Fatalf("provider response leaked into diagnostics: %s", rows)
+	}
+	var refused, recovered bool
+	for _, line := range strings.Split(rows, "\n") {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if row["event"] == "dependency.google_jwks" {
+			t.Fatalf("stock RemoteKeySet emitted custom JWKS transition: %v", row)
+		}
+		if row["event"] != "portal.login" {
+			continue
+		}
+		if row["outcome"] == "refused" && row["reason"] == "verification_failed" && row["level"] == "INFO" {
+			refused = true
+		}
+		if row["outcome"] == "success" && row["reason"] == "none" && row["level"] == "INFO" {
+			recovered = true
+		}
+	}
+	if !refused || !recovered {
+		t.Fatalf("missing safe callback refusal/recovery diagnostics (refused=%t recovered=%t): %s", refused, recovered, rows)
 	}
 }
 

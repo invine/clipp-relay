@@ -2,33 +2,30 @@ package auth
 
 import (
 	"context"
-	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"math/big"
 	"net/http"
-	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"clipp-relay/internal/auth/issuer"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/portal"
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/oauth2"
 )
 
 const sessionCookie = "__Host-clipp-portal"
@@ -81,6 +78,8 @@ type Server struct {
 	provider                           Provider
 	client                             *http.Client
 	providerSlots                      chan struct{}
+	googleOAuth                        *oauth2.Config
+	googleVerifier                     *oidc.IDTokenVerifier
 	mu                                 sync.Mutex
 	identityGuards                     [4096]sync.Mutex
 	accountGuards                      sync.Map
@@ -89,12 +88,8 @@ type Server struct {
 	fences                             map[[32]byte]identityFence
 	flowSeq                            uint64
 	flowEpoch                          uint64
-	keyMu                              sync.Mutex
 	flows                              map[string]flow
 	consents                           map[string]oauthConsent
-	keys                               map[string]*rsa.PublicKey
-	keysUntil                          time.Time
-	lastKeyFetch                       time.Time
 	globalRate                         rate
 	accountRates                       map[string]rate
 	beforeProfileRead                  func()
@@ -107,6 +102,7 @@ type Server struct {
 	commitAccount                      func(context.Context, pgx.Tx) error
 	relayCredentialHook                func()
 	commitCredential                   func(context.Context, pgx.Tx) error
+	nativeIssuer                       *issuer.Issuer
 	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error
 	commitRecovery                     func(context.Context, pgx.Tx) error
@@ -259,7 +255,7 @@ func (s *Server) SampleActiveGrants(parent context.Context, accountID string) (C
 	ctx, cancel := context.WithTimeout(parent, 500*time.Millisecond)
 	defer cancel()
 	var count int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
+	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
 	if err != nil {
 		return CapacitySample{}, err
 	}
@@ -318,12 +314,22 @@ func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provid
 // admission budget. The runtime must be the same one passed to Quota.
 func NewWithRuntime(runtime *database.Runtime, c config.Config, m config.Material, provider Provider) *Server {
 	pool := runtime.Pool
-	client := provider.Client
-	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{MaxResponseHeaderBytes: 16 << 10}}
+	httpSlots := make(chan struct{}, 8)
+	client := newProviderHTTPClient(provider.Client, httpSlots)
+	googleOAuth := &oauth2.Config{
+		ClientID:     m.GoogleClientID,
+		ClientSecret: m.GoogleClientSecret,
+		RedirectURL:  c.PortalOrigin + "/auth/callback",
+		Scopes:       []string{oidc.ScopeOpenID, oidc.ScopeEmail},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:   provider.AuthorizationURL,
+			TokenURL:  provider.TokenURL,
+			AuthStyle: oauth2.AuthStyleInParams,
+		},
 	}
-	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	s := &Server{Pool: pool, db: runtime, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, keys: map[string]*rsa.PublicKey{}, accountRates: map[string]rate{}, cleanupAccountCursors: make([]string, len(cleanupQueries))}
+	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), provider.KeysURL)
+	googleVerifier := oidc.NewVerifier(googleIssuer, keySet, &oidc.Config{ClientID: m.GoogleClientID, SupportedSigningAlgs: []string{"RS256"}})
+	s := &Server{Pool: pool, db: runtime, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, accountRates: map[string]rate{}, cleanupAccountCursors: make([]string, len(cleanupQueries))}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
@@ -493,6 +499,37 @@ func (s *Server) Handler() http.Handler {
 		s.observedRequest(w, r, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.bounded(w, r, mux.ServeHTTP) }))
 	})
 }
+
+// NativeHandlerForTest marks OAuth requests as native in isolated tests. Normal
+// startup installs the issuer from the required persistent signing Secret.
+func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
+	if len(secret) != 32 {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "native fixture unavailable", http.StatusServiceUnavailable)
+		})
+	}
+	if err := s.EnableNativeOAuth(secret); err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "native fixture unavailable", http.StatusServiceUnavailable)
+		})
+	}
+	base := s.Handler()
+	return base
+}
+
+// EnableNativeOAuth installs the Fosite-only issuer after startup verifies the
+// signing key against the completed durable reset state.
+func (s *Server) EnableNativeOAuth(secret []byte) error {
+	if len(secret) != 32 {
+		return errors.New("native OAuth signing key must contain 32 bytes")
+	}
+	s.nativeIssuer = issuer.NewProvider(secret, issuer.Redirects{
+		issuer.Electron:  "http://127.0.0.1/oauth/callback",
+		issuer.Android:   s.AndroidRedirect,
+		issuer.Extension: s.ExtensionRedirect,
+	}, nil)
+	return nil
+}
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.loginFlow(w, r, nil)
 }
@@ -526,16 +563,16 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 			return
 		}
 	}
-	id, e := uuid()
-	if e != nil {
-		fail(w, 503)
-		return
-	}
 	s.mu.Lock()
 	now := time.Now()
 	for k, f := range s.flows {
-		if now.After(f.expires) {
+		if !now.Before(f.expires) {
 			delete(s.flows, k)
+		}
+	}
+	for k, consent := range s.consents {
+		if !now.Before(consent.expires) {
+			delete(s.consents, k)
 		}
 	}
 	if len(s.flows)+len(s.consents) >= 1024 {
@@ -547,19 +584,9 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 	s.flowSeq++
 	s.flows[state] = flow{state: state, nonce: nonce, binding: binding, expires: now.Add(10 * time.Minute), intent: intent, seq: s.flowSeq, epoch: s.flowEpoch}
 	s.mu.Unlock()
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-	_, e = s.db.Exec(ctx, `INSERT INTO public.authorization_transactions (id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp()+interval '10 minutes')`, id, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "google-nonce", nonce), s.digest(s.CurrentPepper, "browser-binding", binding), s.CurrentPepper)
-	if e != nil {
-		s.mu.Lock()
-		delete(s.flows, state)
-		s.mu.Unlock()
-		fail(w, 503)
-		return
-	}
 	cookie(w, bindingCookie, binding, 600)
-	q := url.Values{"client_id": {s.ClientID}, "redirect_uri": {s.Origin + "/auth/callback"}, "response_type": {"code"}, "scope": {"openid email"}, "state": {state}, "nonce": {nonce}}
-	http.Redirect(w, r, s.provider.AuthorizationURL+"?"+q.Encode(), http.StatusFound)
+	authorizationURL := s.googleOAuth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce))
+	http.Redirect(w, r, authorizationURL, http.StatusFound)
 }
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	state, code := r.URL.Query().Get("state"), r.URL.Query().Get("code")
@@ -582,26 +609,25 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	f, ok := s.flows[state]
-	if ok {
+	if ok && !time.Now().Before(f.expires) {
 		delete(s.flows, state)
+		ok = false
+	}
+	if ok && subtle.ConstantTimeCompare([]byte(bind.Value), []byte(f.binding)) == 1 {
+		delete(s.flows, state)
+	} else {
+		ok = false
 	}
 	s.mu.Unlock()
-	if !ok || time.Now().After(f.expires) || subtle.ConstantTimeCompare([]byte(bind.Value), []byte(f.binding)) != 1 {
+	if !ok {
 		fail(w, 400)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	var claimed string
-	e = s.db.QueryRow(ctx, `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND nonce_digest=$3 AND pepper_version=$4 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING id`, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "browser-binding", bind.Value), s.digest(s.CurrentPepper, "google-nonce", f.nonce), s.CurrentPepper).Scan(&claimed)
-	if e != nil {
-		if e != pgx.ErrNoRows {
-			markDiagnostic(r, "failed", "database_unavailable")
-		}
-		fail(w, 400)
-		return
-	}
-	claims, e := s.exchange(ctx, code, f.nonce)
+	providerCtx, cancelProvider := context.WithTimeout(ctx, 8*time.Second)
+	claims, e := s.exchange(providerCtx, code, f.nonce)
+	cancelProvider()
 	if e != nil {
 		if errors.Is(e, errProviderUnavailable) {
 			markDiagnostic(r, "failed", "provider_unavailable")
@@ -621,13 +647,23 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	defer releaseUnit()
+	unitHeld := true
+	defer func() {
+		if unitHeld {
+			releaseUnit()
+		}
+	}()
 	guard := s.identityGuard(key)
 	if !lockIdentity(ctx, guard) {
 		fail(w, 503)
 		return
 	}
-	defer guard.Unlock()
+	guardHeld := true
+	defer func() {
+		if guardHeld {
+			guard.Unlock()
+		}
+	}()
 	s.mu.Lock()
 	fence := s.fences[key]
 	blocked := f.epoch != s.flowEpoch || (fence.seq >= f.seq && !fence.until.IsZero())
@@ -721,7 +757,11 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	markDiagnostic(r, "success", "none")
 	cookie(w, sessionCookie, credential, 0)
 	if f.intent != nil {
-		s.presentConsent(w, r, accountID, credential, *f.intent)
+		guard.Unlock()
+		guardHeld = false
+		releaseUnit()
+		unitHeld = false
+		s.presentConsent(w, r, accountID, credential, s.CurrentPepper, claims.Subject, *f.intent)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -755,195 +795,75 @@ func (s *Server) exchange(ctx context.Context, code, nonce string) (result ident
 			s.transitions.Dependency("dependency.google_token", classificationErr, ctx, time.Since(started))
 		}
 	}()
-	values := url.Values{"code": {code}, "client_id": {s.ClientID}, "client_secret": {s.ClientSecret}, "grant_type": {"authorization_code"}, "redirect_uri": {s.Origin + "/auth/callback"}}
-	req, e := http.NewRequestWithContext(ctx, "POST", s.provider.TokenURL, strings.NewReader(values.Encode()))
-	if e != nil {
-		return identity{}, e
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, e := s.client.Do(req)
-	if e != nil {
-		return identity{}, errProviderUnavailable
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		if resp.StatusCode < 500 {
-			classificationErr = diagnostic.ErrInvalidResponse
-		}
-		return identity{}, errProviderUnavailable
-	}
-	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
-	if e != nil || len(body) > 256<<10 {
-		classificationErr = diagnostic.ErrInvalidResponse
-		return identity{}, errProviderUnavailable
-	}
-	var token struct {
-		IDToken string `json:"id_token"`
-	}
-	if json.Unmarshal(body, &token) != nil || len(token.IDToken) > 256<<10 {
-		classificationErr = diagnostic.ErrInvalidResponse
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, s.client)
+	providerToken, err := s.googleOAuth.Exchange(ctx, code)
+	if err != nil {
 		return identity{}, errProviderUnavailable
 	}
 	tokenOK = true
-	return s.verify(ctx, token.IDToken, nonce)
+	rawIDToken, ok := providerToken.Extra("id_token").(string)
+	if !ok || len(rawIDToken) == 0 || len(rawIDToken) > providerBodyLimit {
+		classificationErr = diagnostic.ErrInvalidResponse
+		return identity{}, errProviderUnavailable
+	}
+	return s.verify(ctx, rawIDToken, nonce)
 }
 func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error) {
+	if len(raw) == 0 || len(raw) > providerBodyLimit {
+		return identity{}, errors.New("token size")
+	}
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
 		return identity{}, errors.New("token format")
 	}
-	headerBytes, e := base64.RawURLEncoding.DecodeString(parts[0])
-	if e != nil || len(headerBytes) > 4096 {
-		return identity{}, errors.New("token header")
+	header, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || len(header) > 4096 {
+		return identity{}, errors.New("token header size")
 	}
-	var header struct {
-		Algorithm string `json:"alg"`
-		KeyID     string `json:"kid"`
-		Type      string `json:"typ"`
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || len(payload) > 16384 {
+		return identity{}, errors.New("token payload size")
 	}
-	if json.Unmarshal(headerBytes, &header) != nil || header.Algorithm != "RS256" || header.KeyID == "" || len(header.KeyID) > 256 {
-		return identity{}, errors.New("token header")
+
+	verified, err := s.googleVerifier.Verify(oidc.ClientContext(ctx, s.client), raw)
+	if err != nil {
+		return identity{}, errors.New("token verification failed")
 	}
-	key, e := s.key(ctx, header.KeyID)
-	if e != nil {
-		return identity{}, e
+	var claims struct {
+		Issuer        string          `json:"iss"`
+		Subject       string          `json:"sub"`
+		Audience      json.RawMessage `json:"aud"`
+		Email         string          `json:"email"`
+		EmailVerified bool            `json:"email_verified"`
+		HostedDomain  *string         `json:"hd"`
+		Nonce         string          `json:"nonce"`
+		IssuedAt      int64           `json:"iat"`
 	}
-	signature, e := base64.RawURLEncoding.DecodeString(parts[2])
-	if e != nil {
-		return identity{}, e
+	if err := verified.Claims(&claims); err != nil {
+		return identity{}, errors.New("token claims invalid")
 	}
-	hash := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if rsa.VerifyPKCS1v15(key, crypto.SHA256, hash[:], signature) != nil {
-		return identity{}, errors.New("token signature")
+	var audience string
+	if len(claims.Audience) == 0 || claims.Audience[0] != '"' || json.Unmarshal(claims.Audience, &audience) != nil || audience != s.ClientID {
+		return identity{}, errors.New("token audience invalid")
 	}
-	payload, e := base64.RawURLEncoding.DecodeString(parts[1])
-	if e != nil || len(payload) > 16384 {
-		return identity{}, errors.New("token payload")
-	}
-	var c identity
-	if json.Unmarshal(payload, &c) != nil {
-		return identity{}, errors.New("token claims")
-	}
-	if c.Issuer != "accounts.google.com" && c.Issuer != googleIssuer {
-		return identity{}, errors.New("issuer")
-	}
-	if c.Audience != s.ClientID || c.Nonce != nonce || c.Expiry <= time.Now().Unix() || c.IssuedAt > time.Now().Add(time.Minute).Unix() || c.Subject == "" || len(c.Subject) > 255 || c.Email == "" || len(c.Email) > 320 {
-		return identity{}, errors.New("claims")
-	}
-	return c, nil
-}
-func (s *Server) key(ctx context.Context, kid string) (result *rsa.PublicKey, resultErr error) {
-	s.keyMu.Lock()
-	defer s.keyMu.Unlock()
 	now := time.Now()
-	if now.Before(s.keysUntil) {
-		if k := s.keys[kid]; k != nil {
-			return k, nil
-		}
+	if claims.Issuer != "accounts.google.com" && claims.Issuer != googleIssuer {
+		return identity{}, errors.New("token issuer invalid")
 	}
-	if s.keys[kid] == nil && len(s.keys) > 0 && now.Sub(s.lastKeyFetch) < time.Minute {
-		return nil, errors.New("key unavailable")
+	if verified.Expiry.Unix() <= now.Unix() || time.Unix(claims.IssuedAt, 0).After(now.Add(time.Minute)) || claims.Nonce != nonce || claims.Subject == "" || len(claims.Subject) > 255 || claims.Email == "" || len(claims.Email) > 320 {
+		return identity{}, errors.New("token claims invalid")
 	}
-	started := time.Now()
-	var classificationErr error
-	var validResponse bool
-	defer func() {
-		if classificationErr == nil && !validResponse {
-			classificationErr = resultErr
-		}
-		s.transitions.Dependency("dependency.google_jwks", classificationErr, ctx, time.Since(started))
-	}()
-	req, e := http.NewRequestWithContext(ctx, "GET", s.provider.KeysURL, nil)
-	if e != nil {
-		return nil, e
-	}
-	resp, e := s.client.Do(req)
-	s.lastKeyFetch = now
-	if e != nil {
-		return nil, errProviderUnavailable
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		if resp.StatusCode < 500 {
-			classificationErr = diagnostic.ErrInvalidResponse
-		}
-		return nil, errProviderUnavailable
-	}
-	body, e := io.ReadAll(io.LimitReader(resp.Body, 256<<10+1))
-	if e != nil || len(body) > 256<<10 {
-		classificationErr = diagnostic.ErrInvalidResponse
-		return nil, errProviderUnavailable
-	}
-	var jwks struct {
-		Keys []struct {
-			Type      string `json:"kty"`
-			Algorithm string `json:"alg"`
-			Use       string `json:"use"`
-			Kid       string `json:"kid"`
-			N         string `json:"n"`
-			E         string `json:"e"`
-		} `json:"keys"`
-	}
-	if json.Unmarshal(body, &jwks) != nil || len(jwks.Keys) > 32 {
-		classificationErr = diagnostic.ErrInvalidResponse
-		return nil, errors.New("keys invalid")
-	}
-	keys := map[string]*rsa.PublicKey{}
-	for _, j := range jwks.Keys {
-		if j.Type != "RSA" || j.Algorithm != "RS256" || j.Use != "sig" || j.Kid == "" || len(j.Kid) > 256 {
-			continue
-		}
-		nb, ne := base64.RawURLEncoding.DecodeString(j.N)
-		eb, ee := base64.RawURLEncoding.DecodeString(j.E)
-		if ne != nil || ee != nil || len(nb) > 512 || len(eb) > 4 {
-			continue
-		}
-		ex := new(big.Int).SetBytes(eb).Int64()
-		if ex < 3 || ex > 1<<31-1 {
-			continue
-		}
-		keys[j.Kid] = &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(ex)}
-	}
-	if len(keys) == 0 {
-		classificationErr = diagnostic.ErrInvalidResponse
-		return nil, errors.New("keys empty")
-	}
-	age := time.Duration(0)
-	noStore := false
-	for _, directive := range strings.Split(resp.Header.Get("Cache-Control"), ",") {
-		directive = strings.TrimSpace(directive)
-		if directive == "no-store" || directive == "no-cache" {
-			noStore = true
-		}
-		if strings.HasPrefix(directive, "max-age=") {
-			seconds, e := strconv.ParseInt(strings.TrimPrefix(directive, "max-age="), 10, 64)
-			if e == nil && seconds >= 0 && seconds <= 21600 {
-				age = time.Duration(seconds) * time.Second
-			} else if e == nil && seconds > 21600 {
-				age = 6 * time.Hour
-			}
-		}
-	}
-	if ageSeconds, e := strconv.ParseInt(resp.Header.Get("Age"), 10, 64); e == nil && ageSeconds > 0 {
-		if ageSeconds > 21600 {
-			age = 0
-		} else {
-			age -= time.Duration(ageSeconds) * time.Second
-		}
-	}
-	if noStore || age < 0 {
-		age = 0
-	}
-	if age > 6*time.Hour {
-		age = 6 * time.Hour
-	}
-	validResponse = true
-	s.keys = keys
-	s.keysUntil = now.Add(age)
-	if k := keys[kid]; k != nil && age > 0 {
-		return k, nil
-	}
-	return nil, errors.New("key unavailable")
+	return identity{
+		Issuer:        googleIssuer,
+		Subject:       claims.Subject,
+		Email:         claims.Email,
+		EmailVerified: claims.EmailVerified,
+		HostedDomain:  claims.HostedDomain,
+		Audience:      audience,
+		Nonce:         claims.Nonce,
+		Expiry:        verified.Expiry.Unix(),
+		IssuedAt:      claims.IssuedAt,
+	}, nil
 }
 func (s *Server) session(r *http.Request) (string, uint64, string, string, string, error) {
 	c, e := r.Cookie(sessionCookie)

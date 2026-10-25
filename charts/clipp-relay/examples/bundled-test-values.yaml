@@ -1,6 +1,6 @@
 deployment:
   phase: stopped
-  expectedSchema: 13
+  expectedSchema: 16
 image:
   repository: registry.example.test/clipp-relay
   digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -47,6 +47,7 @@ credentials:
   googleSecret: clipp-google-v1
   adminSecret: clipp-admin-v1
   pepperSecret: clipp-peppers-v1
+  nativeSigningKeySecret: clipp-native-oauth-v1
   journalSecret: clipp-journal-v1
 journal:
   region: us-ashburn-1

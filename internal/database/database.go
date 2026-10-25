@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 13
+const ExpectedRevision = 16
 
 type migration struct {
 	revision int
@@ -279,7 +279,70 @@ CREATE TABLE public.recovery_runs (
 );
 REVOKE ALL ON public.recovery_runs FROM PUBLIC;`}, {13, `DROP TABLE public.weekly_quota_usage;
 DELETE FROM public.retained_quota_usage;
-ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}}
+ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}, {14, `DROP TABLE public.authorization_transactions;`}, {15, `CREATE TABLE public.native_authorization_codes (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ credential_generation bigint NOT NULL,
+ client_type text NOT NULL CHECK (client_type IN ('electron','android','extension')),
+ redirect_uri text NOT NULL CHECK (length(redirect_uri) BETWEEN 1 AND 512),
+ code_challenge text NOT NULL CHECK (length(code_challenge)=43),
+ grant_id uuid NOT NULL UNIQUE,
+ issued_at timestamptz NOT NULL,
+ expires_at timestamptz NOT NULL,
+ consumed_at timestamptz
+);
+CREATE INDEX native_authorization_codes_expiry ON public.native_authorization_codes(expires_at);
+CREATE TABLE public.native_login_grants (
+ id uuid PRIMARY KEY,
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ credential_generation bigint NOT NULL,
+ client_type text NOT NULL CHECK (client_type IN ('electron','android','extension')),
+ current_refresh_generation bigint NOT NULL DEFAULT 1 CHECK (current_refresh_generation>0),
+ created_at timestamptz NOT NULL,
+ last_used_at timestamptz NOT NULL,
+ idle_expires_at timestamptz NOT NULL,
+ absolute_expires_at timestamptz NOT NULL,
+ terminated_at timestamptz
+);
+CREATE INDEX native_login_grants_account ON public.native_login_grants(account_id);
+CREATE TABLE public.native_refresh_generations (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ grant_id uuid NOT NULL REFERENCES public.native_login_grants(id),
+ generation bigint NOT NULL CHECK (generation>0),
+ issued_at timestamptz NOT NULL,
+ consumed_at timestamptz,
+ UNIQUE(grant_id,generation)
+);
+CREATE UNIQUE INDEX native_refresh_generations_one_current ON public.native_refresh_generations(grant_id) WHERE consumed_at IS NULL;
+CREATE INDEX native_refresh_generations_grant ON public.native_refresh_generations(grant_id);
+CREATE TABLE public.native_access_tokens (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ grant_id uuid NOT NULL REFERENCES public.native_login_grants(id),
+ issued_at timestamptz NOT NULL,
+ expires_at timestamptz NOT NULL
+);
+CREATE INDEX native_access_tokens_grant ON public.native_access_tokens(grant_id);
+CREATE INDEX native_access_tokens_expiry ON public.native_access_tokens(expires_at);
+REVOKE ALL ON public.native_authorization_codes, public.native_login_grants, public.native_refresh_generations, public.native_access_tokens FROM PUBLIC;`}, {16, `DELETE FROM public.relay_access_tokens;
+DELETE FROM public.refresh_generations;
+DELETE FROM public.authorization_codes;
+DELETE FROM public.login_grants;
+DELETE FROM public.native_access_tokens;
+DELETE FROM public.native_refresh_generations;
+DELETE FROM public.native_authorization_codes;
+DELETE FROM public.native_login_grants;
+CREATE TABLE public.oauth_issuer_state (
+ singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+ key_id bytea NOT NULL CHECK (octet_length(key_id)=32),
+ reset_completed_at timestamptz NOT NULL
+);
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_event_check;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted','pending_expired','credential_reset'));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted','pending_expired') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL) OR event='credential_reset');
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked','account_deleted','pending_expired','credential_reset') OR (reason IS NOT NULL AND actor_email IS NOT NULL));
+REVOKE ALL ON public.oauth_issuer_state FROM PUBLIC;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
