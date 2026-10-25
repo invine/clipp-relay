@@ -38,13 +38,29 @@ type blockingEligibility struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+	mu      sync.Mutex
+	armed   bool
+}
+
+func (c *blockingEligibility) arm() {
+	c.mu.Lock()
+	c.armed = true
+	c.mu.Unlock()
 }
 
 func (c *blockingEligibility) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
-	c.once.Do(func() {
-		close(c.entered)
-		<-c.release
-	})
+	c.mu.Lock()
+	armed := c.armed
+	if armed {
+		c.armed = false
+	}
+	c.mu.Unlock()
+	if armed {
+		c.once.Do(func() {
+			close(c.entered)
+			<-c.release
+		})
+	}
 	return quota.AccountingEligibility{}, nil
 }
 
@@ -203,6 +219,94 @@ func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 	}
 }
 
+type attemptAuthority struct{ unitCalls chan struct{} }
+
+func (a *attemptAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
+	select {
+	case a.unitCalls <- struct{}{}:
+	default:
+	}
+	work(ctx)
+	return true
+}
+func (*attemptAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
+	work(ctx)
+	return true
+}
+func (*attemptAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {
+	lifetime := 5 * time.Minute
+	switch token {
+	case "older":
+		lifetime = 2 * time.Minute
+	case "newer":
+		lifetime = 8 * time.Minute
+	}
+	return auth.RelayCredential{AccountID: "a", SessionLimit: 2, ExpiresAt: time.Now().Add(lifetime)}, nil
+}
+
+func TestOlderAuthenticationCannotRetireOrOverwriteNewerAttempt(t *testing.T) {
+	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
+	authority := &attemptAuthority{unitCalls: make(chan struct{}, 8)}
+	s, err := New(authority, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "initial"); !strings.Contains(response, `"ok":true`) {
+		t.Fatal(response)
+	}
+	<-authority.unitCalls
+	// Let the per-connection authentication limiter replenish before starting
+	// the two controlled renewals. The barriers below, not this interval, order them.
+	time.Sleep(time.Second)
+	accounting.arm()
+	older := make(chan string, 1)
+	go func() { response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "older"); older <- response }()
+	select {
+	case <-accounting.entered:
+	case <-ctx.Done():
+		t.Fatal("older attempt did not reach quota assessment")
+	}
+	<-authority.unitCalls
+	newer := make(chan string, 1)
+	go func() { response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "newer"); newer <- response }()
+	select {
+	case <-authority.unitCalls:
+	case <-ctx.Done():
+		t.Fatal("newer attempt did not reach the serving interface")
+	}
+	close(accounting.release)
+	select {
+	case response := <-older:
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("superseded older attempt response: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("older attempt did not finish after quota release")
+	}
+	select {
+	case response := <-newer:
+		if !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("newer attempt was retired or overwritten: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("newer attempt did not finish")
+	}
+	if got := s.AccountSessions("a"); got != 1 {
+		t.Fatalf("session count after newer completion=%d, want 1", got)
+	}
+}
+
 func TestDisconnectedConnectionCannotAuthenticateAfterQuotaCompletes(t *testing.T) {
 	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
 	s, err := New(wireAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
@@ -221,6 +325,7 @@ func TestDisconnectedConnectionCannotAuthenticateAfterQuotaCompletes(t *testing.
 	if err = h.Connect(ctx, ai); err != nil {
 		t.Fatal(err)
 	}
+	accounting.arm()
 	result := make(chan string, 1)
 	go func() {
 		response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "authorized")
