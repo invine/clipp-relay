@@ -214,7 +214,7 @@ func TestJWKSDependencyInvalidResponseAndRecovery(t *testing.T) {
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
 	s := newTestServer(t, db.Pool, c, m, endpoints)
-	s.SetTransitions(diagnostic.NewTransitions(logger.Emit))
+	s.SetDiagnostics(logger)
 	state, binding := start(t, s, nil)
 	if out := complete(s, state, binding); out.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid JWKS status %d", out.Code)
@@ -225,9 +225,31 @@ func TestJWKSDependencyInvalidResponseAndRecovery(t *testing.T) {
 		t.Fatalf("recovered JWKS status %d", out.Code)
 	}
 	logger.Close()
-	rows := output.String()
-	if strings.Contains(rows, "JWKS_BODY_CANARY") || !strings.Contains(rows, `"event":"dependency.google_jwks"`) || !strings.Contains(rows, `"reason":"invalid_response"`) || !strings.Contains(rows, `"outcome":"recovered"`) {
-		t.Fatalf("JWKS rows: %s", rows)
+	rows := strings.TrimSpace(output.String())
+	if strings.Contains(rows, "JWKS_BODY_CANARY") {
+		t.Fatalf("provider response leaked into diagnostics: %s", rows)
+	}
+	var refused, recovered bool
+	for _, line := range strings.Split(rows, "\n") {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		if row["event"] == "dependency.google_jwks" {
+			t.Fatalf("stock RemoteKeySet emitted custom JWKS transition: %v", row)
+		}
+		if row["event"] != "portal.login" {
+			continue
+		}
+		if row["outcome"] == "refused" && row["reason"] == "verification_failed" && row["level"] == "INFO" {
+			refused = true
+		}
+		if row["outcome"] == "success" && row["reason"] == "none" && row["level"] == "INFO" {
+			recovered = true
+		}
+	}
+	if !refused || !recovered {
+		t.Fatalf("missing safe callback refusal/recovery diagnostics (refused=%t recovered=%t): %s", refused, recovered, rows)
 	}
 }
 
