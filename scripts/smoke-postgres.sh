@@ -135,6 +135,8 @@ go build -o "$work/clipp-relay" ./cmd/clipp-relay
 migrate_when_ready "$work/migration.json"
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_relay_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE ON public.native_authorization_codes, public.native_login_grants, public.native_refresh_generations TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, DELETE ON public.native_access_tokens TO clipp_serving' >/dev/null
 python3 - "$work/serving.json" "$work/missing-journal.json" "$work/wrong-journal.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as source: config=json.load(source)
@@ -218,6 +220,8 @@ docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postg
 CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/database
 echo 'PostgreSQL 18 integration tests passed'
 docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_relay_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE ON public.native_authorization_codes, public.native_login_grants, public.native_refresh_generations TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, DELETE ON public.native_access_tokens TO clipp_serving' >/dev/null
 if [[ "${CLIPP_FAULT_RACE_ONLY:-0}" != 1 ]]; then
   CLIPP_TEST_MIGRATION_CONFIG="$work/migration.json" CLIPP_TEST_SERVING_CONFIG="$work/serving.json" go test -count=1 ./internal/auth
   echo 'PostgreSQL 18 OIDC browser integration tests passed'
@@ -244,6 +248,8 @@ sed "s/\"port\":$port/\"port\":$supported_port/" "$work/serving.json" > "$work/s
 migrate_when_ready "$work/migration17.json"
 docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT ON public.schema_migrations TO clipp_serving' >/dev/null
 docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON public.accounts, public.portal_sessions, public.audit_events, public.quota_plans, public.authorization_codes, public.login_grants, public.refresh_generations, public.relay_access_tokens, public.weekly_relay_usage, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.cleanup_breach_record TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, UPDATE ON public.native_authorization_codes, public.native_login_grants, public.native_refresh_generations TO clipp_serving' >/dev/null
+docker exec -e PGPASSWORD="$admin_pass" "$supported_name" psql -v ON_ERROR_STOP=1 -U postgres -d clipp_ticket02_smoke -c 'GRANT SELECT, INSERT, DELETE ON public.native_access_tokens TO clipp_serving' >/dev/null
 env HTTPS_PROXY="http://127.0.0.1:$journal_proxy_port" SSL_CERT_FILE="$work/ca.crt" NO_PROXY=localhost,127.0.0.1 "$work/clipp-relay" -command serve -config "$work/serving17.json" > "$work/service17.log" 2>&1 &
 pid=$!
 for i in $(seq 1 30); do

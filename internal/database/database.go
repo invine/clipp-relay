@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 14
+const ExpectedRevision = 15
 
 type migration struct {
 	revision int
@@ -279,7 +279,51 @@ CREATE TABLE public.recovery_runs (
 );
 REVOKE ALL ON public.recovery_runs FROM PUBLIC;`}, {13, `DROP TABLE public.weekly_quota_usage;
 DELETE FROM public.retained_quota_usage;
-ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}, {14, `DROP TABLE public.authorization_transactions;`}}
+ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}, {14, `DROP TABLE public.authorization_transactions;`}, {15, `CREATE TABLE public.native_authorization_codes (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ credential_generation bigint NOT NULL,
+ client_type text NOT NULL CHECK (client_type IN ('electron','android','extension')),
+ redirect_uri text NOT NULL CHECK (length(redirect_uri) BETWEEN 1 AND 512),
+ code_challenge text NOT NULL CHECK (length(code_challenge)=43),
+ grant_id uuid NOT NULL UNIQUE,
+ issued_at timestamptz NOT NULL,
+ expires_at timestamptz NOT NULL,
+ consumed_at timestamptz
+);
+CREATE INDEX native_authorization_codes_expiry ON public.native_authorization_codes(expires_at);
+CREATE TABLE public.native_login_grants (
+ id uuid PRIMARY KEY,
+ account_id uuid NOT NULL REFERENCES public.accounts(id),
+ credential_generation bigint NOT NULL,
+ client_type text NOT NULL CHECK (client_type IN ('electron','android','extension')),
+ current_refresh_generation bigint NOT NULL DEFAULT 1 CHECK (current_refresh_generation>0),
+ created_at timestamptz NOT NULL,
+ last_used_at timestamptz NOT NULL,
+ idle_expires_at timestamptz NOT NULL,
+ absolute_expires_at timestamptz NOT NULL,
+ terminated_at timestamptz
+);
+CREATE INDEX native_login_grants_account ON public.native_login_grants(account_id);
+CREATE TABLE public.native_refresh_generations (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ grant_id uuid NOT NULL REFERENCES public.native_login_grants(id),
+ generation bigint NOT NULL CHECK (generation>0),
+ issued_at timestamptz NOT NULL,
+ consumed_at timestamptz,
+ UNIQUE(grant_id,generation)
+);
+CREATE UNIQUE INDEX native_refresh_generations_one_current ON public.native_refresh_generations(grant_id) WHERE consumed_at IS NULL;
+CREATE INDEX native_refresh_generations_grant ON public.native_refresh_generations(grant_id);
+CREATE TABLE public.native_access_tokens (
+ credential_digest bytea PRIMARY KEY CHECK (octet_length(credential_digest)=32),
+ grant_id uuid NOT NULL REFERENCES public.native_login_grants(id),
+ issued_at timestamptz NOT NULL,
+ expires_at timestamptz NOT NULL
+);
+CREATE INDEX native_access_tokens_grant ON public.native_access_tokens(grant_id);
+CREATE INDEX native_access_tokens_expiry ON public.native_access_tokens(expires_at);
+REVOKE ALL ON public.native_authorization_codes, public.native_login_grants, public.native_refresh_generations, public.native_access_tokens FROM PUBLIC;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

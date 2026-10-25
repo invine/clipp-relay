@@ -9,14 +9,24 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"clipp-relay/internal/auth/issuer"
 	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
+	"github.com/ory/fosite"
 )
+
+type nativeOAuthContextKey struct{}
+
+func isNativeOAuth(r *http.Request) bool {
+	enabled, _ := r.Context().Value(nativeOAuthContextKey{}).(bool)
+	return enabled
+}
 
 func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
 	if s.commitCredential != nil {
@@ -27,13 +37,14 @@ func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
 
 type oauthIntent struct{ client, redirect, state, challenge string }
 type oauthConsent struct {
-	intent     oauthIntent
-	account    string
-	generation int64
-	binding    []byte
-	version    uint64
-	expires    time.Time
-	epoch      uint64
+	intent           oauthIntent
+	authorizeRequest fosite.AuthorizeRequester
+	account          string
+	generation       int64
+	binding          []byte
+	version          uint64
+	expires          time.Time
+	epoch            uint64
 }
 
 // Registered redirects are exact deployment inputs. Only Electron's loopback port varies.
@@ -110,6 +121,12 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
+	if isNativeOAuth(r) {
+		if _, err := s.nativeAuthorizeRequest(r.Context(), oauthIntent{client, redirect, state, challenge}); err != nil {
+			s.oauthError(w, 400)
+			return
+		}
+	}
 	markClient(r, client)
 	account, version, _, _, _, e := s.session(r)
 	if e != nil {
@@ -128,6 +145,15 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	cookie, _ := r.Cookie(sessionCookie)
 	s.presentConsent(w, r, account, cookie.Value, version, subject, oauthIntent{client, redirect, state, challenge})
 }
+
+func (s *Server) nativeAuthorizeRequest(ctx context.Context, intent oauthIntent) (fosite.AuthorizeRequester, error) {
+	if s.nativeIssuer == nil {
+		return nil, errors.New("native issuer is not enabled in this fixture")
+	}
+	q := url.Values{"response_type": {"code"}, "client_id": {intent.client}, "redirect_uri": {intent.redirect}, "code_challenge_method": {"S256"}, "code_challenge": {intent.challenge}, "state": {intent.state}}
+	r := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil).WithContext(ctx)
+	return s.nativeIssuer.NewAuthorizeRequest(ctx, r)
+}
 func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthIntent) {
 	target, _ := url.Parse(intent.redirect)
 	params := target.Query()
@@ -138,6 +164,22 @@ func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthInten
 }
 
 func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, version uint64, subject string, intent oauthIntent) {
+	var authorizeRequest fosite.AuthorizeRequester
+	var grantID string
+	if isNativeOAuth(r) {
+		var err error
+		authorizeRequest, err = s.nativeAuthorizeRequest(r.Context(), intent)
+		if err != nil {
+			s.oauthError(w, 400)
+			return
+		}
+		grantID, err = uuid()
+		if err != nil {
+			s.oauthError(w, 503)
+			return
+		}
+		authorizeRequest.SetID(grantID)
+	}
 	id, e := opaque()
 	if e != nil {
 		s.oauthError(w, 503)
@@ -237,7 +279,10 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		s.oauthError(w, 503)
 		return
 	}
-	s.consents[id] = oauthConsent{intent: intent, account: account, generation: generation, binding: binding, version: version, expires: now.Add(10 * time.Minute), epoch: s.flowEpoch}
+	if authorizeRequest != nil {
+		authorizeRequest.SetSession(issuer.NewSession(issuer.Principal{AccountID: account, Generation: generation, Client: issuer.ClientType(intent.client), GrantID: grantID}))
+	}
+	s.consents[id] = oauthConsent{intent: intent, authorizeRequest: authorizeRequest, account: account, generation: generation, binding: binding, version: version, expires: now.Add(10 * time.Minute), epoch: s.flowEpoch}
 	s.mu.Unlock()
 	guard.Unlock()
 	guardHeld = false
@@ -317,6 +362,10 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
+	if consent.authorizeRequest != nil && isNativeOAuth(r) {
+		s.issueNativeCode(w, r, consent.authorizeRequest, account, consent.generation, consent.intent)
+		return
+	}
 	s.issueCode(w, r, account, consent.generation, consent.intent)
 }
 func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, account string, expectedGeneration int64, intent oauthIntent) {
@@ -375,6 +424,65 @@ func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, account strin
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
+func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, authorize fosite.AuthorizeRequester, account string, expectedGeneration int64, intent oauthIntent) {
+	unitCtx := r.Context()
+	var err error
+	var subject string
+	if err = s.Pool.QueryRow(unitCtx, `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); err != nil {
+		s.oauthError(w, 401)
+		return
+	}
+	tx, err := s.db.Begin(unitCtx)
+	if err != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	defer tx.Rollback(unitCtx)
+	var status string
+	var generation int64
+	if err = tx.QueryRow(unitCtx, `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); err != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	if generation != expectedGeneration {
+		s.oauthError(w, 401)
+		return
+	}
+	if status != "Active" {
+		if s.auditCredential(unitCtx, tx, "credential_blocked", account, intent.client) != nil || s.commitCredentialTx(unitCtx, tx) != nil {
+			s.oauthError(w, 503)
+			return
+		}
+		denyAuthorization(w, r, intent)
+		return
+	}
+	ctx := issuer.InTransaction(unitCtx, tx, issuer.ClientType(intent.client), "")
+	response, err := s.nativeIssuer.NewAuthorizeResponse(ctx, authorize, authorize.GetSession())
+	if err != nil {
+		s.oauthError(w, 400)
+		return
+	}
+	if err = s.commitCredentialTx(unitCtx, tx); err != nil {
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
+		s.oauthError(w, 503)
+		return
+	}
+	target, err := url.Parse(intent.redirect)
+	if err != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	query := target.Query()
+	for key, values := range response.GetParameters() {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+	target.RawQuery = query.Encode()
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
@@ -409,6 +517,10 @@ func writeTokens(w http.ResponseWriter, access, refresh string) {
 	_ = json.NewEncoder(w).Encode(tokenResponse{access, "Bearer", 900, refresh})
 }
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
+	if isNativeOAuth(r) {
+		s.nativeToken(w, r)
+		return
+	}
 	if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.Header.Get("Content-Encoding") != "" || r.URL.RawQuery != "" {
 		s.oauthError(w, 400)
 		return
@@ -696,6 +808,9 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, client string) 
 
 // AuthenticateAccess authorizes only local Discovery and Relay Authentication.
 func (s *Server) AuthenticateAccess(ctx context.Context, raw string) (string, time.Time, error) {
+	if s.nativeIssuer != nil {
+		return s.authenticateNativeAccess(ctx, raw)
+	}
 	if len(raw) != 43 {
 		return "", time.Time{}, errInvalidSession
 	}
