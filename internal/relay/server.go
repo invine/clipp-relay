@@ -90,7 +90,10 @@ type session struct {
 // sessionManager owns the physical connection lifecycle and the indexes that
 // represent authenticated Relay Sessions. The protocol server supplies the
 // authority, accounting and diagnostic collaborators used by lifecycle work.
-type authAttempt struct{ identity byte }
+type authAttempt struct {
+	identity byte
+	cancel   context.CancelFunc
+}
 
 type sessionManager struct {
 	server *Server
@@ -694,7 +697,9 @@ func (s *Server) authenticateObserved(ctx context.Context, c network.Conn, raw s
 func (m *sessionManager) authenticateObserved(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, string) {
 	s := m.server
 	reason := ""
-	attempt := &authAttempt{}
+	attemptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	attempt := &authAttempt{cancel: cancel}
 
 	s.mu.Lock()
 	if s.closing {
@@ -727,7 +732,7 @@ func (m *sessionManager) authenticateObserved(ctx context.Context, c network.Con
 	admit := func(unitCtx context.Context) {
 		deadline, renew, code, oldToClose, installed = s.sessionManager.authenticateSerial(unitCtx, c, raw, &reason, attempt)
 	}
-	unitOK := s.authority.WithServingUnit(ctx, admit)
+	unitOK := s.authority.WithServingUnit(attemptCtx, admit)
 	s.mu.Lock()
 	if s.authAttempts[c] == attempt {
 		delete(s.authAttempts, c)
@@ -751,6 +756,39 @@ func (m *sessionManager) authenticateObserved(ctx context.Context, c network.Con
 		return time.Time{}, 0, "temporarily_unavailable", admissionFailure(ctx)
 	}
 	return deadline, renew, code, reason
+}
+
+// InvalidateGrant processes a committed grant revocation. Pending authentication
+// attempts are conservatively retired because their grant association may not
+// have arrived yet; established sessions are removed only when they use grantID.
+// The manager lock serializes this transition with applying authentication.
+func (s *Server) InvalidateGrant(grantID string) error {
+	if grantID == "" {
+		return errors.New("grant ID is required")
+	}
+	s.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.authAttempts))
+	for conn, attempt := range s.authAttempts {
+		delete(s.authAttempts, conn)
+		if attempt.cancel != nil {
+			cancels = append(cancels, attempt.cancel)
+		}
+	}
+	connections := make([]network.Conn, 0)
+	for _, session := range s.byConn {
+		if session.grantID == grantID {
+			s.endSessionLocked(session, "grant_revoked")
+			connections = append(connections, session.conn)
+		}
+	}
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	return nil
 }
 
 func admissionFailure(ctx context.Context) string {

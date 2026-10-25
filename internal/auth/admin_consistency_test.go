@@ -52,6 +52,7 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 		t.Fatal(err)
 	}
 	s.SetAccountChangedForTest(func(AccountChange) func() { return nil })
+	s.SetGrantRevokedForTest(func(string) error { return nil })
 	id, err := uuid()
 	if err != nil {
 		t.Fatal(err)

@@ -939,6 +939,10 @@
           "database_unavailable"
         ],
         [
+          "failed",
+          "invalidation_incomplete"
+        ],
+        [
           "uncertain",
           "commit_unconfirmed"
         ]

@@ -39,6 +39,7 @@ func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.M
 		}
 	}
 	s.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
+	s.SetGrantRevokedForTest(func(string) error { return nil })
 	return s
 }
 

@@ -3,9 +3,11 @@ package auth_test
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
+	"github.com/jackc/pgx/v5"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -103,13 +106,17 @@ func protectedClient(t *testing.T, p protectedPortal, options ...libp2p.Option) 
 }
 
 func protectedAuthenticate(ctx context.Context, h host.Host, p protectedPortal) (string, error) {
+	return protectedAuthenticateToken(ctx, h, p, p.access)
+}
+
+func protectedAuthenticateToken(ctx context.Context, h host.Host, p protectedPortal, token string) (string, error) {
 	st, err := h.NewStream(ctx, p.relay.Host.ID(), relay.AuthProtocol)
 	if err != nil {
 		return "", err
 	}
 	defer st.Close()
 	_ = st.SetDeadline(time.Now().Add(5 * time.Second))
-	body := []byte(fmt.Sprintf(`{"accessToken":%q}`, p.access))
+	body := []byte(fmt.Sprintf(`{"accessToken":%q}`, token))
 	var header [10]byte
 	n := binary.PutUvarint(header[:], uint64(len(body)))
 	if _, err = st.Write(append(header[:n], body...)); err != nil {
@@ -128,6 +135,113 @@ func protectedAuthenticate(ctx context.Context, h host.Host, p protectedPortal) 
 	response := make([]byte, size)
 	_, err = io.ReadFull(st, response)
 	return string(response), err
+}
+
+func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
+	p := protectedPortalFixture(t)
+	accessA, refreshA := redeemClient(t, p.auth, "android", p.config.PublicClients.AndroidRedirect, authorizeClient(t, p.auth, p.owner, "android", p.config.PublicClients.AndroidRedirect))
+	accessB, _ := redeemClient(t, p.auth, "android", p.config.PublicClients.AndroidRedirect, authorizeClient(t, p.auth, p.owner, "android", p.config.PublicClients.AndroidRedirect))
+	credentialA, err := p.auth.AuthenticateRelay(context.Background(), accessA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	initial, err := p.quota.Eligibility(ctx, p.account, credentialA.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.quota.Settle(ctx, quota.Settlement{AccountID: p.account, WeekStart: initial.WeekStart, Sequence: 1, DeltaBytes: 123, OperationID: "5f29fe63-8676-49e0-b918-f792896323f0"}); err != nil {
+		t.Fatalf("seed recorded usage: %v", err)
+	}
+	if err = p.quota.Observe(p.account, 55); err != nil {
+		t.Fatalf("seed pending usage: %v", err)
+	}
+	usageBefore, err := p.quota.Eligibility(ctx, p.account, credentialA.Generation)
+	if err != nil || usageBefore.RecordedBytes != 123 || usageBefore.EffectiveBytes != 178 {
+		t.Fatalf("seed quota usage=%+v err=%v", usageBefore, err)
+	}
+	grantA, grantB := p, p
+	grantA.access, grantB.access = accessA, accessB
+	clientA, clientB := protectedClient(t, p), protectedClient(t, p)
+	requireProtectedAuthentication(t, clientA, grantA, `"ok":true`)
+	requireProtectedAuthentication(t, clientB, grantB, `"ok":true`)
+	if got := p.relay.AccountSessions(p.account); got != 2 {
+		t.Fatalf("sessions before replay=%d, want 2", got)
+	}
+	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refreshA}}
+	if rotated := nativeTokenPost(t, p.auth.Handler(), form); rotated.Code != http.StatusOK {
+		t.Fatalf("ordinary refresh status=%d %s", rotated.Code, rotated.Body.String())
+	}
+	if got := p.relay.AccountSessions(p.account); got != 2 {
+		t.Fatalf("ordinary refresh invalidated a Relay Session: %d", got)
+	}
+	p.auth.SetCredentialCommitHookForTest(func(context.Context, pgx.Tx) error {
+		return errors.New("simulated refresh replay rollback")
+	})
+	rolledBack := nativeTokenPost(t, p.auth.Handler(), form)
+	p.auth.SetCredentialCommitHookForTest(nil)
+	if rolledBack.Code != http.StatusServiceUnavailable {
+		t.Fatalf("confirmed replay rollback status=%d %s", rolledBack.Code, rolledBack.Body.String())
+	}
+	if got := p.relay.AccountSessions(p.account); got != 2 {
+		t.Fatalf("rolled-back replay sessions=%d, want 2", got)
+	}
+	if _, err := p.auth.AuthenticateRelay(context.Background(), accessA); err != nil {
+		t.Fatalf("confirmed rollback revoked its grant: %v", err)
+	}
+	// Simulate a wrapper failure. The composed direct manager retry must still
+	// retire the owning grant before the committed replay returns.
+	p.auth.SetGrantRevokedForTest(func(string) error { return errors.New("simulated notification wrapper failure") })
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	p.auth.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		cancelRequest() // Model request cancellation after the database commit.
+		return errors.New("simulated lost refresh replay commit acknowledgment")
+	})
+	replayRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode())).WithContext(requestCtx)
+	replayRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	replay := httptest.NewRecorder()
+	p.auth.Handler().ServeHTTP(replay, replayRequest)
+	cancelRequest()
+	p.auth.SetCredentialCommitHookForTest(nil)
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("confirmed refresh replay status=%d %s", replay.Code, replay.Body.String())
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(clientA.Network().ConnsToPeer(p.relay.Host.ID())) != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(clientA.Network().ConnsToPeer(p.relay.Host.ID())); got != 0 {
+		t.Fatalf("revoked grant retained %d physical connections", got)
+	}
+	if got := p.relay.AccountSessions(p.account); got != 1 {
+		t.Fatalf("sessions after replay=%d, want unrelated grant's 1", got)
+	}
+	if got := len(clientB.Network().ConnsToPeer(p.relay.Host.ID())); got != 1 {
+		t.Fatalf("unrelated grant retained %d physical connections, want 1", got)
+	}
+	// Duplicate delivery is harmless and cannot disturb the unrelated grant.
+	if err := p.relay.InvalidateGrant(credentialA.GrantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.relay.InvalidateGrant(credentialA.GrantID); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.relay.AccountSessions(p.account); got != 1 || len(clientB.Network().ConnsToPeer(p.relay.Host.ID())) != 1 {
+		t.Fatalf("duplicate grant delivery affected unrelated session: sessions=%d connections=%d", got, len(clientB.Network().ConnsToPeer(p.relay.Host.ID())))
+	}
+	if _, err := p.auth.AuthenticateRelay(context.Background(), accessB); err != nil {
+		t.Fatalf("replay invalidated unrelated grant's access token: %v", err)
+	}
+	if _, err := p.auth.AuthenticateRelay(context.Background(), accessA); err == nil {
+		t.Fatal("replay left the owning grant's access token valid")
+	}
+	usageAfter, err := p.quota.Eligibility(ctx, p.account, credentialA.Generation)
+	if err != nil || usageAfter.RecordedBytes != usageBefore.RecordedBytes || usageAfter.EffectiveBytes != usageBefore.EffectiveBytes || usageAfter.CapBytes != usageBefore.CapBytes {
+		t.Fatalf("grant replay changed account quota: before=%+v after=%+v err=%v", usageBefore, usageAfter, err)
+	}
 }
 
 func requireProtectedAuthentication(t *testing.T, h host.Host, p protectedPortal, want string) {
