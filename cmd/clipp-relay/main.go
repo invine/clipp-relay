@@ -35,13 +35,13 @@ func run() int {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: reason})
 		return 1
 	}
-	command := flag.String("command", "", "migrate, recover or serve")
+	command := flag.String("command", "", "migrate, reset-auth, recover or serve")
 	path := flag.String("config", "", "absolute path to versioned non-secret configuration (accounting_failure_deadline defaults to 3s, minimum 1s; restart to change)")
 	recoveryRun := flag.String("recovery-run", "", "stable UUID identifying one offline recovery")
 	recoverySource := flag.String("recovery-source", "", "immutable source backup identity")
 	recoveryTarget := flag.String("recovery-target", "", "explicit isolated restored database name")
 	flag.Parse()
-	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "recover" && *command != "serve") {
+	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "reset-auth" && *command != "recover" && *command != "serve") {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: "configuration_rejected"})
 		return 2
 	}
@@ -53,6 +53,8 @@ func run() int {
 	var material config.Material
 	if *command == "migrate" {
 		material, err = c.ReadDatabaseMaterial()
+	} else if *command == "reset-auth" {
+		material, err = c.ReadResetMaterial()
 	} else {
 		material, err = c.ReadMaterial()
 	}
@@ -86,8 +88,24 @@ func run() int {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "success", Reason: "none", SchemaRevision: database.ExpectedRevision})
 		return 0
 	}
+	if *command == "reset-auth" {
+		if err = database.VerifySchema(startup, pool); err != nil {
+			return fail("database_unavailable")
+		}
+		if _, err = auth.ResetNativeOAuthCredentials(startup, pool, material.NativeSigningKey); err != nil {
+			return fail("credential_reset_unconfirmed")
+		}
+		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "success", Reason: "none", SchemaRevision: database.ExpectedRevision})
+		return 0
+	}
 	if *command == "serve" {
 		if err = database.VerifyServing(startup, pool); err != nil {
+			return fail("database_unavailable")
+		}
+		if err = auth.VerifyNativeOAuthKey(startup, pool, material.NativeSigningKey); err != nil {
+			if errors.Is(err, auth.ErrNativeIssuerResetRequired) {
+				return fail("credential_reset_required")
+			}
 			return fail("database_unavailable")
 		}
 	}
@@ -120,6 +138,9 @@ func run() int {
 	db := database.NewRuntime(pool)
 	db.SetTransitions(dependencies)
 	portal := auth.NewWithRuntime(db, c, material, auth.Google())
+	if err := portal.EnableNativeOAuth(material.NativeSigningKey); err != nil {
+		return fail("configuration_rejected")
+	}
 	portal.SetDiagnostics(logger)
 	portal.SetTransitions(dependencies)
 	if err := portal.ValidatePepperCoverage(startup); err != nil {

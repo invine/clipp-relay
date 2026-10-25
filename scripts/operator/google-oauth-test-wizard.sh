@@ -304,8 +304,8 @@ load_saved_setup() {
   local names
   names=$(ruby -ryaml -e '
     v = YAML.safe_load(File.read(ARGV.fetch(0)))
-    names = %w[googleSecret adminSecret pepperSecret journalSecret].map { |k| v.fetch("credentials").fetch(k) }
-    abort "application Secret names must differ" unless names.uniq.length == 4
+    names = %w[googleSecret adminSecret pepperSecret nativeSigningKeySecret journalSecret].map { |k| v.fetch("credentials").fetch(k) }
+    abort "application Secret names must differ" unless names.uniq.length == 5
     names.each { |n| abort "invalid Secret name" unless n.match?(/\A[a-z0-9]([-a-z0-9]*[a-z0-9])?\z/) }
     puts names
   ' "$CLIPP_TEST_VALUES_FILE") || die "Could not restore application Secret names."
@@ -474,6 +474,10 @@ with open(sys.argv[1], 'x', encoding='utf-8') as target:
 PY
 fi
 chmod 600 "$pepper_file"
+native_signing_key_file="$TEST_DIR/native-oauth-signing-key"
+if [[ ! -e "$native_signing_key_file" ]]; then (umask 077 && openssl rand -out "$native_signing_key_file" 32) || die "Could not create the isolated test OAuth signing key."; fi
+[[ ! -L "$native_signing_key_file" && "$(wc -c < "$native_signing_key_file" | tr -d ' ')" == 32 ]] || die "The isolated test OAuth signing key must be a regular file containing exactly 32 bytes."
+chmod 600 "$native_signing_key_file"
 write_env CLIPP_TEST_ADMIN_ALLOWLIST_FILE "$allowlist_file"
 write_env CLIPP_TEST_PEPPER_KEYRING_FILE "$pepper_file"
 journal_key_file=$(python3 - "$journal_config_file" <<'PY'
@@ -483,7 +487,7 @@ with open(sys.argv[1], encoding='utf-8') as source:
 PY
 )
 require_file "$journal_key_file"
-say "These four Kubernetes Secret names are labels for new test-only resources. They are not values from Google or OCI. Keep version 1 names unless your operator gives you different unused names."
+say "These five Kubernetes Secret names are labels for new test-only resources. They are not values from Google or OCI. Keep version 1 names unless your operator gives you different unused names."
 ask CLIPP_TEST_GOOGLE_SECRET_NAME "Google Secret name (Enter uses clipp-google-v1):"
 if [[ -z "$CLIPP_TEST_GOOGLE_SECRET_NAME" ]]; then CLIPP_TEST_GOOGLE_SECRET_NAME=clipp-google-v1; fi
 require_match "Google Secret name" "$CLIPP_TEST_GOOGLE_SECRET_NAME" '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
@@ -493,17 +497,21 @@ require_match "admin Secret name" "$CLIPP_TEST_ADMIN_SECRET_NAME" '^[a-z0-9]([-a
 ask CLIPP_TEST_PEPPER_SECRET_NAME "Pepper Secret name (Enter uses clipp-peppers-v1):"
 if [[ -z "$CLIPP_TEST_PEPPER_SECRET_NAME" ]]; then CLIPP_TEST_PEPPER_SECRET_NAME=clipp-peppers-v1; fi
 require_match "pepper Secret name" "$CLIPP_TEST_PEPPER_SECRET_NAME" '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+ask CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME "Native OAuth signing Secret name (Enter uses clipp-native-oauth-v1):"
+if [[ -z "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" ]]; then CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME=clipp-native-oauth-v1; fi
+require_match "native OAuth signing Secret name" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 ask CLIPP_TEST_JOURNAL_SECRET_NAME "Journal Secret name (Enter uses clipp-journal-v1):"
 if [[ -z "$CLIPP_TEST_JOURNAL_SECRET_NAME" ]]; then CLIPP_TEST_JOURNAL_SECRET_NAME=clipp-journal-v1; fi
 require_match "journal Secret name" "$CLIPP_TEST_JOURNAL_SECRET_NAME" '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 write_env CLIPP_TEST_GOOGLE_SECRET_NAME "$CLIPP_TEST_GOOGLE_SECRET_NAME"
 write_env CLIPP_TEST_ADMIN_SECRET_NAME "$CLIPP_TEST_ADMIN_SECRET_NAME"
 write_env CLIPP_TEST_PEPPER_SECRET_NAME "$CLIPP_TEST_PEPPER_SECRET_NAME"
+write_env CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME"
 write_env CLIPP_TEST_JOURNAL_SECRET_NAME "$CLIPP_TEST_JOURNAL_SECRET_NAME"
-[[ "$CLIPP_TEST_GOOGLE_SECRET_NAME" != "$CLIPP_TEST_ADMIN_SECRET_NAME" && "$CLIPP_TEST_GOOGLE_SECRET_NAME" != "$CLIPP_TEST_PEPPER_SECRET_NAME" && "$CLIPP_TEST_GOOGLE_SECRET_NAME" != "$CLIPP_TEST_JOURNAL_SECRET_NAME" && "$CLIPP_TEST_ADMIN_SECRET_NAME" != "$CLIPP_TEST_PEPPER_SECRET_NAME" && "$CLIPP_TEST_ADMIN_SECRET_NAME" != "$CLIPP_TEST_JOURNAL_SECRET_NAME" && "$CLIPP_TEST_PEPPER_SECRET_NAME" != "$CLIPP_TEST_JOURNAL_SECRET_NAME" ]] || die "Application Secret names must differ."
+[[ "$CLIPP_TEST_GOOGLE_SECRET_NAME" != "$CLIPP_TEST_ADMIN_SECRET_NAME" && "$CLIPP_TEST_GOOGLE_SECRET_NAME" != "$CLIPP_TEST_PEPPER_SECRET_NAME" && "$CLIPP_TEST_GOOGLE_SECRET_NAME" != "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" && "$CLIPP_TEST_GOOGLE_SECRET_NAME" != "$CLIPP_TEST_JOURNAL_SECRET_NAME" && "$CLIPP_TEST_ADMIN_SECRET_NAME" != "$CLIPP_TEST_PEPPER_SECRET_NAME" && "$CLIPP_TEST_ADMIN_SECRET_NAME" != "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" && "$CLIPP_TEST_ADMIN_SECRET_NAME" != "$CLIPP_TEST_JOURNAL_SECRET_NAME" && "$CLIPP_TEST_PEPPER_SECRET_NAME" != "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" && "$CLIPP_TEST_PEPPER_SECRET_NAME" != "$CLIPP_TEST_JOURNAL_SECRET_NAME" && "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" != "$CLIPP_TEST_JOURNAL_SECRET_NAME" ]] || die "Application Secret names must differ."
 app_missing=()
 app_existing=()
-for name in "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$CLIPP_TEST_PEPPER_SECRET_NAME" "$CLIPP_TEST_JOURNAL_SECRET_NAME"; do
+for name in "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$CLIPP_TEST_PEPPER_SECRET_NAME" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" "$CLIPP_TEST_JOURNAL_SECRET_NAME"; do
   if secret_exists "$name"; then app_existing+=("$name"); else app_missing+=("$name"); fi
 done
 if (( ${#app_existing[@]} )); then
@@ -516,10 +524,11 @@ if (( ${#app_missing[@]} )); then
   if ! secret_exists "$CLIPP_TEST_GOOGLE_SECRET_NAME"; then kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create secret generic "$CLIPP_TEST_GOOGLE_SECRET_NAME" --from-file=client-id="$client_id_file" --from-file=client-secret="$client_secret_file" || die "Google Secret creation failed; rerun after inspecting the namespace."; fi
   if ! secret_exists "$CLIPP_TEST_ADMIN_SECRET_NAME"; then kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create secret generic "$CLIPP_TEST_ADMIN_SECRET_NAME" --from-file=allowlist.json="$allowlist_file" || die "Admin Secret creation failed; rerun after inspecting the namespace."; fi
   if ! secret_exists "$CLIPP_TEST_PEPPER_SECRET_NAME"; then kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create secret generic "$CLIPP_TEST_PEPPER_SECRET_NAME" --from-file=keyring.json="$pepper_file" || die "Pepper Secret creation failed; rerun after inspecting the namespace."; fi
+  if ! secret_exists "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME"; then kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create secret generic "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" --from-file=signing-key="$native_signing_key_file" || die "Native OAuth Secret creation failed; rerun after inspecting the namespace."; fi
   if ! secret_exists "$CLIPP_TEST_JOURNAL_SECRET_NAME"; then kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create secret generic "$CLIPP_TEST_JOURNAL_SECRET_NAME" --from-file=api-signing-key.pem="$journal_key_file" || die "Journal Secret creation failed; rerun after inspecting the namespace."; fi
 fi
-for name in "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$CLIPP_TEST_PEPPER_SECRET_NAME" "$CLIPP_TEST_JOURNAL_SECRET_NAME"; do secret_exists "$name" || die "Application Secret is still absent: $name"; done
-say "All four application Secret names exist. Existing Secret contents were not read or replaced."
+for name in "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$CLIPP_TEST_PEPPER_SECRET_NAME" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" "$CLIPP_TEST_JOURNAL_SECRET_NAME"; do secret_exists "$name" || die "Application Secret is still absent: $name"; done
+say "All five application Secret names exist. Existing Secret contents were not read or replaced."
 
 stage "Review the chart values and PostgreSQL target"
 say "Review accounting.failureDeadline in the private chart values: default 3s, minimum 1s, whole seconds. It controls the accounting outage cutoff and takes effect after relay restart; keep a bounded tolerance."
@@ -539,7 +548,7 @@ fi
 require_file "$CLIPP_TEST_VALUES_FILE"
 chmod 600 "$CLIPP_TEST_VALUES_FILE"
 if [[ "$new_values_file" == 1 ]]; then
-  python3 - "$CLIPP_TEST_VALUES_FILE" "$journal_config_file" "$CLIPP_TEST_PORTAL_ORIGIN" "$CLIPP_TEST_WSS_HOSTNAME" "$CLIPP_TEST_EXTENSION_REDIRECT" "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$CLIPP_TEST_PEPPER_SECRET_NAME" "$CLIPP_TEST_JOURNAL_SECRET_NAME" <<'PY'
+  python3 - "$CLIPP_TEST_VALUES_FILE" "$journal_config_file" "$CLIPP_TEST_PORTAL_ORIGIN" "$CLIPP_TEST_WSS_HOSTNAME" "$CLIPP_TEST_EXTENSION_REDIRECT" "$CLIPP_TEST_GOOGLE_SECRET_NAME" "$CLIPP_TEST_ADMIN_SECRET_NAME" "$CLIPP_TEST_PEPPER_SECRET_NAME" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" "$CLIPP_TEST_JOURNAL_SECRET_NAME" <<'PY'
 import json, re, sys
 from pathlib import Path
 
@@ -554,7 +563,8 @@ replacement = {
     ('credentials', 'googleSecret'): sys.argv[6],
     ('credentials', 'adminSecret'): sys.argv[7],
     ('credentials', 'pepperSecret'): sys.argv[8],
-    ('credentials', 'journalSecret'): sys.argv[9],
+    ('credentials', 'nativeSigningKeySecret'): sys.argv[9],
+    ('credentials', 'journalSecret'): sys.argv[10],
 }
 for yaml_key, config_key in {
     'region': 'region', 'namespace': 'namespace', 'bucket': 'bucket',
@@ -1103,9 +1113,85 @@ printf '%s' "$migration_job_json" | ruby -rjson -e '
 migration_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$migration_job" -c migrate --tail=100) || die "Could not verify the completed migration log."
 printf '%s\n' "$migration_logs" | ruby -rjson -e '
   records = STDIN.each_line.map { |line| JSON.parse(line) rescue nil }.compact
-  abort "migration revision 13 completion record missing" unless records.any? { |r| r["event"] == "service.startup" && r["outcome"] == "success" && r["schema_revision"] == 13 }
+  abort "migration revision 16 completion record missing" unless records.any? { |r| r["event"] == "service.startup" && r["outcome"] == "success" && r["schema_revision"] == 16 }
 ' || die "Migration completion or schema revision could not be verified."
-say "The migration Job completed and reported schema revision 13."
+say "The migration Job completed and reported schema revision 16."
+}
+
+verify_completed_native_reset() {
+  reset_job_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$reset_job" -o json) || die "Completed native OAuth reset Job is missing."
+  printf '%s' "$reset_job_json" | ruby -rjson -e '
+    job = JSON.parse(STDIN.read)
+    abort "reset Job belongs to another setup" unless job.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint") == ARGV.fetch(0)
+    abort "reset Job did not succeed exactly once" unless job.dig("status", "succeeded") == 1
+    container = job.dig("spec", "template", "spec", "containers", 0)
+    abort "reset Job image or command changed" unless container["image"] == ARGV.fetch(1) && container["args"] == ["-command", "reset-auth", "-config", "/etc/clipp/config.json"]
+    volumes = job.dig("spec", "template", "spec", "volumes")
+    native = volumes.find { |v| v["name"] == "native-oauth" }
+    abort "reset Job signing Secret differs" unless native&.dig("secret", "secretName") == ARGV.fetch(2)
+  ' "$install_fingerprint" "$(ruby -rjson -e 'j=JSON.parse(STDIN.read); puts j.dig("spec","template","spec","containers",0,"image")' <<< "$migration_job_json")" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" || die "Completed native OAuth reset Job identity differs from the reviewed configuration."
+  reset_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$reset_job" -c reset-auth --tail=100) || die "Could not verify the completed native OAuth reset log."
+  printf '%s\n' "$reset_logs" | ruby -rjson -e '
+    records = STDIN.each_line.map { |line| JSON.parse(line) rescue nil }.compact
+    abort "native OAuth reset completion record missing" unless records.any? { |r| r["event"] == "service.startup" && r["outcome"] == "success" && r["schema_revision"] == 16 }
+  ' || die "Native OAuth reset completion could not be verified."
+  say "The native OAuth reset Job completed and reported schema revision 16."
+}
+
+run_native_reset_job() {
+  reset_job="$relay_sts_name-reset-auth-$db_run_id"
+  [[ -n "$db_run_id" && ${#reset_job} -le 63 ]] || die "Saved reset run ID is missing or Job name is too long."
+  deployment_dir="$TEST_DIR/deployment"
+  [[ ! -L "$deployment_dir" ]] || die "Deployment working directory cannot be a symbolic link."
+  mkdir -p "$deployment_dir"
+  chmod 700 "$deployment_dir"
+  migration_manifest="$deployment_dir/$migration_job.json"
+  [[ ! -L "$migration_manifest" && -s "$migration_manifest" ]] || die "The reviewed migration Job manifest is unavailable for reset preparation."
+  reset_manifest="$deployment_dir/$reset_job.json"
+  [[ ! -L "$reset_manifest" ]] || die "Reset manifest path cannot be a symbolic link."
+  generated_reset_manifest=$(mktemp "$deployment_dir/.reset.XXXXXX")
+  chmod 600 "$generated_reset_manifest"
+  python3 - "$migration_manifest" "$generated_reset_manifest" "$reset_job" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" <<'PY_RESET_MANIFEST' || die "Could not prepare the reset Job."
+import json, sys
+source, target, name, secret = sys.argv[1:]
+with open(source, encoding='utf-8') as f:
+    job = json.load(f)
+job['metadata']['name'] = name
+job['spec']['template']['spec']['containers'][0]['name'] = 'reset-auth'
+job['spec']['template']['spec']['containers'][0]['args'] = ['-command', 'reset-auth', '-config', '/etc/clipp/config.json']
+job['spec']['template']['spec']['containers'][0]['volumeMounts'].append({'name':'native-oauth','mountPath':'/run/secrets/native-oauth','readOnly':True})
+job['spec']['template']['spec']['volumes'].append({'name':'native-oauth','secret':{'secretName':secret,'items':[{'key':'signing-key','path':'signing-key'}]}})
+with open(target, 'x', encoding='utf-8') as f:
+    json.dump(job, f, indent=2)
+    f.write('\n')
+PY_RESET_MANIFEST
+  if [[ -e "$reset_manifest" ]]; then
+    cmp -s "$generated_reset_manifest" "$reset_manifest" || die "Saved reset Job differs from the reviewed configuration."
+    rm "$generated_reset_manifest"
+  else
+    mv "$generated_reset_manifest" "$reset_manifest" || die "Could not save the reset Job manifest."
+  fi
+  reset_job_name=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$reset_job" --ignore-not-found -o name) || die "Could not inspect the reset Job name."
+  if [[ -z "$reset_job_name" ]]; then
+    say "The reset Job uses the migration identity and the dedicated native signing Secret; it does not mount Google, admin or pepper material."
+    confirm "Create and run native OAuth credential reset Job $reset_job in this test namespace?" || die "Serving transition was not started."
+    kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create -f "$reset_manifest" || die "Reset Job creation failed; inspect the namespace before retrying."
+  else
+    existing_reset=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$reset_job" -o json) || die "Existing reset Job is unavailable."
+    printf '%s' "$existing_reset" | ruby -rjson -e '
+      actual = JSON.parse(STDIN.read)
+      expected = JSON.parse(File.read(ARGV.fetch(0)))
+      abort "existing reset Job belongs to another setup" unless actual.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint") == expected.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint")
+      a = actual.dig("spec", "template", "spec")
+      e = expected.dig("spec", "template", "spec")
+      abort "existing reset Job image or command differs" unless a.dig("containers", 0, "image") == e.dig("containers", 0, "image") && a.dig("containers", 0, "args") == e.dig("containers", 0, "args")
+      abort "existing reset Job Secret references differ" unless %w[db db-ca native-oauth].all? { |name| a.fetch("volumes").find { |v| v["name"] == name }.dig("secret", "secretName") == e.fetch("volumes").find { |v| v["name"] == name }.dig("secret", "secretName") }
+      abort "existing reset Job failed" if actual.dig("status", "failed").to_i > 0
+    ' "$reset_manifest" || die "Existing reset Job cannot be reused."
+    say "Reusing the same reviewed reset Job; no second Job was created."
+  fi
+  wait_for_job_completion "$reset_job" 2400
+  verify_completed_native_reset
 }
 
 if [[ "$START_AT" != 16 ]]; then
@@ -1299,6 +1385,9 @@ else
   [[ ${#migration_job} -le 63 ]] || die "Saved migration Job name is too long."
   verify_completed_migration
 fi
+
+stage "Reset legacy OAuth credentials and confirm the signing key"
+run_native_reset_job
 
 
 

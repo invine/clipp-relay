@@ -415,6 +415,11 @@
           "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
           "maxLength": 253
         },
+        "nativeSigningKeySecret": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "maxLength": 253
+        },
         "journalSecret": {
           "type": "string",
           "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
@@ -425,6 +430,7 @@
         "googleSecret",
         "adminSecret",
         "pepperSecret",
+        "nativeSigningKeySecret",
         "journalSecret"
       ]
     },

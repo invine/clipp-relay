@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 15
+const ExpectedRevision = 16
 
 type migration struct {
 	revision int
@@ -323,7 +323,26 @@ CREATE TABLE public.native_access_tokens (
 );
 CREATE INDEX native_access_tokens_grant ON public.native_access_tokens(grant_id);
 CREATE INDEX native_access_tokens_expiry ON public.native_access_tokens(expires_at);
-REVOKE ALL ON public.native_authorization_codes, public.native_login_grants, public.native_refresh_generations, public.native_access_tokens FROM PUBLIC;`}}
+REVOKE ALL ON public.native_authorization_codes, public.native_login_grants, public.native_refresh_generations, public.native_access_tokens FROM PUBLIC;`}, {16, `DELETE FROM public.relay_access_tokens;
+DELETE FROM public.refresh_generations;
+DELETE FROM public.authorization_codes;
+DELETE FROM public.login_grants;
+DELETE FROM public.native_access_tokens;
+DELETE FROM public.native_refresh_generations;
+DELETE FROM public.native_authorization_codes;
+DELETE FROM public.native_login_grants;
+CREATE TABLE public.oauth_issuer_state (
+ singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+ key_id bytea NOT NULL CHECK (octet_length(key_id)=32),
+ reset_completed_at timestamptz NOT NULL
+);
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_events_event_check;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_events_event_check CHECK (event IN ('account_created','account_approved','account_denied','plan_created','plan_archived','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted','pending_expired','credential_reset'));
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_target_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_target_required CHECK ((event IN ('account_created','account_approved','account_denied','plan_assigned','credential_blocked','grant_cap','refresh_reuse','account_suspended','account_reactivated','account_reviewed','credentials_revoked','owner_credentials_revoked','quota_overridden','account_deleted','pending_expired') AND account_id IS NOT NULL) OR (event IN ('plan_created','plan_archived') AND plan_id IS NOT NULL) OR event='credential_reset');
+ALTER TABLE public.audit_events DROP CONSTRAINT audit_actor_required;
+ALTER TABLE public.audit_events ADD CONSTRAINT audit_actor_required CHECK (event IN ('account_created','credential_blocked','grant_cap','refresh_reuse','owner_credentials_revoked','account_deleted','pending_expired','credential_reset') OR (reason IS NOT NULL AND actor_email IS NOT NULL));
+REVOKE ALL ON public.oauth_issuer_state FROM PUBLIC;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))

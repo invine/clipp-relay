@@ -28,6 +28,10 @@ func isNativeOAuth(r *http.Request) bool {
 	return enabled
 }
 
+func (s *Server) nativeOAuthEnabled(r *http.Request) bool {
+	return s.nativeIssuer != nil || isNativeOAuth(r)
+}
+
 func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
 	if s.commitCredential != nil {
 		return s.commitCredential(ctx, tx)
@@ -121,7 +125,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
-	if isNativeOAuth(r) {
+	if s.nativeOAuthEnabled(r) {
 		if _, err := s.nativeAuthorizeRequest(r.Context(), oauthIntent{client, redirect, state, challenge}); err != nil {
 			s.oauthError(w, 400)
 			return
@@ -166,7 +170,7 @@ func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthInten
 func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, version uint64, subject string, intent oauthIntent) {
 	var authorizeRequest fosite.AuthorizeRequester
 	var grantID string
-	if isNativeOAuth(r) {
+	if s.nativeOAuthEnabled(r) {
 		var err error
 		authorizeRequest, err = s.nativeAuthorizeRequest(r.Context(), intent)
 		if err != nil {
@@ -362,7 +366,7 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
-	if consent.authorizeRequest != nil && isNativeOAuth(r) {
+	if consent.authorizeRequest != nil && s.nativeOAuthEnabled(r) {
 		s.issueNativeCode(w, r, consent.authorizeRequest, account, consent.generation, consent.intent)
 		return
 	}
@@ -517,7 +521,7 @@ func writeTokens(w http.ResponseWriter, access, refresh string) {
 	_ = json.NewEncoder(w).Encode(tokenResponse{access, "Bearer", 900, refresh})
 }
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
-	if isNativeOAuth(r) {
+	if s.nativeOAuthEnabled(r) {
 		s.nativeToken(w, r)
 		return
 	}

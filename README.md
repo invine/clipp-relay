@@ -59,8 +59,18 @@ creates roles or databases.
 
 ```sh
 go run ./cmd/clipp-relay -command migrate -config /path/to/config.json
+go run ./cmd/clipp-relay -command reset-auth -config /path/to/migration-config.json
 go run ./cmd/clipp-relay -command serve -config /path/to/config.json
 ```
+
+Provision one stable 32-byte OAuth signing Secret before migration. Fence every
+old writer, apply migrations, then run `reset-auth` with migration credentials
+and the mounted signing Secret before enabling serving. The reset removes old
+and native OAuth credentials, releases grant capacity, and records its key
+identity and audit outcome while preserving Relay Accounts, Portal Sessions,
+Quota Plans and usage. A retry with the same key is a no-op after a confirmed
+commit; a changed key makes `serve` fail closed until `reset-auth` completes.
+Startup never resets credentials.
 
 The two commands must use separate database username/password Secret files.
 The migration process reads only its database username, password and CA files;
@@ -156,7 +166,8 @@ process certificate hash to WebRTC Direct addresses. An example shape is:
     "google_client_id_file": "/run/secrets/google/client-id",
     "google_client_secret_file": "/run/secrets/google/client-secret",
     "admin_allowlist_file": "/run/secrets/admin/allowlist.json",
-    "pepper_keyring_file": "/run/secrets/peppers/keyring.json"
+    "pepper_keyring_file": "/run/secrets/peppers/keyring.json",
+    "native_signing_key_file": "/run/secrets/native-oauth/signing-key"
   }
 }
 ```
