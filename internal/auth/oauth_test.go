@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -21,7 +23,9 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/relay"
 	"github.com/jackc/pgx/v5"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 func TestPublicClientCodeAndRefresh(t *testing.T) {
@@ -73,74 +77,13 @@ func TestPublicClientCodeAndRefresh(t *testing.T) {
 }
 
 func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
-	c, m, db := fixture(t)
-	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
-	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
-	d := newProvider(t)
-	d.subject = fmt.Sprintf("native-fosite-lifecycle-%d", time.Now().UnixNano())
-	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	cookie := loginAs(t, s, d, d.subject, d.subject+"@example.test", "")
-	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
-		t.Fatal(err)
-	}
-	handler := s.NativeHandlerForTest(bytes.Repeat([]byte{0x73}, 32))
-	issueCode := func(state string) string {
-		verifier := strings.Repeat("a", 43)
-		hash := sha256.Sum256([]byte(verifier))
-		query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {state}}
-		begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
-		begin.AddCookie(cookie)
-		page := httptest.NewRecorder()
-		handler.ServeHTTP(page, begin)
-		if page.Code != 200 {
-			t.Fatalf("native authorize page for %q: %d %s", state, page.Code, page.Body.String())
-		}
-		flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
-		csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
-		if len(flow) != 2 || len(csrf) != 2 {
-			t.Fatal("native consent form missing")
-		}
-		confirm := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(url.Values{"flow": {flow[1]}, "csrf": {csrf[1]}}.Encode()))
-		confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		confirm.Header.Set("Origin", s.Origin)
-		confirm.AddCookie(cookie)
-		out := httptest.NewRecorder()
-		handler.ServeHTTP(out, confirm)
-		if out.Code != http.StatusFound {
-			t.Fatalf("native consent: %d %s", out.Code, out.Body.String())
-		}
-		callback, err := url.Parse(out.Header().Get("Location"))
-		if err != nil || callback.Query().Get("state") != state {
-			t.Fatalf("native callback mismatch: %s %v", out.Header().Get("Location"), err)
-		}
-		code := callback.Query().Get("code")
-		if len(code) != 94 || !strings.HasPrefix(code, "ory_ac_") {
-			t.Fatalf("native authorization code shape: %q", code)
-		}
-		return code
-	}
-	tokenPostNative := func(form url.Values) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("POST", "/oauth/token", strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		out := httptest.NewRecorder()
-		handler.ServeHTTP(out, req)
-		// Leave room for the per-account token bucket while this lifecycle makes
-		// many sequential protocol requests. Concurrent requests still enter the
-		// handler together; the wait only occurs after each response is complete.
-		time.Sleep(100 * time.Millisecond)
-		return out
-	}
-	decode := func(out *httptest.ResponseRecorder) (string, string) {
-		var body struct {
-			Access  string `json:"access_token"`
-			Refresh string `json:"refresh_token"`
-		}
-		if err := json.Unmarshal(out.Body.Bytes(), &body); err != nil || body.Access == "" || body.Refresh == "" {
-			t.Fatalf("native token response: %d %s (%v)", out.Code, out.Body.String(), err)
-		}
-		return body.Access, body.Refresh
-	}
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
 	verifier := strings.Repeat("a", 43)
+	issueCode := func(state string) string {
+		return issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, state)
+	}
+	tokenPostNative := func(form url.Values) *httptest.ResponseRecorder { return nativeTokenPost(t, handler, form) }
+	decode := func(out *httptest.ResponseRecorder) (string, string) { return decodeNativeTokens(t, out) }
 	codeA := issueCode("native-state-0000000001")
 	wrongClient := tokenPostNative(url.Values{"grant_type": {"authorization_code"}, "client_id": {"electron"}, "redirect_uri": {"http://127.0.0.1:34567/oauth/callback"}, "code": {codeA}, "code_verifier": {verifier}})
 	if wrongClient.Code == 200 {
@@ -211,6 +154,9 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	if _, _, err := s.AuthenticateAccess(context.Background(), accessA); err == nil {
 		t.Fatal("authenticated concurrent refresh replay did not revoke the owning grant's old access token")
 	}
+	if _, err := s.AuthenticateRelay(context.Background(), accessA); !errors.Is(err, auth.ErrInvalidAccess) {
+		t.Fatalf("Relay Authentication accepted the revoked grant access token: %v", err)
+	}
 	if _, _, err := s.AuthenticateAccess(context.Background(), replayedAccess); err == nil {
 		t.Fatal("authenticated concurrent refresh replay did not revoke the winning response's access token")
 	}
@@ -244,6 +190,193 @@ func TestNativeFositeCodePKCERefreshReplayLifecycle(t *testing.T) {
 	}
 	if refreshA2 == refreshA {
 		t.Fatal("refresh rotation did not issue a successor")
+	}
+}
+
+func TestNativeRelayAuthenticationAndDiscoveryAuthority(t *testing.T) {
+	c, db, s, _, cookie, handler := activeNativeFixture(t)
+	verifier := strings.Repeat("a", 43)
+	code := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "relay-auth-code-purpose-0001")
+	grant := nativeTokenPost(t, handler, url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}})
+	access, refresh := decodeNativeTokens(t, grant)
+	credential, err := s.AuthenticateRelay(context.Background(), access)
+	if err != nil {
+		t.Fatalf("native access rejected by exported Relay Authentication: %v", err)
+	}
+	if credential.AccountID == "" || credential.SessionLimit <= 0 || !credential.ExpiresAt.After(time.Now()) {
+		t.Fatalf("native Relay Credential omitted current account/plan/expiry authority: %+v", credential)
+	}
+	relayServer, err := relay.New(s, nil, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = relayServer.Close() })
+	address, err := relayServer.ListenAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := relay.NewDiscovery(relayServer, s, "relay.example.test", []ma.Multiaddr{address})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveryRequest := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "https://relay.example.test/v1/relay", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		out := httptest.NewRecorder()
+		discovery.ServeHTTP(out, req)
+		return out
+	}
+	if out := discoveryRequest(access); out.Code != http.StatusOK {
+		t.Fatalf("Discovery rejected native access: %d %s", out.Code, out.Body.String())
+	}
+	tampered := []byte(access)
+	if tampered[len(tampered)-1] == 'A' {
+		tampered[len(tampered)-1] = 'B'
+	} else {
+		tampered[len(tampered)-1] = 'A'
+	}
+	for name, token := range map[string]string{"authorization code": code, "refresh token": refresh, "malformed token": access + "x", "tampered native MAC": string(tampered)} {
+		if _, err := s.AuthenticateRelay(context.Background(), token); !errors.Is(err, auth.ErrInvalidAccess) {
+			t.Fatalf("Relay Authentication accepted %s: %v", name, err)
+		}
+		if out := discoveryRequest(token); out.Code != http.StatusUnauthorized {
+			t.Fatalf("Discovery accepted %s: %d %s", name, out.Code, out.Body.String())
+		}
+	}
+	// The failed access-purpose probes above must not consume the refresh token.
+	refreshed := nativeTokenPost(t, handler, url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refresh}})
+	if refreshed.Code != http.StatusOK {
+		t.Fatalf("purpose probes caused refresh replay side effects: %d %s", refreshed.Code, refreshed.Body.String())
+	}
+	if _, err := s.AuthenticateRelay(context.Background(), access); err != nil {
+		t.Fatalf("ordinary refresh invalidated older unexpired access: %v", err)
+	}
+	var accountID string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE id=$1`, credential.AccountID).Scan(&accountID); err != nil || accountID != credential.AccountID {
+		t.Fatalf("native account lookup: id=%s err=%v", accountID, err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET sessions_override=2 WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := s.AuthenticateRelay(context.Background(), access); err != nil || current.SessionLimit != 2 {
+		t.Fatalf("Relay Authentication did not observe current quota plan override: %+v err=%v", current, err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET sessions_override=NULL,recovery_review_hold=true WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AuthenticateRelay(context.Background(), access); !errors.Is(err, auth.ErrInvalidAccess) {
+		t.Fatalf("Relay Authentication accepted a recovery review hold: %v", err)
+	}
+	if out := discoveryRequest(access); out.Code != http.StatusUnauthorized {
+		t.Fatalf("Discovery accepted a recovery review hold: %d %s", out.Code, out.Body.String())
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET recovery_review_hold=false,status='Suspended' WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AuthenticateRelay(context.Background(), access); !errors.Is(err, auth.ErrInvalidAccess) {
+		t.Fatalf("Relay Authentication accepted suspended account: %v", err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',credential_generation=credential_generation+1 WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AuthenticateRelay(context.Background(), access); !errors.Is(err, auth.ErrInvalidAccess) {
+		t.Fatalf("Relay Authentication accepted stale credential generation: %v", err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET credential_generation=credential_generation-1 WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNativeRelayUncertainAccountReconciliationAndOutage(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	verifier := strings.Repeat("a", 43)
+	code := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "relay-auth-uncertain-00001")
+	grant := nativeTokenPost(t, handler, url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}})
+	access, _ := decodeNativeTokens(t, grant)
+	credential, err := s.AuthenticateRelay(context.Background(), access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Secrets.AdminAllowlistFile = filepath.Join(t.TempDir(), "allowlist.json")
+	if err := os.WriteFile(c.Secrets.AdminAllowlistFile, []byte(`{"revision":1,"emails":["native-admin@gmail.com"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.AdminAllowlistFile = c.Secrets.AdminAllowlistFile
+	relayServer, err := relay.New(s, nil, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = relayServer.Close() })
+	address, err := relayServer.ListenAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := relay.NewDiscovery(relayServer, s, "relay.example.test", []ma.Multiaddr{address})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveryRequest := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "https://relay.example.test/v1/relay", nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		out := httptest.NewRecorder()
+		discovery.ServeHTTP(out, req)
+		return out
+	}
+	if out := discoveryRequest(); out.Code != http.StatusOK {
+		t.Fatalf("Discovery rejected active native token: %d %s", out.Code, out.Body.String())
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	s.SetRelayCredentialHookForTest(func() { close(entered); <-release })
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.AuthenticateRelay(context.Background(), access)
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("native Relay Authentication did not reach the post-observation wait")
+	}
+	adminCookie := loginAs(t, s, d, "native-admin-"+fmt.Sprint(time.Now().UnixNano()), "native-admin@gmail.com", "")
+	adminCSRF := csrfFrom(t, s, adminCookie)
+	var revision int64
+	if err := db.Pool.QueryRow(context.Background(), `SELECT revision FROM public.accounts WHERE id=$1`, credential.AccountID).Scan(&revision); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	s.SetAccountCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return errors.New("simulated account commit acknowledgment loss")
+	})
+	form := url.Values{"csrf": {adminCSRF}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {fmt.Sprint(revision)}}
+	mutation := portalRequest(s, http.MethodPost, "/admin/accounts/"+credential.AccountID, adminCookie, form, c.PortalOrigin)
+	s.SetAccountCommitHookForTest(nil)
+	if mutation.Code != http.StatusServiceUnavailable {
+		close(release)
+		t.Fatalf("ambiguous suspension response=%d %s", mutation.Code, mutation.Body.String())
+	}
+	close(release)
+	select {
+	case err := <-result:
+		s.SetRelayCredentialHookForTest(nil)
+		if !errors.Is(err, auth.ErrInvalidAccess) {
+			t.Fatalf("native access after uncertain account suspension was accepted or misclassified: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		s.SetRelayCredentialHookForTest(nil)
+		t.Fatal("native Relay Authentication did not finish after account uncertainty resolved")
+	}
+	if out := discoveryRequest(); out.Code != http.StatusUnauthorized {
+		t.Fatalf("Discovery accepted token after uncertain account suspension: %d %s", out.Code, out.Body.String())
+	}
+	db.Pool.Close()
+	if _, err := s.AuthenticateRelay(context.Background(), access); err == nil || errors.Is(err, auth.ErrInvalidAccess) {
+		t.Fatalf("database outage was not preserved distinctly: %v", err)
+	}
+	if out := discoveryRequest(); out.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Discovery mapped database outage to credential refusal: %d %s", out.Code, out.Body.String())
 	}
 }
 
