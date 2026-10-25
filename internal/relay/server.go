@@ -86,14 +86,34 @@ type session struct {
 	timer      *time.Timer
 }
 
+// sessionManager owns the physical connection lifecycle and the indexes that
+// represent authenticated Relay Sessions. The protocol server supplies the
+// authority, accounting and diagnostic collaborators used by lifecycle work.
+type sessionManager struct {
+	server *Server
+
+	mu             sync.Mutex
+	connectionInfo map[network.Conn]connectionDiagnostic
+	byConn         map[network.Conn]*session
+	byPeer         map[peer.ID]*session
+	byAccount      map[string]map[*session]struct{}
+	preauth        map[network.Conn]*time.Timer
+	connRate       map[network.Conn]tokenBucket
+	rvConnRate     map[network.Conn]tokenBucket
+	reservations   map[peer.ID]reservationOwner
+	leases         map[peer.ID]*rendezvousLease
+	closing        bool
+	hopHandlers    int
+}
+
 type Server struct {
-	Host              host.Host
-	stock             *relay.Relay
-	manager           network.ResourceManager
-	tracer            *circuitTracer
-	authority         Authority
-	diagnostics       DiagnosticSink
-	connectionInfo    map[network.Conn]connectionDiagnostic
+	Host        host.Host
+	stock       *relay.Relay
+	manager     network.ResourceManager
+	tracer      *circuitTracer
+	authority   Authority
+	diagnostics DiagnosticSink
+	*sessionManager
 	accounting        Accounting
 	accountingCloses  chan struct{}
 	accountingPending map[network.Conn]struct{}
@@ -104,21 +124,10 @@ type Server struct {
 	wsEnabled         bool
 	webrtcEnabled     bool
 	webSocketHostname string
-	mu                sync.Mutex
-	byConn            map[network.Conn]*session
-	byPeer            map[peer.ID]*session
-	byAccount         map[string]map[*session]struct{}
-	preauth           map[network.Conn]*time.Timer
 	peerGuards        [256]sync.Mutex
 	globalRate        tokenBucket
-	connRate          map[network.Conn]tokenBucket
 	rvGlobalRate      tokenBucket
-	rvConnRate        map[network.Conn]tokenBucket
 	rvCounts          [2]atomic.Uint64
-	reservations      map[peer.ID]reservationOwner
-	leases            map[peer.ID]*rendezvousLease
-	closing           bool
-	hopHandlers       int
 	closeOnce         sync.Once
 }
 
@@ -314,7 +323,8 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, accounting: accounting, diagnostics: opts.Diagnostics, connectionInfo: map[network.Conn]connectionDiagnostic{}, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, accounting: accounting, diagnostics: opts.Diagnostics, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname}
+	s.sessionManager = &sessionManager{server: s, connectionInfo: map[network.Conn]connectionDiagnostic{}, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -346,7 +356,7 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 			return nil, err
 		}
 	}
-	h.Network().Notify(&network.NotifyBundle{ConnectedF: s.connected, DisconnectedF: s.disconnected})
+	h.Network().Notify(&network.NotifyBundle{ConnectedF: s.sessionManager.connected, DisconnectedF: s.sessionManager.disconnected})
 	h.SetStreamHandler(AuthProtocol, s.handleAuth)
 	h.SetStreamHandler(RendezvousV1Protocol, s.handleRendezvous)
 	h.SetStreamHandler(RendezvousV2Protocol, s.handleRendezvous)
@@ -435,7 +445,8 @@ func (s *Server) emitConnection(c network.Conn, event, outcome, reason, requestI
 	s.diagnostics.Emit(e)
 }
 
-func (s *Server) connected(_ network.Network, c network.Conn) {
+func (m *sessionManager) connected(_ network.Network, c network.Conn) {
+	s := m.server
 	s.mu.Lock()
 	reason := ""
 	if s.closing {
@@ -472,7 +483,8 @@ func (s *Server) connected(_ network.Network, c network.Conn) {
 	s.emitConnection(c, "relay.connection", "success", "none", "", 0)
 }
 
-func (s *Server) disconnected(_ network.Network, c network.Conn) {
+func (m *sessionManager) disconnected(_ network.Network, c network.Conn) {
+	s := m.server
 	s.mu.Lock()
 	if t := s.preauth[c]; t != nil {
 		t.Stop()
@@ -501,6 +513,11 @@ func (s *Server) disconnected(_ network.Network, c network.Conn) {
 
 func (s *Server) removeLocked(v *session) { s.endSessionLocked(v, "connection_closed") }
 func (s *Server) endSessionLocked(v *session, reason string) {
+	s.sessionManager.endSessionLocked(v, reason)
+}
+
+func (m *sessionManager) endSessionLocked(v *session, reason string) {
+	s := m.server
 	if s.byConn[v.conn] != v {
 		return
 	}
@@ -512,6 +529,11 @@ func (s *Server) endSessionLocked(v *session, reason string) {
 }
 
 func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
+	s.sessionManager.removeSessionLocked(v, preserveRendezvous)
+}
+
+func (m *sessionManager) removeSessionLocked(v *session, preserveRendezvous bool) {
+	s := m.server
 	if s.byConn[v.conn] != v {
 		return
 	}
@@ -535,6 +557,11 @@ func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
 }
 
 func (s *Server) permitted(st network.Stream) (bool, string) {
+	return s.sessionManager.permitted(st)
+}
+
+func (m *sessionManager) permitted(st network.Stream) (bool, string) {
+	s := m.server
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.byConn[st.Conn()]
@@ -634,6 +661,11 @@ func (s *Server) authoritativeConn(id peer.ID) network.Conn {
 }
 
 func (s *Server) expire(v *session) {
+	s.sessionManager.expire(v)
+}
+
+func (m *sessionManager) expire(v *session) {
+	s := m.server
 	s.mu.Lock()
 	owned := s.byConn[v.conn] == v && !time.Now().Before(v.deadline)
 	if owned {
@@ -646,11 +678,16 @@ func (s *Server) expire(v *session) {
 }
 
 func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string) {
-	deadline, renew, code, _ := s.authenticateObserved(ctx, c, raw)
+	deadline, renew, code, _ := s.sessionManager.authenticateObserved(ctx, c, raw)
 	return deadline, renew, code
 }
 
 func (s *Server) authenticateObserved(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, string) {
+	return s.sessionManager.authenticateObserved(ctx, c, raw)
+}
+
+func (m *sessionManager) authenticateObserved(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, string) {
+	s := m.server
 	reason := ""
 
 	s.mu.Lock()
@@ -672,7 +709,7 @@ func (s *Server) authenticateObserved(ctx context.Context, c network.Conn, raw s
 	var oldToClose network.Conn
 	var installed *session
 	admit := func(unitCtx context.Context) {
-		deadline, renew, code, oldToClose, installed = s.authenticateSerial(unitCtx, c, raw, &reason)
+		deadline, renew, code, oldToClose, installed = s.sessionManager.authenticateSerial(unitCtx, c, raw, &reason)
 	}
 	unitOK := s.authority.WithServingUnit(ctx, admit)
 	if (!unitOK || code != "") && installed != nil {
@@ -702,7 +739,8 @@ func admissionFailure(ctx context.Context) string {
 	return "overloaded"
 }
 
-func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw string, reason *string) (time.Time, time.Duration, string, network.Conn, *session) {
+func (m *sessionManager) authenticateSerial(ctx context.Context, c network.Conn, raw string, reason *string) (time.Time, time.Duration, string, network.Conn, *session) {
+	s := m.server
 	guard := &s.peerGuards[peerGuardIndex(c.RemotePeer())]
 	for !guard.TryLock() {
 		select {
@@ -750,7 +788,7 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 			}
 			return
 		}
-		deadline, renew, code = s.authenticateAdmitted(unitCtx, c, fresh, &oldToClose, reason)
+		deadline, renew, code = s.sessionManager.authenticateAdmitted(unitCtx, c, fresh, &oldToClose, reason)
 		if code == "" {
 			s.mu.Lock()
 			installed = s.byConn[c]
@@ -768,6 +806,11 @@ func (s *Server) authenticateSerial(ctx context.Context, c network.Conn, raw str
 // accounting eligibility and registry installation. A committed policy change therefore
 // cannot be followed by installation of an older observed credential.
 func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn, reason *string) (time.Time, time.Duration, string) {
+	return s.sessionManager.authenticateAdmitted(ctx, c, credential, oldToClose, reason)
+}
+
+func (m *sessionManager) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn, reason *string) (time.Time, time.Duration, string) {
+	s := m.server
 	if ctx.Err() != nil {
 		*reason = "deadline"
 		return time.Time{}, 0, "temporarily_unavailable"
@@ -1005,7 +1048,7 @@ func (s *Server) handleAuth(st network.Stream) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	wasAuthenticated := s.isAuthenticated(st.Conn())
-	deadline, renew, code, observedReason := s.authenticateObserved(ctx, st.Conn(), raw)
+	deadline, renew, code, observedReason := s.sessionManager.authenticateObserved(ctx, st.Conn(), raw)
 	outcome, reason := authDiagnostic(code)
 	if observedReason != "" {
 		reason = observedReason
@@ -1061,6 +1104,11 @@ func (s *Server) handleAuth(st network.Stream) {
 }
 
 func (s *Server) isAuthenticated(c network.Conn) bool {
+	return s.sessionManager.isAuthenticated(c)
+}
+
+func (m *sessionManager) isAuthenticated(c network.Conn) bool {
+	s := m.server
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.byConn[c] != nil
