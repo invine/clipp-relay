@@ -163,6 +163,9 @@ reject invalid/stale work without converting it into another debit.
 `quota.eligibility/refused/quota_exhausted` proves confirmed plus locally known
 usage leaves no allowance. `failed/accounting_unavailable` is temporary and can
 reflect persistence, policy or clock failure; it makes no exhaustion claim.
+Successful eligibility checks are intentionally omitted because they run on
+every protected admission and periodic account check; refusals and failures
+remain visible.
 `quota.health/refused/accounting_unavailable` records deadline cutoff;
 `clock_unavailable` and `quota_exhausted` distinguish their proven causes.
 Associated `relay.session/ended` rows carry those same supported reasons. No
