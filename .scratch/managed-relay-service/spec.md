@@ -284,16 +284,18 @@ Retained Quota Usage. If missing at startup, block new-account registration unti
 key restored or affected window expires, never treat unreadable usage as zero.
 Early removal may invalidate credentials; no raw/unkeyed fallback.
 
-Unfinished login requires digest-only durable transaction **and** bounded live
-continuation holding recoverable outer client state. Separate opaque host-only
-Secure/HttpOnly/SameSite=Lax browser-binding cookie checked by digest. Claim once
-before Google exchange; no DB locks during provider I/O. Restart cancels unfinished
-flows, not durable valid Portal Sessions/grants. Process-random-HMAC identity
-fences compare flow-start sequences after identity resolution, preventing old
-flows completing across revocation/deletion/re-registration. Keep until older
-flows expire. Full continuation capacity refuses newcomers. If security mutation
-cannot install a fence, atomically invalidate all unfinished flows, including
-provider exchanges, before reclaiming fences; unrelated established sessions/
+Google login and Clipp consent continuations exist only in bounded process RAM:
+1,024 combined records, ten-minute expiry, atomic one-use claims, and refusal at
+capacity without evicting live continuations. Keep an opaque host-only
+Secure/HttpOnly/SameSite=Lax browser-binding cookie and existing origin/CSRF
+checks. Google state, its actual OIDC nonce and exact client intent stay in RAM;
+consent captures account generation while the account and Portal Session are
+serialized, then checks it again before code issuance. No SQL flow mirror exists.
+Google provider I/O occurs outside DB locks. Restart cancels unfinished flows,
+while durable valid Portal Sessions and Login Grants survive. Process-random-HMAC
+identity fences carry flow-start sequence/epoch through provider completion, so
+revocation, deletion/re-registration and fence overflow invalidate already
+claimed callbacks as well as map entries. Unrelated established sessions and
 credentials remain valid. Uncertain revocation fences conservatively.
 
 ### I4. Discovery, authentication and Rendezvous contracts
@@ -433,7 +435,6 @@ sessions. Same-peer replacement guards both accounts in order, swaps after check
 | quota_plans | ID/name/nonnegative allowances/revision/create/archive/first-assignment markers; assigned allowances immutable. |
 | weekly_relay_usage | Unique account/Monday-window, nonnegative recorded bytes, monotonic sequence and latest operation/delta receipt; full overrun retained. |
 | retained_quota_usage | Key-version/identity-HMAC/window/recorded only, no account IDs/claims/plan/state. |
-| authorization_transactions | Flow/client/exact redirect, client-state digest/S256 challenge, Google-state/nonce/browser-binding digests, optional account/generation, create/expiry/one-use status; recoverable outer state only RAM. |
 | authorization_codes | Unique digest/version, account/generation/client/redirect/challenge, issue/expiry/consumed. |
 | login_grants | Account/generation/client type, refresh generation, create/use/idle/absolute/termination; no device identity. |
 | refresh_token_generations | Grant/generation unique, digest/version, issue/consume; retain consumed hashes while active grant. |
@@ -464,7 +465,7 @@ scanning/routine success uses redacted aggregate diagnostics, not durable histor
 
 | Data | Retention |
 | --- | --- |
-| Ended credentials, redeemed/expired flows/codes, tokens/sessions/grants | Purge within 24h; consumed refresh hashes remain while owning grant active. |
+| Ended credentials/codes, tokens/sessions/grants | Purge within 24h; consumed refresh hashes remain while owning grant active. RAM continuations expire within ten minutes or on process restart. |
 | Completed self-deletion | Raw identity/presentation detach at finalization; hidden old account/dependencies purged within 24h. |
 | Retained Quota Usage | Current week only; expires at week end. |
 | Account-linked quota history | Current plus 12 completed weeks. |
@@ -815,8 +816,9 @@ Explicit run-specific offline restore:
    sequence, all pages. Empty list/checksum of remaining objects cannot prove
    missing acknowledged deletion absent. Reconcile pending/committed intents
    by old random account ID, never new account with same External Identity.
-4. Invalidate all restored Portal Sessions, grants, refresh/access and unfinished
-   flows; retain necessary usage peppers. Preserve restrictions and install
+4. Invalidate all restored Portal Sessions, grants, refresh/access; the fenced
+   process restart also cancels unfinished RAM continuations. Retain necessary
+   usage peppers. Preserve restrictions and install
    separate Recovery Review Holds.
 5. Preserve demonstrably recoverable current-week consumption/history; zero
    unrecoverable current-week amounts, including matching retained usage. Unknown

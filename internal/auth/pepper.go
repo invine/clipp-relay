@@ -15,8 +15,7 @@ var ErrRetainedPepperUnavailable = errors.New("retained usage key unavailable")
 func (s *Server) ValidatePepperCoverage(ctx context.Context) error {
 	rows, err := s.db.Query(ctx, `
 SELECT DISTINCT pepper_version FROM (
- SELECT pepper_version FROM public.authorization_transactions WHERE expires_at>=clock_timestamp()-interval '24 hours'
- UNION ALL SELECT pepper_version FROM public.authorization_codes WHERE LEAST(COALESCE(consumed_at,expires_at),expires_at)>=clock_timestamp()-interval '24 hours'
+ SELECT pepper_version FROM public.authorization_codes WHERE LEAST(COALESCE(consumed_at,expires_at),expires_at)>=clock_timestamp()-interval '24 hours'
  UNION ALL SELECT pepper_version FROM public.portal_sessions WHERE LEAST(idle_expires_at,absolute_expires_at)>=clock_timestamp()-interval '24 hours'
  UNION ALL SELECT t.pepper_version FROM public.relay_access_tokens t JOIN public.login_grants g ON g.id=t.grant_id
   WHERE LEAST(t.expires_at,COALESCE(g.terminated_at,t.expires_at),g.idle_expires_at,g.absolute_expires_at)>=clock_timestamp()-interval '24 hours'

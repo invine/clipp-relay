@@ -255,6 +255,13 @@ func TestMigrationAndServingAgainstRealPostgres(t *testing.T) {
 	if e = VerifySchema(ctx, p); e != nil {
 		t.Fatalf("fresh installation: %v", e)
 	}
+	var flowTable, migration14 bool
+	if e = p.QueryRow(ctx, `SELECT to_regclass('public.authorization_transactions') IS NOT NULL`).Scan(&flowTable); e != nil || flowTable {
+		t.Fatalf("RAM-only continuation table survives migration: %v %v", flowTable, e)
+	}
+	if e = p.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.schema_migrations WHERE revision=14)`).Scan(&migration14); e != nil || !migration14 {
+		t.Fatalf("continuation removal migration missing: %v %v", migration14, e)
+	}
 	if _, e = p.Exec(ctx, "DROP TABLE IF EXISTS public.recovery_runs, public.weekly_relay_usage, public.cleanup_breach_record, public.deletion_operations, public.deletion_capacity, public.retained_quota_usage, public.weekly_quota_usage, public.relay_access_tokens, public.refresh_generations, public.login_grants, public.authorization_codes, public.portal_sessions, public.authorization_transactions, public.audit_events, public.accounts, public.quota_plans, public.schema_migrations CASCADE; DROP FUNCTION IF EXISTS public.enforce_assigned_plan_allowance() CASCADE"); e != nil {
 		t.Fatal(e)
 	}

@@ -27,12 +27,13 @@ func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
 
 type oauthIntent struct{ client, redirect, state, challenge string }
 type oauthConsent struct {
-	intent  oauthIntent
-	account string
-	binding []byte
-	version uint64
-	expires time.Time
-	epoch   uint64
+	intent     oauthIntent
+	account    string
+	generation int64
+	binding    []byte
+	version    uint64
+	expires    time.Time
+	epoch      uint64
 }
 
 // Registered redirects are exact deployment inputs. Only Electron's loopback port varies.
@@ -110,7 +111,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	markClient(r, client)
-	account, _, _, _, _, e := s.session(r)
+	account, version, _, _, _, e := s.session(r)
 	if e != nil {
 		if errors.Is(e, errInvalidSession) {
 			s.loginFlow(w, r, &oauthIntent{client, redirect, state, challenge})
@@ -119,8 +120,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	var subject string
+	if e = s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); e != nil {
+		s.oauthError(w, 503)
+		return
+	}
 	cookie, _ := r.Cookie(sessionCookie)
-	s.presentConsent(w, r, account, cookie.Value, oauthIntent{client, redirect, state, challenge})
+	s.presentConsent(w, r, account, cookie.Value, version, subject, oauthIntent{client, redirect, state, challenge})
 }
 func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthIntent) {
 	target, _ := url.Parse(intent.redirect)
@@ -131,54 +137,67 @@ func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthInten
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
-func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, intent oauthIntent) {
+func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, version uint64, subject string, intent oauthIntent) {
 	id, e := opaque()
 	if e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	nonce, e := opaque()
+	unitCtx, releaseUnit, e := s.db.StartUnit(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	version := s.CurrentPepper
-	binding := s.digest(version, "consent-browser", credential)
-	s.mu.Lock()
-	now := time.Now()
-	for key, consent := range s.consents {
-		if !now.Before(consent.expires) {
-			delete(s.consents, key)
+	unitHeld := true
+	defer func() {
+		if unitHeld {
+			releaseUnit()
 		}
-	}
-	if len(s.flows)+len(s.consents) >= 1024 {
-		s.mu.Unlock()
+	}()
+	guard := s.identityGuard(s.identityKey(subject))
+	if !lockIdentity(unitCtx, guard) {
 		s.oauthError(w, 503)
 		return
 	}
-	s.consents[id] = oauthConsent{intent: intent, account: account, binding: binding, version: version, expires: now.Add(10 * time.Minute), epoch: s.flowEpoch}
-	s.mu.Unlock()
-	tx, e := s.db.Begin(r.Context())
+	guardHeld := true
+	defer func() {
+		if guardHeld {
+			guard.Unlock()
+		}
+	}()
+	binding := s.digest(version, "consent-browser", credential)
+	tx, e := s.db.Begin(unitCtx)
 	if e != nil {
-		s.dropConsent(id)
 		s.oauthError(w, 503)
 		return
 	}
-	defer tx.Rollback(r.Context())
+	defer tx.Rollback(unitCtx)
 	var status string
 	var generation int64
-	if e = tx.QueryRow(r.Context(), `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); e != nil {
-		s.dropConsent(id)
+	if e = tx.QueryRow(unitCtx, `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	if status != "Active" {
-		s.dropConsent(id)
-		if s.auditCredential(r.Context(), tx, "credential_blocked", account, intent.client) != nil {
+	var sessionGeneration int64
+	var storedCSRF []byte
+	if e = tx.QueryRow(unitCtx, `SELECT credential_generation,csrf_digest FROM public.portal_sessions WHERE credential_digest=$1 AND pepper_version=$2 AND account_id=$3 AND credential_generation=$4 AND idle_expires_at>clock_timestamp() AND absolute_expires_at>clock_timestamp() FOR UPDATE`, s.digest(version, "portal-session", credential), version, account, generation).Scan(&sessionGeneration, &storedCSRF); e != nil {
+		if !errors.Is(e, pgx.ErrNoRows) {
 			s.oauthError(w, 503)
 			return
 		}
-		if tx.Commit(r.Context()) != nil {
+		s.oauthError(w, 401)
+		return
+	}
+	if sessionGeneration != generation || subtle.ConstantTimeCompare(storedCSRF, s.digest(version, "csrf-store", s.csrf(version, credential))) != 1 {
+		s.oauthError(w, 401)
+		return
+	}
+	if status != "Active" {
+		if s.auditCredential(unitCtx, tx, "credential_blocked", account, intent.client) != nil {
+			s.oauthError(w, 503)
+			return
+		}
+		if tx.Commit(unitCtx) != nil {
 			if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
 				markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			}
@@ -191,26 +210,39 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		denyAuthorization(w, r, intent)
 		return
 	}
-	transaction, e := uuid()
-	if e != nil {
-		s.dropConsent(id)
-		s.oauthError(w, 503)
-		return
-	}
-	_, e = tx.Exec(r.Context(), `INSERT INTO public.authorization_transactions(id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at,flow_kind,client_type,redirect_uri,challenge,client_state_digest,account_id,credential_generation) VALUES($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp()+interval '10 minutes','clipp',$6,$7,$8,$9,$10,$11)`, transaction, s.digest(version, "consent-id", id), s.digest(version, "consent-nonce", nonce), binding, version, intent.client, intent.redirect, intent.challenge, s.digest(version, "client-state", intent.state), account, generation)
-	if e != nil {
-		s.dropConsent(id)
-		s.oauthError(w, 503)
-		return
-	}
-	if tx.Commit(r.Context()) != nil {
-		s.dropConsent(id)
+	if tx.Commit(unitCtx) != nil {
 		if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
 			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		}
 		s.oauthError(w, 503)
 		return
 	}
+	s.mu.Lock()
+	now := time.Now()
+	for key, flow := range s.flows {
+		if !now.Before(flow.expires) {
+			delete(s.flows, key)
+		}
+	}
+	for key, consent := range s.consents {
+		if !now.Before(consent.expires) {
+			delete(s.consents, key)
+		}
+	}
+	if len(s.flows)+len(s.consents) >= 1024 {
+		s.mu.Unlock()
+		if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
+			markDiagnostic(r, "refused", "rate_limited")
+		}
+		s.oauthError(w, 503)
+		return
+	}
+	s.consents[id] = oauthConsent{intent: intent, account: account, generation: generation, binding: binding, version: version, expires: now.Add(10 * time.Minute), epoch: s.flowEpoch}
+	s.mu.Unlock()
+	guard.Unlock()
+	guardHeld = false
+	releaseUnit()
+	unitHeld = false
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Browsers also apply form-action to the post-consent redirect. The app
 	// callback was validated against its registered redirect before this flow.
@@ -225,7 +257,6 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self' "+callbackSource+"; base-uri 'none'")
 	portal.Render(w, http.StatusOK, "consent", struct{ Client, Flow, CSRF string }{intent.client, id, s.csrf(version, credential)})
 }
-func (s *Server) dropConsent(id string) { s.mu.Lock(); delete(s.consents, id); s.mu.Unlock() }
 func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin || r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
 		s.oauthError(w, 403)
@@ -286,13 +317,7 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
-	var storedGeneration int64
-	e = s.db.QueryRow(r.Context(), `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND pepper_version=$3 AND flow_kind='clipp' AND account_id=$4 AND client_type=$5 AND redirect_uri=$6 AND challenge=$7 AND client_state_digest=$8 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING credential_generation`, s.digest(version, "consent-id", id), consent.binding, version, account, consent.intent.client, consent.intent.redirect, consent.intent.challenge, s.digest(version, "client-state", consent.intent.state)).Scan(&storedGeneration)
-	if e != nil {
-		s.oauthError(w, 401)
-		return
-	}
-	s.issueCode(w, r, account, storedGeneration, consent.intent)
+	s.issueCode(w, r, account, consent.generation, consent.intent)
 }
 func (s *Server) issueCode(w http.ResponseWriter, r *http.Request, account string, expectedGeneration int64, intent oauthIntent) {
 	code, e := opaque()

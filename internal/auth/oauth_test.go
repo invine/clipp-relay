@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"clipp-relay/internal/auth"
 )
@@ -64,6 +65,154 @@ func TestPublicClientCodeAndRefresh(t *testing.T) {
 		}
 	}
 	_ = http.MethodGet
+}
+
+func TestConsentSubmissionIsAtomicOneUse(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	d := newProvider(t)
+	d.subject = "one-use-consent"
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	session := loginAs(t, s, d, d.subject, "consent@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("a", 43)
+	challenge := sha256.Sum256([]byte(verifier))
+	query := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {"android"},
+		"redirect_uri":          {c.PublicClients.AndroidRedirect},
+		"code_challenge_method": {"S256"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
+		"state":                 {"duplicate-consent-state"},
+	}
+	begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
+	begin.AddCookie(session)
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, begin)
+	if response.Code != http.StatusOK {
+		t.Fatalf("consent page: %d %s", response.Code, response.Body.String())
+	}
+	flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(response.Body.String())
+	csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(response.Body.String())
+	if len(flow) != 2 || len(csrf) != 2 {
+		t.Fatal("consent form missing flow or csrf")
+	}
+	form := url.Values{"flow": {flow[1]}, "csrf": {csrf[1]}}
+	confirm := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("Origin", s.Origin)
+		r.AddCookie(session)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		return w
+	}
+	first := confirm()
+	if first.Code != http.StatusFound {
+		t.Fatalf("first consent submission: %d %s", first.Code, first.Body.String())
+	}
+	second := confirm()
+	if second.Code != http.StatusUnauthorized {
+		t.Fatalf("duplicate consent submission was not refused: %d", second.Code)
+	}
+	var codes int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil {
+		t.Fatal(err)
+	}
+	if codes != 1 {
+		t.Fatalf("one consent submission issued %d codes", codes)
+	}
+}
+
+func TestConsentUsesCapturedCredentialGeneration(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	d := newProvider(t)
+	d.subject = "stale-consent-generation"
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	session := loginAs(t, s, d, d.subject, "stale-consent@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("a", 43)
+	challenge := sha256.Sum256([]byte(verifier))
+	query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "state": {"stale-consent-state"}}
+	begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
+	begin.AddCookie(session)
+	page := httptest.NewRecorder()
+	s.Handler().ServeHTTP(page, begin)
+	if page.Code != http.StatusOK {
+		t.Fatalf("consent page: %d %s", page.Code, page.Body.String())
+	}
+	flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	if len(flow) != 2 || len(csrf) != 2 {
+		t.Fatal("consent form missing flow or csrf")
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"flow": {flow[1]}, "csrf": {csrf[1]}}
+	confirm := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirm.Header.Set("Origin", s.Origin)
+	confirm.AddCookie(session)
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, confirm)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("stale consent generation issued authorization: %d %s", response.Code, response.Body.String())
+	}
+	var codes int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil {
+		t.Fatal(err)
+	}
+	if codes != 0 {
+		t.Fatalf("stale consent issued %d authorization codes", codes)
+	}
+}
+
+func TestRestartCancelsUnfinishedConsent(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	d := newProvider(t)
+	d.subject = "restart-consent"
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	session := loginAs(t, s, d, d.subject, "restart@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("a", 43)
+	challenge := sha256.Sum256([]byte(verifier))
+	query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "state": {"restart-consent-state"}}
+	begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
+	begin.AddCookie(session)
+	page := httptest.NewRecorder()
+	s.Handler().ServeHTTP(page, begin)
+	if page.Code != http.StatusOK {
+		t.Fatalf("consent page: %d %s", page.Code, page.Body.String())
+	}
+	flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	if len(flow) != 2 || len(csrf) != 2 {
+		t.Fatal("consent form missing flow or csrf")
+	}
+	form := url.Values{"flow": {flow[1]}, "csrf": {csrf[1]}}
+	restarted := newTestServer(t, db.Pool, c, m, d.endpoints())
+	confirm := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(form.Encode()))
+	confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirm.Header.Set("Origin", s.Origin)
+	confirm.AddCookie(session)
+	response := httptest.NewRecorder()
+	restarted.Handler().ServeHTTP(response, confirm)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("consent survived process restart: %d", response.Code)
+	}
+	var codes int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.authorization_codes c JOIN public.accounts a ON a.id=c.account_id WHERE a.subject=$1`, d.subject).Scan(&codes); err != nil || codes != 0 {
+		t.Fatalf("restart issued code from unfinished consent: %d %v", codes, err)
+	}
 }
 
 func authorizeClient(t *testing.T, s *auth.Server, cookie *http.Cookie, client, redirect string) string {
@@ -222,6 +371,34 @@ func TestIdentityFenceCancelsUnknownGoogleFlow(t *testing.T) {
 	w = complete(s, state, binding)
 	if w.Code != 303 {
 		t.Fatalf("new flow blocked: %d", w.Code)
+	}
+}
+
+func TestIdentityFenceDuringProviderExchangeCancelsClaimedCallback(t *testing.T) {
+	c, m, db := fixture(t)
+	d := newProvider(t)
+	d.subject = "fenced-inflight-provider"
+	d.tokenGate = make(chan struct{})
+	d.tokenStarted = make(chan struct{}, 1)
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	state, binding := start(t, s, nil)
+	result := make(chan int, 1)
+	go func() { result <- complete(s, state, binding).Code }()
+	select {
+	case <-d.tokenStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("callback did not enter provider exchange")
+	}
+	if err := s.WithIdentityFence(d.subject, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	close(d.tokenGate)
+	if status := <-result; status == http.StatusSeeOther {
+		t.Fatal("claimed callback completed across an account fence")
+	}
+	var count int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.accounts WHERE subject=$1`, d.subject).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("fenced callback created account: %d %v", count, err)
 	}
 }
 

@@ -530,16 +530,16 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 			return
 		}
 	}
-	id, e := uuid()
-	if e != nil {
-		fail(w, 503)
-		return
-	}
 	s.mu.Lock()
 	now := time.Now()
 	for k, f := range s.flows {
-		if now.After(f.expires) {
+		if !now.Before(f.expires) {
 			delete(s.flows, k)
+		}
+	}
+	for k, consent := range s.consents {
+		if !now.Before(consent.expires) {
+			delete(s.consents, k)
 		}
 	}
 	if len(s.flows)+len(s.consents) >= 1024 {
@@ -551,16 +551,6 @@ func (s *Server) loginFlow(w http.ResponseWriter, r *http.Request, intent *oauth
 	s.flowSeq++
 	s.flows[state] = flow{state: state, nonce: nonce, binding: binding, expires: now.Add(10 * time.Minute), intent: intent, seq: s.flowSeq, epoch: s.flowEpoch}
 	s.mu.Unlock()
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-	_, e = s.db.Exec(ctx, `INSERT INTO public.authorization_transactions (id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp()+interval '10 minutes')`, id, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "google-nonce", nonce), s.digest(s.CurrentPepper, "browser-binding", binding), s.CurrentPepper)
-	if e != nil {
-		s.mu.Lock()
-		delete(s.flows, state)
-		s.mu.Unlock()
-		fail(w, 503)
-		return
-	}
 	cookie(w, bindingCookie, binding, 600)
 	authorizationURL := s.googleOAuth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce))
 	http.Redirect(w, r, authorizationURL, http.StatusFound)
@@ -586,25 +576,22 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	f, ok := s.flows[state]
-	if ok {
+	if ok && !time.Now().Before(f.expires) {
 		delete(s.flows, state)
+		ok = false
+	}
+	if ok && subtle.ConstantTimeCompare([]byte(bind.Value), []byte(f.binding)) == 1 {
+		delete(s.flows, state)
+	} else {
+		ok = false
 	}
 	s.mu.Unlock()
-	if !ok || time.Now().After(f.expires) || subtle.ConstantTimeCompare([]byte(bind.Value), []byte(f.binding)) != 1 {
+	if !ok {
 		fail(w, 400)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	var claimed string
-	e = s.db.QueryRow(ctx, `UPDATE public.authorization_transactions SET claimed_at=clock_timestamp() WHERE state_digest=$1 AND binding_digest=$2 AND nonce_digest=$3 AND pepper_version=$4 AND claimed_at IS NULL AND expires_at>clock_timestamp() RETURNING id`, s.digest(s.CurrentPepper, "google-state", state), s.digest(s.CurrentPepper, "browser-binding", bind.Value), s.digest(s.CurrentPepper, "google-nonce", f.nonce), s.CurrentPepper).Scan(&claimed)
-	if e != nil {
-		if e != pgx.ErrNoRows {
-			markDiagnostic(r, "failed", "database_unavailable")
-		}
-		fail(w, 400)
-		return
-	}
 	providerCtx, cancelProvider := context.WithTimeout(ctx, 8*time.Second)
 	claims, e := s.exchange(providerCtx, code, f.nonce)
 	cancelProvider()
@@ -627,13 +614,23 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	defer releaseUnit()
+	unitHeld := true
+	defer func() {
+		if unitHeld {
+			releaseUnit()
+		}
+	}()
 	guard := s.identityGuard(key)
 	if !lockIdentity(ctx, guard) {
 		fail(w, 503)
 		return
 	}
-	defer guard.Unlock()
+	guardHeld := true
+	defer func() {
+		if guardHeld {
+			guard.Unlock()
+		}
+	}()
 	s.mu.Lock()
 	fence := s.fences[key]
 	blocked := f.epoch != s.flowEpoch || (fence.seq >= f.seq && !fence.until.IsZero())
@@ -727,7 +724,11 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	markDiagnostic(r, "success", "none")
 	cookie(w, sessionCookie, credential, 0)
 	if f.intent != nil {
-		s.presentConsent(w, r, accountID, credential, *f.intent)
+		guard.Unlock()
+		guardHeld = false
+		releaseUnit()
+		unitHeld = false
+		s.presentConsent(w, r, accountID, credential, s.CurrentPepper, claims.Subject, *f.intent)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)

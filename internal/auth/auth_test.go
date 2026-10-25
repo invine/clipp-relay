@@ -632,18 +632,74 @@ func TestProviderCapacityRejectsWithoutQueue(t *testing.T) {
 	}
 }
 
-func TestContinuationCapacityRefusesNewLogin(t *testing.T) {
+func TestCombinedContinuationCapacityRefusesWithoutEviction(t *testing.T) {
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	d := newProvider(t)
+	d.subject = "combined-continuation-capacity"
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	session := loginAs(t, s, d, d.subject, "capacity@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	verifier := strings.Repeat("a", 43)
+	challenge := sha256.Sum256([]byte(verifier))
+	query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "state": {"capacity-consent-state"}}
+	begin := httptest.NewRequest("GET", "/oauth/authorize?"+query.Encode(), nil)
+	begin.AddCookie(session)
+	page := httptest.NewRecorder()
+	s.Handler().ServeHTTP(page, begin)
+	if page.Code != http.StatusOK {
+		t.Fatalf("consent page: %d %s", page.Code, page.Body.String())
+	}
+	consentFlow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	if len(consentFlow) != 2 || len(csrf) != 2 {
+		t.Fatal("consent form missing flow or csrf")
+	}
+	consentForm := url.Values{"flow": {consentFlow[1]}, "csrf": {csrf[1]}}
+	var firstFlow string
+	var firstBinding *http.Cookie
+	for i := 0; i < 1023; i++ {
+		flow, binding := start(t, s, nil)
+		if i == 0 {
+			firstFlow, firstBinding = flow, binding
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	refused := httptest.NewRecorder()
+	s.Handler().ServeHTTP(refused, httptest.NewRequest("GET", "/auth/login", nil))
+	if refused.Code != 503 {
+		t.Fatalf("full combined continuation store admitted newcomer: %d", refused.Code)
+	}
+	if response := complete(s, firstFlow, firstBinding); response.Code != 303 {
+		t.Fatalf("capacity refusal evicted existing Google continuation: %d", response.Code)
+	}
+	confirm := httptest.NewRequest("POST", "/oauth/authorize", strings.NewReader(consentForm.Encode()))
+	confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirm.Header.Set("Origin", s.Origin)
+	confirm.AddCookie(session)
+	accepted := httptest.NewRecorder()
+	s.Handler().ServeHTTP(accepted, confirm)
+	if accepted.Code != 302 {
+		t.Fatalf("capacity refusal evicted existing consent: %d %s", accepted.Code, accepted.Body.String())
+	}
+}
+
+func TestGoogleLoginContinuationIsRamOnly(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	for i := 0; i < 1024; i++ {
-		start(t, s, nil)
-		time.Sleep(5 * time.Millisecond)
+	state, binding := start(t, s, nil)
+	var tableExists bool
+	if err := db.Pool.QueryRow(context.Background(), `SELECT to_regclass('public.authorization_transactions') IS NOT NULL`).Scan(&tableExists); err != nil {
+		t.Fatal(err)
 	}
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/auth/login", nil))
-	if w.Code != 503 {
-		t.Fatalf("full continuation store: %d", w.Code)
+	if tableExists {
+		t.Fatal("unfinished Google login still has a database continuation table")
+	}
+	if response := complete(s, state, binding); response.Code != 303 {
+		t.Fatalf("RAM continuation did not complete through callback: %d", response.Code)
 	}
 }
 
@@ -888,7 +944,7 @@ func TestRepeatedSuccessfulCallbacksRespectResolvedAccountRate(t *testing.T) {
 	}
 }
 
-func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
+func TestExpiredPortalSessionCleanupCatchesUpInBoundedBatches(t *testing.T) {
 	c, m, db := fixture(t)
 	d := newProvider(t)
 	d.subject = "cleanup-owner"
@@ -898,12 +954,7 @@ func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
 		t.Fatalf("setup: %d", w.Code)
 	}
 	ctx := context.Background()
-	_, e := db.Pool.Exec(ctx, `INSERT INTO public.authorization_transactions (id,state_digest,nonce_digest,binding_digest,pepper_version,created_at,expires_at)
- SELECT lpad(to_hex(i+100000),32,'0')::uuid,decode(md5('state'||i)||md5('state2'||i),'hex'),decode(repeat('aa',32),'hex'),decode(repeat('bb',32),'hex'),$1,clock_timestamp()-interval '3 hours',clock_timestamp()-interval '2 hours' FROM generate_series(1,1200) AS i`, m.CurrentPepper)
-	if e != nil {
-		t.Fatal(e)
-	}
-	_, e = db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions (credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
+	_, e := db.Pool.Exec(ctx, `INSERT INTO public.portal_sessions (credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at)
  SELECT decode(md5('session'||i)||md5('session2'||i),'hex'),$1,a.id,0,decode(repeat('cc',32),'hex'),clock_timestamp()-interval '3 hours',clock_timestamp()-interval '3 hours',clock_timestamp()-interval '3 hours',clock_timestamp()-interval '2 hours',clock_timestamp()-interval '1 hour' FROM generate_series(1,1200) AS i CROSS JOIN public.accounts a WHERE a.subject=$2`, m.CurrentPepper, d.subject)
 	if e != nil {
 		t.Fatal(e)
@@ -921,21 +972,18 @@ func TestExpiredAuthStateCleanupCatchesUpInBoundedBatches(t *testing.T) {
 	}()
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		var flows, sessions int
-		err1 := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour'`).Scan(&flows)
-		err2 := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions)
-		if err1 != nil || err2 != nil {
-			t.Fatalf("cleanup query: %v %v", err1, err2)
+		var sessions int
+		if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions); err != nil {
+			t.Fatalf("cleanup query: %v", err)
 		}
-		if flows == 0 && sessions == 0 {
+		if sessions == 0 {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	var flows, sessions int
-	_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.authorization_transactions WHERE expires_at<clock_timestamp()-interval '1 hour'`).Scan(&flows)
+	var sessions int
 	_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.portal_sessions WHERE idle_expires_at<clock_timestamp()-interval '1 hour'`).Scan(&sessions)
-	t.Fatalf("cleanup backlog after catch-up window: flows=%d sessions=%d", flows, sessions)
+	t.Fatalf("cleanup backlog after catch-up window: sessions=%d", sessions)
 }
 
 func TestDatabaseOutageAfterVerifiedProviderResponseCreatesNoFallbackState(t *testing.T) {

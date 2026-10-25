@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const ExpectedRevision = 13
+const ExpectedRevision = 14
 
 type migration struct {
 	revision int
@@ -279,7 +279,7 @@ CREATE TABLE public.recovery_runs (
 );
 REVOKE ALL ON public.recovery_runs FROM PUBLIC;`}, {13, `DROP TABLE public.weekly_quota_usage;
 DELETE FROM public.retained_quota_usage;
-ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}}
+ALTER TABLE public.retained_quota_usage RENAME COLUMN committed_bytes TO recorded_bytes;`}, {14, `DROP TABLE public.authorization_transactions;`}}
 
 func checksum(sql string) string {
 	sum := sha256.Sum256([]byte(sql))
