@@ -23,7 +23,7 @@ func TestRelayCredentialSeparatesDatabaseOutageFromInvalidToken(t *testing.T) {
 	code := authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect)
 	token, _ := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, code)
 	credential, err := s.AuthenticateRelay(context.Background(), token)
-	if err != nil || credential.AccountID != account || credential.SessionLimit != 5 {
+	if err != nil || credential.AccountID != account || credential.GrantID == "" || credential.SessionLimit != 5 {
 		t.Fatalf("active credential: %+v %v", credential, err)
 	}
 	if _, err = s.AuthenticateRelay(context.Background(), "invalid"); !errors.Is(err, auth.ErrInvalidAccess) {

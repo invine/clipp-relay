@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"clipp-relay/internal/quota"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 )
@@ -29,6 +31,21 @@ func (a *countingAuthority) AuthenticateRelay(context.Context, string) (auth.Rel
 
 func (a failingAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCredential, error) {
 	return auth.RelayCredential{}, a.err
+}
+
+type blockingEligibility struct {
+	wireAccounting
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingEligibility) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+	c.once.Do(func() {
+		close(c.entered)
+		<-c.release
+	})
+	return quota.AccountingEligibility{}, nil
 }
 
 type failingAccounting struct{ err error }
@@ -183,6 +200,55 @@ func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 				t.Fatalf("failed initial auth retained %d connections", n)
 			}
 		})
+	}
+}
+
+func TestDisconnectedConnectionCannotAuthenticateAfterQuotaCompletes(t *testing.T) {
+	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(wireAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if err = h.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan string, 1)
+	go func() {
+		response, _ := transportAuthResponse(ctx, h, s.Host.ID(), "authorized")
+		result <- response
+	}()
+	select {
+	case <-accounting.entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not reach initial quota assessment")
+	}
+	if err = h.Network().ClosePeer(s.Host.ID()); err != nil {
+		t.Fatal(err)
+	}
+	for s.Host.Network().Connectedness(h.ID()) != network.NotConnected {
+		select {
+		case <-ctx.Done():
+			t.Fatal("relay did not observe physical disconnect before quota release")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	close(accounting.release)
+	select {
+	case <-result:
+	case <-ctx.Done():
+		t.Fatal("authentication did not finish after quota release")
+	}
+	if got := s.ActiveSessions(); got != 0 {
+		t.Fatalf("disconnected authentication result installed a Relay Session: %d", got)
 	}
 }
 
