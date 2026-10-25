@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/config"
+	"clipp-relay/internal/database"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -1048,4 +1050,502 @@ func TestHTTPSPublicClientStateContract(t *testing.T) {
 		redeemTLS(entry.clientType, entry.redirect, code)
 	}
 
+}
+
+func TestNativeIssuerRegisteredClientsAndRedirects(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	verifier := strings.Repeat("a", 43)
+	clients := []struct {
+		client, redirect string
+	}{
+		{"electron", "http://127.0.0.1:34567/oauth/callback"},
+		{"android", c.PublicClients.AndroidRedirect},
+		{"extension", c.PublicClients.ExtensionRedirect},
+	}
+	var androidRefresh string
+	for i, client := range clients {
+		code := issueNativeCode(t, handler, s.Origin, cookie, client.client, client.redirect, verifier, fmt.Sprintf("native-policy-state-%02d", i))
+		invalidRedirect := client.redirect + "/other"
+		if client.client == "electron" {
+			invalidRedirect = "http://localhost:34567/oauth/callback"
+		}
+		bad := nativeTokenPost(t, handler, url.Values{"grant_type": {"authorization_code"}, "client_id": {client.client}, "redirect_uri": {invalidRedirect}, "code": {code}, "code_verifier": {verifier}})
+		if bad.Code == http.StatusOK {
+			t.Fatalf("%s code accepted a non-exact redirect", client.client)
+		}
+		out := nativeTokenPost(t, handler, url.Values{"grant_type": {"authorization_code"}, "client_id": {client.client}, "redirect_uri": {client.redirect}, "code": {code}, "code_verifier": {verifier}})
+		access, refresh := decodeNativeTokens(t, out)
+		if out.Code != http.StatusOK {
+			t.Fatalf("%s code exchange: %d %s", client.client, out.Code, out.Body.String())
+		}
+		var response struct {
+			TokenType string `json:"token_type"`
+			ExpiresIn int    `json:"expires_in"`
+			Scope     string `json:"scope"`
+		}
+		if err := json.Unmarshal(out.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.TokenType != "Bearer" || response.ExpiresIn < 895 || response.ExpiresIn > 900 || response.Scope != "" {
+			t.Fatalf("%s token response type=%q lifetime=%d scope=%q, want Bearer, a conservatively floored lifetime no greater than 900, and empty scope", client.client, response.TokenType, response.ExpiresIn, response.Scope)
+		}
+		if !strings.HasPrefix(access, "ory_at_") || !strings.HasPrefix(refresh, "ory_rt_") {
+			t.Fatalf("%s did not receive native access and refresh credentials", client.client)
+		}
+		refreshed := nativeTokenPost(t, handler, url.Values{"grant_type": {"refresh_token"}, "client_id": {client.client}, "refresh_token": {refresh}})
+		if refreshed.Code != http.StatusOK {
+			t.Fatalf("%s refresh: %d %s", client.client, refreshed.Code, refreshed.Body.String())
+		}
+		var refreshResponse struct {
+			TokenType string `json:"token_type"`
+			ExpiresIn int    `json:"expires_in"`
+			Scope     string `json:"scope"`
+		}
+		if err := json.Unmarshal(refreshed.Body.Bytes(), &refreshResponse); err != nil || refreshResponse.TokenType != "Bearer" || refreshResponse.ExpiresIn < 895 || refreshResponse.ExpiresIn > 900 || refreshResponse.Scope != "" {
+			t.Fatalf("%s refresh response type=%q lifetime=%d scope=%q err=%v", client.client, refreshResponse.TokenType, refreshResponse.ExpiresIn, refreshResponse.Scope, err)
+		}
+		_, nextRefresh := decodeNativeTokens(t, refreshed)
+		if client.client == "android" {
+			androidRefresh = nextRefresh
+		}
+		if _, _, err := s.AuthenticateAccess(context.Background(), access); err != nil {
+			t.Fatalf("ordinary %s refresh invalidated the preceding access token: %v", client.client, err)
+		}
+	}
+
+	for _, invalid := range []struct{ client, redirect string }{
+		{"electron", "http://localhost:34567/oauth/callback"},
+		{"electron", "http://127.0.0.1:34567/other"},
+		{"electron", "http://user@127.0.0.1:34567/oauth/callback"},
+		{"electron", "http://127.0.0.1:34567/oauth/callback#fragment"},
+		{"android", "clipp-relay://oauth/other"},
+		{"android", "clipp-relay://user@oauth/callback"},
+		{"android", "clipp-relay://oauth/callback#fragment"},
+		{"extension", "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/other"},
+		{"extension", "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay#fragment"},
+		{"extension", "https://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.chromiumapp.org/clipp-relay"},
+		{"unregistered", "https://example.test/callback"},
+	} {
+		q := url.Values{"response_type": {"code"}, "client_id": {invalid.client}, "redirect_uri": {invalid.redirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(make([]byte, 32))}, "state": {"invalid-native-client-state"}}
+		request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code == http.StatusOK || response.Code == http.StatusFound {
+			t.Fatalf("unregistered %s redirect accepted: %d", invalid.client, response.Code)
+		}
+	}
+
+	var codes, grants, generations, accesses int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes WHERE account_id=(SELECT id FROM public.accounts WHERE subject=$1)`, d.subject).Scan(&codes); err != nil || codes != 3 {
+		t.Fatalf("native authorization codes=%d err=%v, want 3", codes, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_login_grants WHERE account_id=(SELECT id FROM public.accounts WHERE subject=$1)`, d.subject).Scan(&grants); err != nil || grants != 3 {
+		t.Fatalf("native grants=%d err=%v, want 3", grants, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_refresh_generations r JOIN public.native_login_grants g ON g.id=r.grant_id WHERE g.account_id=(SELECT id FROM public.accounts WHERE subject=$1)`, d.subject).Scan(&generations); err != nil || generations != 6 {
+		t.Fatalf("native refresh generations=%d err=%v, want 6", generations, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_access_tokens x JOIN public.native_login_grants g ON g.id=x.grant_id WHERE g.account_id=(SELECT id FROM public.accounts WHERE subject=$1)`, d.subject).Scan(&accesses); err != nil || accesses != 6 {
+		t.Fatalf("native access tokens=%d err=%v, want 6", accesses, err)
+	}
+	var codeLifetime, accessLifetime, absoluteLifetime, idleLifetime float64
+	if err := db.Pool.QueryRow(context.Background(), `SELECT min(EXTRACT(EPOCH FROM expires_at-issued_at)) FROM public.native_authorization_codes WHERE account_id=(SELECT id FROM public.accounts WHERE subject=$1)`, d.subject).Scan(&codeLifetime); err != nil || codeLifetime < 299 || codeLifetime > 301 {
+		t.Fatalf("native authorization-code lifetime=%f err=%v, want about 300 seconds", codeLifetime, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT min(EXTRACT(EPOCH FROM x.expires_at-x.issued_at)),min(EXTRACT(EPOCH FROM g.absolute_expires_at-g.created_at)),min(EXTRACT(EPOCH FROM g.idle_expires_at-g.created_at)) FROM public.native_access_tokens x JOIN public.native_login_grants g ON g.id=x.grant_id WHERE g.account_id=(SELECT id FROM public.accounts WHERE subject=$1)`, d.subject).Scan(&accessLifetime, &absoluteLifetime, &idleLifetime); err != nil {
+		t.Fatal(err)
+	}
+	if accessLifetime < 899 || accessLifetime > 901 || absoluteLifetime < 180*86400-1 || absoluteLifetime > 180*86400+1 || idleLifetime < 30*86400-1 || idleLifetime > 30*86400+1 {
+		t.Fatalf("native deadlines access=%f idle=%f absolute=%f", accessLifetime, idleLifetime, absoluteLifetime)
+	}
+	var androidGrant string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT id::text FROM public.native_login_grants WHERE account_id=(SELECT id FROM public.accounts WHERE subject=$1) AND client_type='android'`, d.subject).Scan(&androidGrant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.native_login_grants SET absolute_expires_at=clock_timestamp()+interval '10 seconds',idle_expires_at=clock_timestamp()+interval '1 second' WHERE id=$1`, androidGrant); err != nil {
+		t.Fatal(err)
+	}
+	capped := nativeTokenPost(t, handler, url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {androidRefresh}})
+	if capped.Code != http.StatusOK {
+		t.Fatalf("near-absolute-deadline refresh: %d %s", capped.Code, capped.Body.String())
+	}
+	var idleAtCap bool
+	if err := db.Pool.QueryRow(context.Background(), `SELECT idle_expires_at=absolute_expires_at FROM public.native_login_grants WHERE id=$1`, androidGrant).Scan(&idleAtCap); err != nil || !idleAtCap {
+		t.Fatalf("sliding grant idle deadline was not capped at the original absolute deadline (cap=%t err=%v)", idleAtCap, err)
+	}
+}
+
+func TestNativeIssuerGrantCapRefusesWithoutConsumingCode(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	verifier := strings.Repeat("a", 43)
+	code := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "native-grant-cap-state-0001")
+	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.native_login_grants(id,account_id,credential_generation,client_type,current_refresh_generation,created_at,last_used_at,idle_expires_at,absolute_expires_at) SELECT gen_random_uuid(),a.id,a.credential_generation,'android',1,clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days' FROM public.accounts a CROSS JOIN generate_series(1,20) WHERE a.subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}}
+	if out := nativeTokenPost(t, handler, form); out.Code != http.StatusTooManyRequests {
+		t.Fatalf("native grant cap status=%d body=%s, want 429", out.Code, out.Body.String())
+	}
+	var audits, unconsumed int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.audit_events WHERE account_id=(SELECT id FROM public.accounts WHERE subject=$1) AND event='grant_cap'`, d.subject).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("native cap audit rows=%d err=%v", audits, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes WHERE account_id=(SELECT id FROM public.accounts WHERE subject=$1) AND consumed_at IS NULL`, d.subject).Scan(&unconsumed); err != nil || unconsumed != 1 {
+		t.Fatalf("grant refusal consumed authorization code (unconsumed=%d err=%v)", unconsumed, err)
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.native_login_grants SET terminated_at=clock_timestamp() WHERE id=(SELECT id FROM public.native_login_grants WHERE account_id=(SELECT id FROM public.accounts WHERE subject=$1) ORDER BY created_at LIMIT 1)`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	if out := nativeTokenPost(t, handler, form); out.Code != http.StatusOK {
+		t.Fatalf("valid code after a grant slot freed: %d %s", out.Code, out.Body.String())
+	}
+}
+
+func TestNativeIssuerOnlyAcceptsPublicCodeAndRefreshWithS256(t *testing.T) {
+	c := config.Config{}
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
+	s := newTestServer(t, nil, c, config.Material{}, auth.Provider{})
+	handler := s.NativeHandlerForTest(bytes.Repeat([]byte{0x73}, 32))
+	verifier := strings.Repeat("a", 43)
+	hash := sha256.Sum256([]byte(verifier))
+	valid := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {"clipp-relay://oauth/callback"}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {"native-policy-state-0001"}}
+	for name, change := range map[string]func(url.Values){
+		"plain PKCE":     func(q url.Values) { q.Set("code_challenge_method", "plain") },
+		"implicit grant": func(q url.Values) { q.Set("response_type", "token") },
+		"unregistered client": func(q url.Values) {
+			q.Set("client_id", "other")
+			q.Set("redirect_uri", "https://example.test/callback")
+		},
+		"additional scope": func(q url.Values) { q.Set("scope", "openid") },
+		"duplicate client": func(q url.Values) { q.Add("client_id", "extension") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			q := url.Values{}
+			for key, values := range valid {
+				q[key] = append([]string(nil), values...)
+			}
+			change(q)
+			request := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code == http.StatusOK || response.Code == http.StatusFound {
+				t.Fatalf("invalid public authorize request accepted: %d", response.Code)
+			}
+		})
+	}
+	for name, form := range map[string]url.Values{
+		"unsupported grant": {"grant_type": {"client_credentials"}, "client_id": {"android"}},
+		"duplicate client":  {"grant_type": {"refresh_token"}, "client_id": {"android", "extension"}, "refresh_token": {"ory_rt_" + strings.Repeat("a", 87)}},
+		"extra secret":      {"grant_type": {"refresh_token"}, "client_id": {"android"}, "client_secret": {"secret"}, "refresh_token": {"ory_rt_" + strings.Repeat("a", 87)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := nativeTokenPost(t, handler, form)
+			if response.Code == http.StatusOK {
+				t.Fatalf("invalid public token request accepted: %s", response.Body.String())
+			}
+		})
+	}
+	oversized := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(strings.Repeat("x", (16<<10)+1)))
+	oversized.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	oversizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(oversizedResponse, oversized)
+	if oversizedResponse.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized native token body status=%d, want 413", oversizedResponse.Code)
+	}
+}
+
+func TestNativeIssuerAuthorityRecheckedAfterAccountLockWait(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	verifier := strings.Repeat("a", 43)
+	flow, csrf := beginNativeConsent(t, handler, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "native-stale-consent-state-01")
+	accountID := nativePolicyAccountID(t, db, d.subject)
+
+	consentTx := lockNativePolicyAccount(t, db, accountID)
+	consentDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { consentDone <- confirmNativeConsent(t, handler, s.Origin, cookie, flow, csrf) }()
+	waitForNativeAccountLock(t, db, "consent generation", consentDone)
+	if _, err := consentTx.Exec(context.Background(), `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := consentTx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-consentDone; out.Code != http.StatusUnauthorized {
+		t.Fatalf("consent issued a code after generation changed while it waited: %d %s", out.Code, out.Body.String())
+	}
+	var codes int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes WHERE account_id=$1`, accountID).Scan(&codes); err != nil || codes != 0 {
+		t.Fatalf("stale consent persisted %d authorization codes: %v", codes, err)
+	}
+
+	cookie = loginAs(t, s, d, d.subject, d.subject+"@example.test", "")
+	code := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "native-code-generation-state-01")
+	codeTx := lockNativePolicyAccount(t, db, accountID)
+	codeDone := make(chan *httptest.ResponseRecorder, 1)
+	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}}
+	go func() { codeDone <- nativeTokenPost(t, handler, form) }()
+	waitForNativeAccountLock(t, db, "code exchange generation", codeDone)
+	if _, err := codeTx.Exec(context.Background(), `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := codeTx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-codeDone; out.Code != http.StatusUnauthorized {
+		t.Fatalf("code exchanged after generation changed while it waited: %d %s", out.Code, out.Body.String())
+	}
+	var unconsumed int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes WHERE account_id=$1 AND consumed_at IS NULL`, accountID).Scan(&unconsumed); err != nil || unconsumed != 1 {
+		t.Fatalf("stale code consumed despite generation change (unconsumed=%d err=%v)", unconsumed, err)
+	}
+
+	cookie = loginAs(t, s, d, d.subject, d.subject+"@example.test", "")
+	refreshCode := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "native-refresh-status-state-01")
+	grantResponse := nativeTokenPost(t, handler, url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {refreshCode}, "code_verifier": {verifier}})
+	_, refresh := decodeNativeTokens(t, grantResponse)
+	refreshTx := lockNativePolicyAccount(t, db, accountID)
+	refreshDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		refreshDone <- nativeTokenPost(t, handler, url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refresh}})
+	}()
+	waitForNativeAccountLock(t, db, "refresh status", refreshDone)
+	if _, err := refreshTx.Exec(context.Background(), `UPDATE public.accounts SET status='Suspended' WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshTx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-refreshDone; out.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh succeeded after account was suspended while it waited: %d %s", out.Code, out.Body.String())
+	}
+}
+
+func TestNativeIssuerCodeAndGrantExpiryRecheckedAfterAccountLockWait(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	verifier := strings.Repeat("a", 43)
+	accountID := nativePolicyAccountID(t, db, d.subject)
+	code := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "native-expired-code-state-01")
+	codeTx := lockNativePolicyAccount(t, db, accountID)
+	codeDone := make(chan *httptest.ResponseRecorder, 1)
+	codeForm := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}}
+	go func() { codeDone <- nativeTokenPost(t, handler, codeForm) }()
+	waitForNativeAccountLock(t, db, "authorization-code expiry", codeDone)
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.native_authorization_codes SET expires_at=clock_timestamp()-interval '1 second' WHERE account_id=$1 AND consumed_at IS NULL`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := codeTx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-codeDone; out.Code != http.StatusUnauthorized {
+		t.Fatalf("authorization code expired during lock wait was accepted: %d %s", out.Code, out.Body.String())
+	}
+	var unconsumed int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes WHERE account_id=$1 AND consumed_at IS NULL`, accountID).Scan(&unconsumed); err != nil || unconsumed != 1 {
+		t.Fatalf("expired authorization code was consumed (unconsumed=%d err=%v)", unconsumed, err)
+	}
+
+	cookie = loginAs(t, s, d, d.subject, d.subject+"@example.test", "")
+	refreshCode := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "native-expired-grant-state-01")
+	grantResponse := nativeTokenPost(t, handler, url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {refreshCode}, "code_verifier": {verifier}})
+	_, refresh := decodeNativeTokens(t, grantResponse)
+	grantTx := lockNativePolicyAccount(t, db, accountID)
+	refreshDone := make(chan *httptest.ResponseRecorder, 1)
+	refreshForm := url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refresh}}
+	go func() { refreshDone <- nativeTokenPost(t, handler, refreshForm) }()
+	waitForNativeAccountLock(t, db, "refresh grant expiry", refreshDone)
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.native_login_grants SET idle_expires_at=clock_timestamp()-interval '1 second' WHERE account_id=$1 AND terminated_at IS NULL`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := grantTx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-refreshDone; out.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh after grant idle deadline passed during lock wait was accepted: %d %s", out.Code, out.Body.String())
+	}
+	var terminated, audits int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_login_grants WHERE account_id=$1 AND terminated_at IS NOT NULL`, accountID).Scan(&terminated); err != nil || terminated != 0 {
+		t.Fatalf("expired refresh incorrectly terminated grants=%d err=%v", terminated, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.audit_events WHERE account_id=$1 AND event='refresh_reuse'`, accountID).Scan(&audits); err != nil || audits != 0 {
+		t.Fatalf("expired refresh was misclassified as replay audit=%d err=%v", audits, err)
+	}
+}
+
+func TestNativeIssuerRefreshGenerationRecheckedAfterAccountLockWait(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	verifier := strings.Repeat("a", 43)
+	accountID := nativePolicyAccountID(t, db, d.subject)
+	code := issueNativeCode(t, handler, s.Origin, cookie, "android", c.PublicClients.AndroidRedirect, verifier, "native-refresh-generation-state-01")
+	grantResponse := nativeTokenPost(t, handler, url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}})
+	_, refresh := decodeNativeTokens(t, grantResponse)
+	accountTx := lockNativePolicyAccount(t, db, accountID)
+	refreshDone := make(chan *httptest.ResponseRecorder, 1)
+	refreshForm := url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refresh}}
+	go func() { refreshDone <- nativeTokenPost(t, handler, refreshForm) }()
+	waitForNativeAccountLock(t, db, "refresh generation", refreshDone)
+	if _, err := accountTx.Exec(context.Background(), `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE id=$1`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	if err := accountTx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-refreshDone; out.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh succeeded after account generation changed while it waited: %d %s", out.Code, out.Body.String())
+	}
+	var current int64
+	var activeRefresh int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT current_refresh_generation FROM public.native_login_grants WHERE account_id=$1`, accountID).Scan(&current); err != nil || current != 1 {
+		t.Fatalf("stale-generation refresh changed current generation to %d: %v", current, err)
+	}
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_refresh_generations r JOIN public.native_login_grants g ON g.id=r.grant_id WHERE g.account_id=$1 AND r.consumed_at IS NULL`, accountID).Scan(&activeRefresh); err != nil || activeRefresh != 1 {
+		t.Fatalf("stale-generation refresh consumed its token rows=%d err=%v", activeRefresh, err)
+	}
+}
+
+func nativePolicyAccountID(t *testing.T, db *database.Runtime, subject string) string {
+	t.Helper()
+	var id string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT id::text FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func lockNativePolicyAccount(t *testing.T, db *database.Runtime, accountID string) pgx.Tx {
+	t.Helper()
+	tx, err := db.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err = tx.QueryRow(context.Background(), `SELECT id::text FROM public.accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&id); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	return tx
+}
+
+func waitForNativeAccountLock(t *testing.T, db *database.Runtime, phase string, done <-chan *httptest.ResponseRecorder) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting bool
+		if err := db.Pool.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE state='active' AND wait_event_type='Lock' AND query ILIKE '%public.accounts%' AND query ILIKE '%FOR UPDATE%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return
+		}
+		select {
+		case response := <-done:
+			t.Fatalf("%s request returned before blocking on the account row: status=%d body=%s", phase, response.Code, response.Body.String())
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	rows, err := db.Pool.Query(context.Background(), `SELECT COALESCE(state,'unknown'),COALESCE(wait_event_type,'none'),COALESCE(wait_event,'none'),count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() GROUP BY state,wait_event_type,wait_event ORDER BY count(*) DESC LIMIT 8`)
+	if err != nil {
+		t.Fatalf("%s request did not wait on account row; pg_stat_activity summary unavailable: %v", phase, err)
+	}
+	defer rows.Close()
+	var snapshot []string
+	for rows.Next() {
+		var state, eventType, event string
+		var count int
+		if err = rows.Scan(&state, &eventType, &event, &count); err != nil {
+			t.Fatal(err)
+		}
+		snapshot = append(snapshot, fmt.Sprintf("state=%s wait_type=%s wait_event=%s count=%d", state, eventType, event, count))
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("%s request did not wait on account row within 5s; pg_stat_activity state/wait summary: %s", phase, strings.Join(snapshot, "; "))
+}
+
+func activeNativeFixture(t *testing.T) (config.Config, *database.Runtime, *auth.Server, *providerDouble, *http.Cookie, http.Handler) {
+	t.Helper()
+	c, m, db := fixture(t)
+	c.PublicClients.AndroidRedirect = "clipp-relay://oauth/callback"
+	c.PublicClients.ExtensionRedirect = "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/clipp-relay"
+	d := newProvider(t)
+	d.subject = fmt.Sprintf("native-policy-%d", time.Now().UnixNano())
+	s := newTestServer(t, db.Pool, c, m, d.endpoints())
+	cookie := loginAs(t, s, d, d.subject, d.subject+"@example.test", "")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	handler := s.NativeHandlerForTest(bytes.Repeat([]byte{0x73}, 32))
+	return c, db, s, d, cookie, handler
+}
+
+func issueNativeCode(t *testing.T, handler http.Handler, origin string, cookie *http.Cookie, client, redirect, verifier, state string) string {
+	t.Helper()
+	flow, csrf := beginNativeConsent(t, handler, cookie, client, redirect, verifier, state)
+	response := confirmNativeConsent(t, handler, origin, cookie, flow, csrf)
+	if response.Code != http.StatusFound {
+		t.Fatalf("%s native consent: %d %s", client, response.Code, response.Body.String())
+	}
+	callback, err := url.Parse(response.Header().Get("Location"))
+	if err != nil || callback.Query().Get("state") != state || callback.Query().Get("code") == "" {
+		t.Fatalf("%s native callback: %s (%v)", client, response.Header().Get("Location"), err)
+	}
+	return callback.Query().Get("code")
+}
+
+func beginNativeConsent(t *testing.T, handler http.Handler, cookie *http.Cookie, client, redirect, verifier, state string) (string, string) {
+	t.Helper()
+	hash := sha256.Sum256([]byte(verifier))
+	query := url.Values{"response_type": {"code"}, "client_id": {client}, "redirect_uri": {redirect}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}, "state": {state}}
+	begin := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+query.Encode(), nil)
+	begin.AddCookie(cookie)
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, begin)
+	if page.Code != http.StatusOK {
+		t.Fatalf("%s authorization page: %d %s", client, page.Code, page.Body.String())
+	}
+	flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(page.Body.String())
+	if len(flow) != 2 || len(csrf) != 2 {
+		t.Fatal("native consent form missing flow or csrf")
+	}
+	return flow[1], csrf[1]
+}
+
+func confirmNativeConsent(t *testing.T, handler http.Handler, origin string, cookie *http.Cookie, flow, csrf string) *httptest.ResponseRecorder {
+	t.Helper()
+	confirm := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(url.Values{"flow": {flow}, "csrf": {csrf}}.Encode()))
+	confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirm.Header.Set("Origin", origin)
+	confirm.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, confirm)
+	return response
+}
+
+func nativeTokenPost(t *testing.T, handler http.Handler, form url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	time.Sleep(100 * time.Millisecond)
+	return response
+}
+
+func decodeNativeTokens(t *testing.T, response *httptest.ResponseRecorder) (string, string) {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("native token response: %d %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Access  string `json:"access_token"`
+		Refresh string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.Access == "" || body.Refresh == "" {
+		t.Fatalf("native credentials absent: %s (%v)", response.Body.String(), err)
+	}
+	return body.Access, body.Refresh
 }
