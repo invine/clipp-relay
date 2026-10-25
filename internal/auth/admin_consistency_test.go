@@ -228,6 +228,26 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 	}
 }
 
+func TestCommittedOwnerRevocationReportsIncompleteAccountInvalidation(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	var accountID string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT account_id FROM public.portal_sessions WHERE credential_digest=$1`, s.digest(s.CurrentPepper, "portal-session", cookie.Value)).Scan(&accountID); err != nil {
+		t.Fatal(err)
+	}
+	s.SetAccountInvalidatedForTest(func(string) error { return errors.New("notification failed") })
+	s.SetAccountInvalidationFallbackForTest(func(string) error { return errors.New("reconciliation failed") })
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
+	out := internalRequest(s, http.MethodPost, "/auth/revoke", cookie, form, origin)
+	if out.Code != http.StatusServiceUnavailable || !strings.Contains(out.Body.String(), "committed") || !strings.Contains(out.Body.String(), "invalidation") {
+		t.Fatalf("incomplete invalidation response=%d %s", out.Code, out.Body.String())
+	}
+	var generation int64
+	var audited bool
+	if err := db.Pool.QueryRow(context.Background(), `SELECT credential_generation,EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=accounts.id AND e.event='owner_credentials_revoked') FROM public.accounts WHERE id=$1`, accountID).Scan(&generation, &audited); err != nil || generation != 1 || !audited {
+		t.Fatalf("committed revocation generation=%d audited=%t err=%v", generation, audited, err)
+	}
+}
+
 func TestSuspensionWaitsForAccountRowLockAndRevokesRelayCredential(t *testing.T) {
 	s, cookie, db, origin := adminFixture(t)
 	target, err := uuid()
