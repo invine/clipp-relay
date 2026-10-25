@@ -118,6 +118,55 @@ func TestTCPAuthGatesStockHOP(t *testing.T) {
 	}
 }
 
+func TestUnauthenticatedDisconnectDoesNotCarryStateToReconnect(t *testing.T) {
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	key, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if err := h.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Reserve(ctx, h, ai); err == nil || !strings.Contains(err.Error(), "PERMISSION_DENIED") {
+		t.Fatalf("unauthenticated connection admitted: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(h.Network().ConnsToPeer(s.Host.ID())) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	// Reopen a fresh host with the same Peer ID; it must start unauthenticated.
+	clientHost, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientHost.Close()
+	if err := clientHost.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Reserve(ctx, clientHost, ai); err == nil || !strings.Contains(err.Error(), "PERMISSION_DENIED") {
+		t.Fatalf("reconnected unauthenticated connection admitted: %v", err)
+	}
+	sendWireAuth(t, ctx, clientHost, s.Host.ID())
+	if _, err := client.Reserve(ctx, clientHost, ai); err != nil {
+		t.Fatalf("reconnected authenticated operation: %v", err)
+	}
+}
+
 func TestFullCapacitySamePeerReplacementIsOneForOne(t *testing.T) {
 	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", MaxSessions: 1})
 	if err != nil {
