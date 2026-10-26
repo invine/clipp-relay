@@ -30,7 +30,13 @@ three seconds and closes affected sessions independently of blocked SQL workers.
 The owner profile shows confirmed Recorded Relay Usage and twelve preceding
 weekly totals. Its capacity table distinguishes configured limits from separately
 sampled live counts. Active Login Grants are sampled from PostgreSQL; live Relay
-Sessions are sampled from this process.
+Sessions are sampled from this process. A confirmed grant-local revocation closes
+Relay Sessions authenticated with that Login Grant; Account-wide Revocation and
+account access restrictions invalidate all affected sessions. The session manager
+acknowledges logical invalidation before the mutation reports success, then closes
+the physical connections asynchronously. Already-admitted streams and buffered
+traffic can finish. Notifications are in-process: direct database edits do not
+invalidate sessions immediately, and multiple relay processes are unsupported.
 `/readyz` is `200 ok` only after every enabled relay listener and a complete
 public address snapshot are available; otherwise it is `503 unavailable`. `/livez` is
 `200 ok` while the process runs. Public relay discovery is withdrawn during
@@ -197,7 +203,10 @@ quota plans, approve a Pending account with a plan, suspend or deny access,
 return Denied accounts to Pending review, reactivate Suspended accounts,
 revoke credentials, and reassign plans or set per-account quota overrides.
 Owners can sign out of the portal alone or sign out everywhere, which revokes
-their relay credentials and closes live Relay Sessions. The seeded
+their relay credentials and logically invalidates all live Relay Sessions before
+the operation succeeds; physical connection closure follows asynchronously.
+Revoking one Login Grant through supported credential flows invalidates only
+sessions authenticated with that grant. The seeded
 Baseline plan provides exactly 1,073,741,824 bytes per week and five sessions.
 Admin mutations require a Portal Session with Google authentication no older
 than ten minutes, a valid Origin and CSRF token, an enumerated reason, and the
