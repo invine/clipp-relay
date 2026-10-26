@@ -9,10 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"clipp-relay/internal/persistence"
 )
 
 var ErrExhausted = errors.New("weekly quota exhausted")
@@ -20,17 +18,17 @@ var ErrTemporary = errors.New("quota temporarily unavailable")
 
 type Quota struct {
 	beforeLock          func()
-	beforeCommit        func(context.Context, pgx.Tx) error
+	beforeCommit        func(context.Context, persistence.AccountingTransaction) error
 	afterCommit         func() error
 	periodic            periodicAccounting
 	settlementMu        sync.Mutex
 	settlements         map[settlementKey]*settlementState
-	runtime             *database.Runtime
+	accounting          persistence.Accounting
 	diagnostics         *diagnostic.Logger
 	clock               clockState
 	stop                chan struct{}
 	done                chan struct{}
-	settlementBefore    func(context.Context, pgx.Tx) error
+	settlementBefore    func(context.Context, persistence.AccountingTransaction) error
 	settlementAfter     func(context.Context) error
 	eligibilityBoundary func(context.Context) error
 	adjustTime          func(time.Time) time.Time
@@ -101,13 +99,9 @@ func (q *Quota) ClockHealth() (safe, warning bool, sampled time.Time) {
 	return safe, q.clock.warning, q.clock.sampled
 }
 
-func New(pool *pgxpool.Pool) *Quota {
-	return NewWithRuntime(database.NewRuntime(pool))
-}
-
-// NewWithRuntime joins Quota to the serving process's shared DB work budget.
-func NewWithRuntime(runtime *database.Runtime) *Quota {
-	q := &Quota{runtime: runtime, stop: make(chan struct{}), done: make(chan struct{})}
+// New composes Quota with the storage-neutral accounting repository.
+func New(accounting persistence.Accounting) *Quota {
+	q := &Quota{accounting: accounting, stop: make(chan struct{}), done: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = q.Probe(ctx)
 	cancel()
@@ -178,10 +172,10 @@ func (q *Quota) Probe(ctx context.Context) error {
 	var err error
 	if q.probeQuery != nil {
 		dbTime, err = q.probeQuery(ctx)
+	} else if q.accounting == nil {
+		err = ErrTemporary
 	} else {
-		err = q.runtime.Unit(ctx, func(unitCtx context.Context, conn *pgxpool.Conn) error {
-			return conn.QueryRow(unitCtx, "SELECT clock_timestamp()").Scan(&dbTime)
-		})
+		dbTime, err = q.accounting.ProbeDatabaseTime(ctx)
 	}
 	after := q.now()
 	if err != nil {

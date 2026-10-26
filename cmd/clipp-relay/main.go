@@ -15,6 +15,7 @@ import (
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
+	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/publication"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
@@ -174,7 +175,7 @@ func run() int {
 			return fail("journal_unavailable")
 		}
 	}
-	accounting := quota.NewWithRuntime(db)
+	accounting := quota.New(postgres.New(db))
 	accounting.SetDiagnostics(logger)
 	if err := accounting.ConfigureAccountingFailureDeadline(c.AccountingDeadline()); err != nil {
 		accounting.Close()

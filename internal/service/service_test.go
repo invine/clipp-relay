@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
+	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/service"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -219,7 +221,7 @@ func TestClockUnavailabilityDoesNotWithdrawHTTPReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	accounting := quota.New(pool)
+	accounting := quota.New(postgres.New(database.NewRuntime(pool)))
 	defer accounting.Close()
 	if safe, _, _ := accounting.ClockHealth(); safe {
 		t.Fatal("unreachable database produced a usable clock sample")

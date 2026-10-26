@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 )
 
 func TestQuotaEligibilityUsesItsOwnDatabaseBudget(t *testing.T) {
 	c, m, db := fixture(t)
 	account := auth.NewWithRuntime(db, c, m, auth.Google())
-	accounting := quota.NewWithRuntime(db)
+	accounting := quota.New(postgres.New(db))
 	defer accounting.Close()
 	id, err := quota.NewOperationID()
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
 	"github.com/jackc/pgx/v5"
@@ -231,7 +232,7 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
-	accounting := quota.NewWithRuntime(db)
+	accounting := quota.New(postgres.New(db))
 	defer accounting.Close()
 	dataPlane, err := relay.NewProtected(s, accounting, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
+	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
 	"github.com/jackc/pgx/v5"
@@ -56,7 +57,7 @@ func protectedPortalFixtureWithAccounting(t *testing.T, configure func(*quota.Qu
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
-	q := quota.NewWithRuntime(db)
+	q := quota.New(postgres.New(db))
 	if configure != nil {
 		configure(q)
 	}
