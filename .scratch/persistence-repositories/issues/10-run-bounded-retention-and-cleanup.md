@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Introduce repository scopes through credential validation.
 
-**Status:** claimed — persistence 10 (coordinator: root), 2026-10-26
+**Status:** resolved
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I3, I5, I8–I10; T1, applicable T3/T6, T7–T8.
 
@@ -18,3 +18,8 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 ## Comments
 
 - Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+
+
+## Resolution
+
+Coordinator integrated source commit 02f4f79cbc6da6071055a98802692f9f9d31b105 on codex/persistence-repositories-integration. Maintenance retention code was integrated at b761102c926d9f2f1aa338255e01b8e5ec83072e after merging ticket 02. Combined Auth, issuer, and persistence tests passed; go vet and go build passed; formatting and diff checks passed. Real disposable PostgreSQL was unavailable because Docker is not running; final PostgreSQL qualification remains ticket 11.

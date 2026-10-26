@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Introduce repository scopes through credential validation.
 
-**Status:** claimed — persistence 02 (coordinator: root), 2026-10-26
+**Status:** resolved
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I6, I9–I10; T1–T4, applicable T8.
 
@@ -19,3 +19,8 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 ## Comments
 
 - Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+
+
+## Resolution
+
+Coordinator integrated source commit 8d3594aae1c8d89b9fe364b07b635d42cb94637 on codex/persistence-repositories-integration. Native authorization and PKCE code was integrated at b761102c926d9f2f1aa338255e01b8e5ec83072e. Combined Auth, issuer, and persistence tests passed; focused consent, PKCE, grant-cap, authority-recheck and uncertain-commit tests passed; go vet and go build passed.
