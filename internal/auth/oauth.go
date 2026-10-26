@@ -16,16 +16,8 @@ import (
 	"clipp-relay/internal/auth/issuer"
 	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/portal"
-	"github.com/jackc/pgx/v5"
 	"github.com/ory/fosite"
 )
-
-func (s *Server) commitCredentialTx(ctx context.Context, tx pgx.Tx) error {
-	if s.commitCredential != nil {
-		return s.commitCredential(ctx, tx)
-	}
-	return tx.Commit(ctx)
-}
 
 type oauthIntent struct{ client, redirect, state, challenge string }
 type oauthConsent struct {
@@ -76,14 +68,6 @@ func (s *Server) oauthError(w http.ResponseWriter, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
-}
-func (s *Server) auditCredential(ctx context.Context, tx pgx.Tx, event, account, client string) error {
-	id, e := uuid()
-	if e != nil {
-		return e
-	}
-	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id,client_type) VALUES($1,clock_timestamp(),$2,$3,$4)`, id, event, account, client)
-	return e
 }
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	if s.nativeIssuer == nil {

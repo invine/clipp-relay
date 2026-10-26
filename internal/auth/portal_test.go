@@ -86,7 +86,7 @@ func TestAdminUnitFormsPersistExactByteAllowances(t *testing.T) {
 }
 
 func TestLoggedOutPortalProvidesStylesAndCanonicalSetupURL(t *testing.T) {
-	s := New(nil, config.Config{PortalOrigin: "https://relay.example.test"}, config.Material{}, Provider{})
+	s := New(Dependencies{}, config.Config{PortalOrigin: "https://relay.example.test"}, config.Material{}, Provider{})
 	handler := s.Handler()
 	out := httptest.NewRecorder()
 	handler.ServeHTTP(out, httptest.NewRequest(http.MethodGet, "/", nil))

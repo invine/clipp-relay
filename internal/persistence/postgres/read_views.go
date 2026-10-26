@@ -115,6 +115,14 @@ func (r *ReadViews) AdminPlan(ctx context.Context, id string) (persistence.Admin
 	return p, readError(err)
 }
 
+func (r *ReadViews) ActiveLoginGrantCount(ctx context.Context, accountID string) (int, error) {
+	var count int
+	err := r.runtime.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id
+		WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL
+		AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
+	return count, readError(err)
+}
+
 func readError(err error) error {
 	if err == nil {
 		return nil

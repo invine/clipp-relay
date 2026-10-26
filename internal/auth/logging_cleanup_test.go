@@ -31,7 +31,7 @@ func (o *cleanupDiagnosticOutput) String() string {
 
 func TestCleanupLogsFailedPassWithoutRoutineSuccessRows(t *testing.T) {
 	c, m, db := fixture(t)
-	s := auth.NewWithRuntime(db, c, m, auth.Provider{})
+	s := newAuthWithRuntime(db, c, m, auth.Provider{})
 	var healthyOutput cleanupDiagnosticOutput
 	healthyLog := diagnostic.New(&healthyOutput)
 	s.SetDiagnostics(healthyLog)

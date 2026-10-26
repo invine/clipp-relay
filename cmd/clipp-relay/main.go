@@ -113,7 +113,11 @@ func run() int {
 		}
 	}
 	if *command == "recover" {
-		portal := auth.New(pool, c, material, auth.Google())
+		if err = database.VerifySchema(startup, pool); err != nil {
+			return fail("database_unavailable")
+		}
+		runtime := database.NewRuntime(pool)
+		portal := auth.New(composeAuthPersistence(runtime), c, material, auth.Google())
 		journal, journalErr := auth.NewOCIJournal(auth.OCIJournalOptions{
 			Endpoint:  "https://objectstorage." + c.Journal.Region + ".oraclecloud.com",
 			Namespace: c.Journal.Namespace, Bucket: c.Journal.Bucket,
@@ -140,7 +144,7 @@ func run() int {
 	srv := service.New()
 	db := database.NewRuntime(pool)
 	db.SetTransitions(dependencies)
-	portal := auth.NewWithRuntime(db, c, material, auth.Google())
+	portal := auth.New(composeAuthPersistence(db), c, material, auth.Google())
 	if err := portal.EnableNativeOAuth(material.NativeSigningKey); err != nil {
 		return fail("configuration_rejected")
 	}
@@ -294,6 +298,14 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+func composeAuthPersistence(runtime *database.Runtime) auth.Dependencies {
+	return auth.Dependencies{
+		Work: postgres.New(runtime), Deletions: postgres.NewDeletions(runtime),
+		Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime),
+		Maintenance: postgres.NewMaintenance(runtime),
+	}
 }
 
 func handleSignals(signals <-chan os.Signal, stop, force func()) {

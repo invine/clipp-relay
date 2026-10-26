@@ -198,6 +198,7 @@ func (r *authorizationRepository) CreateLoginGrant(context.Context, persistence.
 func (r *authorizationRepository) StoreRelayAccessToken(context.Context, [32]byte, string, time.Time) error {
 	return nil
 }
+func (r *authorizationRepository) DeleteRelayAccessToken(context.Context, [32]byte) error { return nil }
 func (r *authorizationRepository) CurrentRefreshGeneration(context.Context, string) (int64, error) {
 	return 1, nil
 }

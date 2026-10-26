@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"clipp-relay/internal/database"
 	"clipp-relay/internal/persistence"
 )
 
@@ -25,9 +24,6 @@ func (s *Server) SetRecoveryCommitHookForTest(commit func(context.Context, persi
 func (s *Server) RecoverOffline(ctx context.Context, request RecoveryRequest) error {
 	if !idPattern.MatchString(request.RunID) || strings.TrimSpace(request.Source) == "" || len(request.Source) > 255 || request.Source == request.Target {
 		return errors.New("invalid recovery identity")
-	}
-	if err := database.VerifySchema(ctx, s.db.Pool); err != nil {
-		return err
 	}
 	target, err := s.recovery.CurrentDatabase(ctx)
 	if err != nil {
@@ -67,7 +63,7 @@ func (s *Server) RecoverOffline(ctx context.Context, request RecoveryRequest) er
 		return err
 	}
 	if exists {
-		return validateRecoveryRun(run, request)
+		return s.validateRecoveryRun(run, request)
 	}
 	if err = tx.LockRecoveryAccounts(ctx); err != nil {
 		return err
@@ -93,7 +89,7 @@ func (s *Server) RecoverOffline(ctx context.Context, request RecoveryRequest) er
 	if err != nil {
 		return err
 	}
-	if err = tx.RecordRecoveryRun(ctx, persistence.RecoveryRun{RunID: request.RunID, Source: request.Source, Target: request.Target, SchemaRevision: database.ExpectedRevision, JournalHead: encoded}); err != nil {
+	if err = tx.RecordRecoveryRun(ctx, persistence.RecoveryRun{RunID: request.RunID, Source: request.Source, Target: request.Target, SchemaRevision: s.recovery.SchemaRevision(), JournalHead: encoded}); err != nil {
 		return err
 	}
 	if s.commitRecovery != nil {
@@ -112,8 +108,8 @@ func (s *Server) RecoverOffline(ctx context.Context, request RecoveryRequest) er
 	return fmt.Errorf("recovery completion uncertain: %w", err)
 }
 
-func validateRecoveryRun(run persistence.RecoveryRun, r RecoveryRequest) error {
-	if run.Source != r.Source || run.Target != r.Target || run.SchemaRevision != database.ExpectedRevision {
+func (s *Server) validateRecoveryRun(run persistence.RecoveryRun, r RecoveryRequest) error {
+	if run.Source != r.Source || run.Target != r.Target || run.SchemaRevision != s.recovery.SchemaRevision() {
 		return errors.New("recovery run identity conflict")
 	}
 	return nil
@@ -123,7 +119,7 @@ func (s *Server) recoveryCompleted(ctx context.Context, r RecoveryRequest) (bool
 	if err != nil || !found {
 		return false, err
 	}
-	if err = validateRecoveryRun(run, r); err != nil {
+	if err = s.validateRecoveryRun(run, r); err != nil {
 		return false, err
 	}
 	return true, nil

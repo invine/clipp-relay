@@ -32,6 +32,7 @@ type RecoveryTransaction interface {
 }
 
 type RecoveryRepository interface {
+	SchemaRevision() int
 	CurrentDatabase(context.Context) (string, error)
 	FindRecoveryRun(context.Context, string) (RecoveryRun, bool, error)
 	BeginRecovery(context.Context) (RecoveryTransaction, error)

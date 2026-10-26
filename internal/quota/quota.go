@@ -32,7 +32,6 @@ type Quota struct {
 	settlementAfter     func(context.Context) error
 	eligibilityBoundary func(context.Context) error
 	adjustTime          func(time.Time) time.Time
-	probeQuery          func(context.Context) (time.Time, error)
 }
 
 // SetAccountingBoundariesForTest controls clock and authority availability at the
@@ -170,9 +169,7 @@ func (q *Quota) Probe(ctx context.Context) error {
 	before := q.now()
 	var dbTime time.Time
 	var err error
-	if q.probeQuery != nil {
-		dbTime, err = q.probeQuery(ctx)
-	} else if q.accounting == nil {
+	if q.accounting == nil {
 		err = ErrTemporary
 	} else {
 		dbTime, err = q.accounting.ProbeDatabaseTime(ctx)

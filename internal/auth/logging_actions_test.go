@@ -17,7 +17,7 @@ import (
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
 )
 
 func actionRows(t *testing.T, output string) []map[string]any {
@@ -94,7 +94,9 @@ func TestOwnerAndAdminMutationDiagnosticsFollowHTTPCommitProof(t *testing.T) {
 	}
 	owner = loginAs(t, s, provider, "SECRET_OWNER_SUBJECT_CANARY", "SECRET_OWNER_EMAIL_CANARY@example.test", "")
 	form.Set("csrf", csrfFrom(t, s, owner))
-	s.SetAccountCommitHookForTest(func(context.Context, pgx.Tx) error { return errors.New("SECRET_ROLLBACK_CANARY") })
+	s.SetAccountCommitHookForTest(func(context.Context, persistence.AccountAccessTransaction) error {
+		return errors.New("SECRET_ROLLBACK_CANARY")
+	})
 	if out := portalRequest(s, http.MethodPost, "/auth/revoke", owner, form, c.PortalOrigin); out.Code != http.StatusServiceUnavailable {
 		t.Fatalf("rollback revoke: %d", out.Code)
 	}

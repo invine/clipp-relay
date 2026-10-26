@@ -21,10 +21,10 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
-	"github.com/jackc/pgx/v5"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -228,7 +228,7 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.NewWithRuntime(db, c, m, d.endpoints())
+	s := newAuthWithRuntime(db, c, m, d.endpoints())
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 	}
 	form.Set("action", "revoke")
 	form.Set("revision", "2")
-	s.SetAccountCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetAccountCommitHookForTest(func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}

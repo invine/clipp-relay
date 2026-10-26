@@ -54,6 +54,7 @@ type AuthorizationTransaction interface {
 	ConsumeAuthorizationCode(context.Context, [32]byte) error
 	CreateLoginGrant(context.Context, LoginGrant) error
 	StoreRelayAccessToken(context.Context, [32]byte, string, time.Time) error
+	DeleteRelayAccessToken(context.Context, [32]byte) error
 	CurrentRefreshGeneration(context.Context, string) (int64, error)
 	StoreRefreshGeneration(context.Context, [32]byte, string, int64) error
 }

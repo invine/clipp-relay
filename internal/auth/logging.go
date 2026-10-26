@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
+	"clipp-relay/internal/persistence"
 )
 
 type diagnosticContextKey struct{}
@@ -57,7 +57,7 @@ func markAction(r *http.Request, event string) {
 
 func markGuardDiagnostic(r *http.Request, err error) {
 	switch {
-	case errors.Is(err, database.ErrWorkUnavailable):
+	case errors.Is(err, persistence.ErrWorkUnavailable):
 		markAction(r, "http.request_refused")
 		markDiagnostic(r, "refused", "overloaded")
 	case r.Context().Err() != nil:
