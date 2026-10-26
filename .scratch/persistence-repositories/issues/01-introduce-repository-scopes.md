@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** claimed — agent 01 (coordinator: root), 2026-10-26
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I3, I5–I6, I9–I10; T1, T3–T4, applicable T8.
 
