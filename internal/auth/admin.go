@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/config"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
 )
@@ -317,64 +318,23 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT status,count(*) FROM public.accounts WHERE deletion_started_at IS NULL GROUP BY status`)
+	views, err := s.readViews.AdminHome(r.Context(), accountAfter, planAfter, limit)
 	if err != nil {
 		fail(w, 503)
 		return
 	}
-	for rows.Next() {
-		var state string
-		var count int64
-		if rows.Scan(&state, &count) != nil {
-			rows.Close()
-			fail(w, 503)
-			return
-		}
-		switch state {
-		case "Pending":
-			data.Pending = count
-		case "Active":
-			data.Active = count
-		case "Suspended":
-			data.Suspended = count
-		case "Denied":
-			data.Denied = count
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	rows, err = s.db.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision,recovery_review_hold FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	for rows.Next() {
-		var x adminAccountRow
-		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.WeeklyOverride, &x.SessionOverride, &x.Revision, &x.RecoveryHeld) != nil {
-			rows.Close()
-			fail(w, 503)
-			return
-		}
+	data.Pending, data.Active, data.Suspended, data.Denied = views.Counts.Pending, views.Counts.Active, views.Counts.Suspended, views.Counts.Denied
+	for _, x := range views.Accounts {
 		if len(data.Accounts) == limit {
 			data.NextAccount = data.Accounts[len(data.Accounts)-1].ID
 			break
 		}
-		data.Accounts = append(data.Accounts, x)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		fail(w, 503)
-		return
+		data.Accounts = append(data.Accounts, adminAccountRow{ID: x.ID, Email: x.Email, Status: x.Status, PlanID: x.PlanID, WeeklyOverride: x.WeeklyOverride, SessionOverride: x.SessionOverride, Revision: x.Revision, RecoveryHeld: x.RecoveryHeld})
 	}
 	if data.Selected != "" {
 		selected, readErr := s.adminAccountUsage(r.Context(), data.Selected)
 		err = readErr
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, persistence.ErrNotFound) {
 			fail(w, 404)
 			return
 		}
@@ -384,29 +344,12 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		}
 		data.SelectedAccount = &selected
 	}
-	rows, err = s.db.Query(r.Context(), `SELECT id,name,weekly_bytes,sessions,revision,archived_at IS NOT NULL FROM public.quota_plans WHERE id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, planAfter, limit+1)
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	for rows.Next() {
-		var x adminPlanRow
-		if rows.Scan(&x.ID, &x.Name, &x.Bytes, &x.Sessions, &x.Revision, &x.Archived) != nil {
-			rows.Close()
-			fail(w, 503)
-			return
-		}
+	for _, x := range views.Plans {
 		if len(data.Plans) == limit {
 			data.NextPlan = data.Plans[len(data.Plans)-1].ID
 			break
 		}
-		data.Plans = append(data.Plans, x)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		fail(w, 503)
-		return
+		data.Plans = append(data.Plans, adminPlanRow{ID: x.ID, Name: x.Name, Bytes: x.Bytes, Sessions: x.Sessions, Revision: x.Revision, Archived: x.Archived})
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Values are bounded in the schema, and both lists are capped at 100 rows.

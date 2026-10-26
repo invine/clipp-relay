@@ -21,21 +21,8 @@ type ownerUsageProfile struct {
 
 // One statement rechecks portal credentials and snapshots policy and usage.
 func (s *Server) ownerUsageProfile(r *http.Request, id string, version uint64) (ownerUsageProfile, error) {
-	var p ownerUsageProfile
-	query := `WITH current_week AS MATERIALIZED (SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date AS monday)
-SELECT a.status,a.email,a.email_verified,a.hosted_domain,a.recovery_review_hold,COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions),
-COALESCE((SELECT u.recorded_bytes FROM public.weekly_relay_usage u WHERE u.account_id=a.id AND u.week_start=(SELECT monday FROM current_week)),0),
-(SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'recorded',COALESCE(u.recorded_bytes,0)) ORDER BY w.week_start DESC)
- FROM (SELECT ((SELECT monday FROM current_week)-7*n)::date AS week_start FROM generate_series(0,12) n) w
- LEFT JOIN public.weekly_relay_usage u ON u.account_id=a.id AND u.week_start=w.week_start)
-FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id
-LEFT JOIN public.quota_plans p ON p.id=a.plan_id
-WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
-AND ps.credential_generation=a.credential_generation
-AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()
-AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`
-	err := s.db.QueryRow(r.Context(), query, id, s.sessionDigest(r, version), version).Scan(&p.Status, &p.Email, &p.Verified, &p.HostedDomain, &p.RecoveryHeld, &p.WeeklyBytes, &p.Sessions, &p.Usage, &p.HistoryJSON)
-	return p, err
+	read, err := s.readViews.OwnerProfile(r.Context(), id, s.sessionDigest(r, version), version)
+	return ownerUsageProfile{Status: read.Status, Email: read.Email, Verified: read.Verified, RecoveryHeld: read.RecoveryHeld, HostedDomain: read.HostedDomain, WeeklyBytes: read.WeeklyBytes, Sessions: read.Sessions, Usage: read.Usage, HistoryJSON: read.HistoryJSON}, err
 }
 
 // accountUsageQuery contains confirmed durable totals only. Consumers cannot use
@@ -46,17 +33,14 @@ type accountUsageQuery struct {
 }
 
 func (s *Server) adminAccountUsage(ctx context.Context, id string) (adminAccountRow, error) {
-	var a adminAccountRow
+	read, err := s.readViews.AdminAccount(ctx, id)
+	a := adminAccountRow{ID: read.ID, Email: read.Email, Status: read.Status, PlanID: read.PlanID, WeeklyOverride: read.WeeklyOverride, SessionOverride: read.SessionOverride, Revision: read.Revision, RecoveryHeld: read.RecoveryHeld}
 	var usage accountUsageQuery
-	var history []byte
-	err := s.db.QueryRow(ctx, `WITH current_week AS MATERIALIZED (SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date AS monday)
- SELECT a.id,a.email,a.status,COALESCE(a.plan_id::text,''),COALESCE(a.weekly_bytes_override::text,''),COALESCE(a.sessions_override::text,''),a.revision,a.recovery_review_hold,COALESCE(u.recorded_bytes,0),GREATEST(0,COALESCE(a.weekly_bytes_override,p.weekly_bytes,0)-COALESCE(u.recorded_bytes,0)),
- (SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'recorded',COALESCE(h.recorded_bytes,0)) ORDER BY w.week_start DESC) FROM (SELECT ((SELECT monday FROM current_week)-7*n)::date AS week_start FROM generate_series(0,12) n) w LEFT JOIN public.weekly_relay_usage h ON h.account_id=a.id AND h.week_start=w.week_start)
- FROM public.accounts a LEFT JOIN public.quota_plans p ON p.id=a.plan_id LEFT JOIN public.weekly_relay_usage u ON u.account_id=a.id AND u.week_start=(SELECT monday FROM current_week) WHERE a.id=$1 AND a.deletion_started_at IS NULL`, id).Scan(&a.ID, &a.Email, &a.Status, &a.PlanID, &a.WeeklyOverride, &a.SessionOverride, &a.Revision, &a.RecoveryHeld, &usage.Recorded, &usage.Remaining, &history)
 	if err != nil {
 		return a, err
 	}
-	if err = json.Unmarshal(history, &usage.History); err != nil {
+	usage.Recorded, usage.Remaining = read.Recorded, read.Remaining
+	if err = json.Unmarshal(read.HistoryJSON, &usage.History); err != nil {
 		return a, err
 	}
 	a.Usage = &usage
