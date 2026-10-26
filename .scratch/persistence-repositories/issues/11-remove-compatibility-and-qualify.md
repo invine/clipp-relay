@@ -4,7 +4,7 @@
 
 **Blocked by:** 08: Recover accounts and reset credentials through repositories; 09: Read coherent owner and administrator views; 10: Run bounded retention and cleanup through repositories.
 
-**Status:** ready-for-agent
+**Status:** claimed — persistence 11 (coordinator: root), 2026-10-27
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I10; T1–T9, especially final T8–T9.
 
@@ -19,4 +19,4 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+- Claimed after tickets 08, 09, and 10 were integrated.

@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Delete Relay Accounts without losing retention guarantees.
 
-**Status:** claimed — persistence 08 (coordinator: root), 2026-10-26
+**Status:** resolved — recovery/issuer-reset repository integration; Auth, persistence, and CLI package tests, vet, and build passed. Four recovery/reset PostgreSQL fixture tests skipped because the fixture is not configured. PostgreSQL 17/18 smoke qualification remains in ticket 11.
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I5, I8–I10; T2–T3, T6–T8.
 
@@ -18,4 +18,5 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Claimed for implementation after ticket 07 was integrated.
+- Offline account recovery and explicit issuer reset/verification use typed persistence adapters; Recovery Journal I/O remains outside database transactions.
+- Package tests, vet, and build passed. Four database-backed recovery/reset tests skipped because `CLIPP_TEST_SERVING_CONFIG` is not configured; PostgreSQL 17/18 qualification remains in ticket 11.

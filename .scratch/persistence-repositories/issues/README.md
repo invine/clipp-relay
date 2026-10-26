@@ -44,4 +44,4 @@ Every ticket preserves the existing schema, credential protocols, business polic
 | T8 Structural completion | Migrated paths in 01–10; complete inventory in 11 |
 | T9 Integrated verification | 11; focused real verification accompanies each slice |
 
-Tickets 01–07 and 09–10 are resolved. Ticket 08 is active; ticket 11 remains ready subject to its blocking edges. The user's implementation instruction supersedes the earlier publication-only request. PostgreSQL 17/18 qualification remains explicitly pending in ticket 11.
+Tickets 01–10 are resolved. Ticket 11 is active. The user's implementation instruction supersedes the earlier publication-only request. PostgreSQL 17/18 qualification remains explicitly pending in ticket 11.
