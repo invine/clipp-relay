@@ -1,6 +1,6 @@
 # Approved persistence repository tickets
 
-**Status:** published; implementation not started.  
+**Status:** implementation in progress on `codex/persistence-repositories-integration`.  
 **Owning repository:** relay.  
 **Approval:** on 2026-10-26 the user accepted the 11-ticket breakdown and blocking edges, then instructed: “I agree. Publish tickets, don't start implementation”.
 
@@ -44,4 +44,4 @@ Every ticket preserves the existing schema, credential protocols, business polic
 | T8 Structural completion | Migrated paths in 01–10; complete inventory in 11 |
 | T9 Integrated verification | 11; focused real verification accompanies each slice |
 
-All tickets have `ready-for-agent` triage status, with blockers determining prerequisite eligibility. None is claimed, dispatched, started or resolved. The user's current instruction prohibits implementation. Do not invoke runtime tests, reset credentials, mutate a cluster, commit, publish externally or deploy as part of publishing these local ticket files.
+Tickets 01–06 and 09–10 are resolved. Ticket 05 is active; 07–08 and 11 remain ready subject to their blocking edges. The user's implementation instruction supersedes the earlier publication-only request. PostgreSQL 17/18 qualification remains explicitly pending in ticket 11.

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Introduce repository scopes through credential validation.
 
-**Status:** claimed — persistence 09 (coordinator: root), 2026-10-26
+**Status:** resolved — integration commit `d3ea238` includes typed owner/admin read projections; `go test ./internal/auth ./internal/persistence/... -count=1` passed. Disposable PostgreSQL 17/18 qualification remains for ticket 11.
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I3, I7, I9–I10; T1, T7–T8.
 
@@ -17,4 +17,5 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+- Admin Home counts and bounded pages now share a repeatable-read PostgreSQL snapshot; owner and account detail projections remain single statements.
+- Focused tests passed. PostgreSQL 17/18 smoke qualification is tracked by ticket 11.

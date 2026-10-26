@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: Authorize native clients and redeem authorization codes.
 
-**Status:** claimed — persistence 03 (coordinator: root), 2026-10-26
+**Status:** resolved — integration commit `d3ea238` includes the refresh repository workflow; `go test ./internal/auth/issuer ./internal/auth ./internal/persistence/... -count=1` passed. The disposable PostgreSQL 17/18 smoke fixture remains for ticket 11.
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I6, I9–I10; T1–T4, applicable T8.
 
@@ -18,4 +18,5 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+- Ordinary refresh now stores access tokens against the existing Login Grant; it does not create a second grant.
+- Refresh repository and Auth tests passed on the integration branch. PostgreSQL 17/18 smoke qualification is tracked by ticket 11.

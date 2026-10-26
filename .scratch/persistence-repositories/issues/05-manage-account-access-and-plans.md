@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Rotate Login Grants and handle refresh replay; 04: Register Relay Accounts and manage Portal Sessions.
 
-**Status:** ready-for-agent
+**Status:** claimed — persistence 05 (coordinator: root), 2026-10-26
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I5, I9–I10; T1–T4, applicable T7–T8.
 
@@ -18,4 +18,4 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+- Claimed for implementation after tickets 03 and 04 were integrated.
