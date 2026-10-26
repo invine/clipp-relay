@@ -769,63 +769,6 @@ func (s *Server) forgetDeletedAccounting(account string) {
 	}
 }
 
-// importRetainedUsage runs inside the fresh Pending account's creation
-// transaction. Every configured key is checked, and absent historical keys
-// block registration while any current-week retained record needs one.
-func (s *Server) importRetainedUsage(ctx context.Context, tx pgx.Tx, accountID, subject string) error {
-	var week time.Time
-	if err := tx.QueryRow(ctx, `SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&week); err != nil {
-		return err
-	}
-	rows, err := tx.Query(ctx, `SELECT DISTINCT pepper_version FROM public.retained_quota_usage WHERE week_start=$1`, week)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var version uint64
-		if rows.Scan(&version) != nil || len(s.Peppers[version]) == 0 {
-			rows.Close()
-			return errors.New("retained usage key unavailable")
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	var matches int
-	var committed int64
-	var matchVersion uint64
-	var matchDigest []byte
-	for version := range s.Peppers {
-		digest := s.digest(version, "retained-quota", googleIssuer+"\x00"+subject)
-		var amount int64
-		err = tx.QueryRow(ctx, `SELECT recorded_bytes FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3 FOR UPDATE`, version, digest, week).Scan(&amount)
-		if err == pgx.ErrNoRows {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		matches++
-		committed = amount
-		matchVersion = version
-		matchDigest = digest
-	}
-	if matches > 1 {
-		return errors.New("duplicate logical retained usage")
-	}
-	if matches == 0 {
-		return nil
-	}
-	openingQuery := `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,$2,$3,0,NULL,0)`
-	if _, err = tx.Exec(ctx, openingQuery, accountID, week, committed); err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `DELETE FROM public.retained_quota_usage WHERE pepper_version=$1 AND identity_digest=$2 AND week_start=$3`, matchVersion, matchDigest, week)
-	return err
-}
-
 // DeletionSignals are bounded aggregate observations with no identity labels.
 type DeletionSignals struct {
 	Pending            int
