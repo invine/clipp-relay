@@ -26,7 +26,7 @@ func (testAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCrede
 
 type testAccounting struct{}
 
-func (testAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+func (testAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
 	return quota.AccountingEligibility{}, nil
 }
 func (testAccounting) Observe(string, int64) error              { return nil }
@@ -385,13 +385,4 @@ func TestServiceHostnameKeepsDNSAddressFamilyOpen(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "/dns/ipv6-only.example.test/udp/4003/webrtc-direct/certhash/") {
 		t.Fatalf("family-bound hostname: %d %s", w.Code, w.Body.String())
 	}
-}
-
-func (testAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
-	work(ctx)
-	return ctx.Err() == nil
-}
-func (testAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
-	work(ctx)
-	return ctx.Err() == nil
 }

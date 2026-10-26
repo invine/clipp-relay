@@ -14,7 +14,6 @@ import (
 )
 
 type policyAuthority struct {
-	guard  sync.Mutex
 	mu     sync.Mutex
 	cap    int
 	active bool
@@ -37,22 +36,15 @@ func (a *policyAuthority) AuthenticateRelay(_ context.Context, token string) (au
 	return auth.RelayCredential{AccountID: "a", SessionLimit: cap, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
 }
 
-func (a *policyAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
-	a.guard.Lock()
-	defer a.guard.Unlock()
-	work(ctx)
-	return true
-}
-
 func (a *policyAuthority) change(active bool, cap int, s *Server) {
-	a.WithAccountGuards(context.Background(), []string{"a"}, func(context.Context) {
-		a.mu.Lock()
-		a.active, a.cap = active, cap
-		a.mu.Unlock()
-		if !active || s.AccountSessions("a") > cap {
-			s.CloseAccount("a")
-		}
-	})
+	a.mu.Lock()
+	a.active, a.cap = active, cap
+	a.mu.Unlock()
+	if !active {
+		_ = s.InvalidateAccount("a")
+	} else if s.AccountSessions("a") > cap {
+		s.CloseAccount("a")
+	}
 }
 
 func TestLiveSessionCapReductionClosesAllAndReconnectsWithinCap(t *testing.T) {
@@ -115,9 +107,10 @@ func TestLiveSessionCapReductionClosesAllAndReconnectsWithinCap(t *testing.T) {
 	}
 }
 
-func TestSecurityMutationFencesInFlightRelayAuthentication(t *testing.T) {
+func TestAccountInvalidationFencesInFlightRelayAuthentication(t *testing.T) {
 	a := &policyAuthority{active: true, cap: 1, seen: make(chan struct{}, 1)}
-	s, err := New(a, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	accounting := &blockingEligibility{entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(a, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,22 +130,24 @@ func TestSecurityMutationFencesInFlightRelayAuthentication(t *testing.T) {
 	if len(conns) != 1 {
 		t.Fatalf("physical connections=%d", len(conns))
 	}
-	a.guard.Lock()
+	accounting.arm()
 	result := make(chan string, 1)
 	go func() { _, _, code := s.authenticate(ctx, conns[0], "authorized"); result <- code }()
 	select {
-	case <-a.seen:
+	case <-accounting.entered:
 	case <-ctx.Done():
-		a.guard.Unlock()
-		t.Fatal("authentication did not reach the pre-guard lookup")
+		t.Fatal("authentication did not reach quota assessment")
 	}
 	a.mu.Lock()
 	a.active = false
 	a.mu.Unlock()
-	a.guard.Unlock()
+	if err := s.InvalidateAccount("a"); err != nil {
+		t.Fatal(err)
+	}
+	close(accounting.release)
 	select {
 	case code := <-result:
-		if code != "authentication_failed" {
+		if code != "temporarily_unavailable" {
 			t.Fatalf("stale admission result=%q", code)
 		}
 	case <-ctx.Done():

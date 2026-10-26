@@ -33,7 +33,7 @@ func (wireAuthority) AuthenticateRelay(_ context.Context, token string) (auth.Re
 
 type wireAccounting struct{}
 
-func (wireAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+func (wireAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
 	return quota.AccountingEligibility{}, nil
 }
 
@@ -81,7 +81,7 @@ type recordingAccounting struct {
 	counts map[string]int64
 }
 
-func (c *recordingAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+func (c *recordingAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
 	return quota.AccountingEligibility{}, nil
 }
 

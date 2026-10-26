@@ -48,7 +48,7 @@ func (c *blockingEligibility) arm() {
 	c.mu.Unlock()
 }
 
-func (c *blockingEligibility) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+func (c *blockingEligibility) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
 	c.mu.Lock()
 	armed := c.armed
 	if armed {
@@ -66,7 +66,7 @@ func (c *blockingEligibility) Eligibility(context.Context, string, int64) (quota
 
 type failingAccounting struct{ err error }
 
-func (c failingAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+func (c failingAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
 	return quota.AccountingEligibility{}, c.err
 }
 
@@ -221,19 +221,11 @@ func TestInitialAuthErrorsAreDistinctAndCloseConnection(t *testing.T) {
 
 type attemptAuthority struct{ unitCalls chan struct{} }
 
-func (a *attemptAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
+func (a *attemptAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {
 	select {
 	case a.unitCalls <- struct{}{}:
 	default:
 	}
-	work(ctx)
-	return true
-}
-func (*attemptAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
-	work(ctx)
-	return true
-}
-func (*attemptAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {
 	lifetime := 5 * time.Minute
 	switch token {
 	case "older":
@@ -355,16 +347,6 @@ type blockingGrantAuthority struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
-}
-
-func (*blockingGrantAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
-	work(ctx)
-	return true
-}
-
-func (*blockingGrantAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
-	work(ctx)
-	return true
 }
 
 func (a *blockingGrantAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {

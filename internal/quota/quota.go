@@ -19,23 +19,22 @@ var ErrExhausted = errors.New("weekly quota exhausted")
 var ErrTemporary = errors.New("quota temporarily unavailable")
 
 type Quota struct {
-	beforeLock           func()
-	beforeCommit         func(context.Context, pgx.Tx) error
-	afterCommit          func() error
-	periodic             periodicAccounting
-	settlementProtection SettlementProtection
-	settlementMu         sync.Mutex
-	settlements          map[settlementKey]*settlementState
-	runtime              *database.Runtime
-	diagnostics          *diagnostic.Logger
-	clock                clockState
-	stop                 chan struct{}
-	done                 chan struct{}
-	settlementBefore     func(context.Context, pgx.Tx) error
-	settlementAfter      func(context.Context) error
-	eligibilityBoundary  func(context.Context) error
-	adjustTime           func(time.Time) time.Time
-	probeQuery           func(context.Context) (time.Time, error)
+	beforeLock          func()
+	beforeCommit        func(context.Context, pgx.Tx) error
+	afterCommit         func() error
+	periodic            periodicAccounting
+	settlementMu        sync.Mutex
+	settlements         map[settlementKey]*settlementState
+	runtime             *database.Runtime
+	diagnostics         *diagnostic.Logger
+	clock               clockState
+	stop                chan struct{}
+	done                chan struct{}
+	settlementBefore    func(context.Context, pgx.Tx) error
+	settlementAfter     func(context.Context) error
+	eligibilityBoundary func(context.Context) error
+	adjustTime          func(time.Time) time.Time
+	probeQuery          func(context.Context) (time.Time, error)
 }
 
 // SetAccountingBoundariesForTest controls clock and authority availability at the

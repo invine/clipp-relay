@@ -226,7 +226,7 @@ func TestClockUnavailabilityDoesNotWithdrawHTTPReadiness(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := accounting.Eligibility(ctx, "unused-account", 0); !errors.Is(err, quota.ErrTemporary) {
+	if _, err := accounting.Eligibility(ctx, "unused-account"); !errors.Is(err, quota.ErrTemporary) {
 		t.Fatalf("clock-unsafe allocation was accepted: %v", err)
 	}
 	check("/readyz", http.StatusOK)

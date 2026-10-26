@@ -242,7 +242,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.uncertainAccounts.Store(id, uncertainDeletion{operationID: operation})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true, InvalidateEligibility: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true})
 			invalidationFailed = s.deliverAccountInvalidation(id) != nil
 			admitted, uncertain = true, err != nil
 		}); accountGuardErr != nil {

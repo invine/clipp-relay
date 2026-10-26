@@ -102,7 +102,7 @@ func TestEstablishedCircuitRequiresHealthyNewWeekAuthorityDespiteSuccessfulWrite
 				if err := p.quota.FlushAccounting(ctx, p.account); err != nil {
 					t.Fatal(err)
 				}
-				_, err := p.quota.Eligibility(ctx, p.account, 0)
+				_, err := p.quota.Eligibility(ctx, p.account)
 				if unavailable && !errors.Is(err, quota.ErrTemporary) {
 					t.Fatalf("authority=%v", err)
 				}

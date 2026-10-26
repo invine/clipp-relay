@@ -147,7 +147,7 @@ func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	initial, err := p.quota.Eligibility(ctx, p.account, credentialA.Generation)
+	initial, err := p.quota.Eligibility(ctx, p.account)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
 	if err = p.quota.Observe(p.account, 55); err != nil {
 		t.Fatalf("seed pending usage: %v", err)
 	}
-	usageBefore, err := p.quota.Eligibility(ctx, p.account, credentialA.Generation)
+	usageBefore, err := p.quota.Eligibility(ctx, p.account)
 	if err != nil || usageBefore.RecordedBytes != 123 || usageBefore.EffectiveBytes != 178 {
 		t.Fatalf("seed quota usage=%+v err=%v", usageBefore, err)
 	}
@@ -239,7 +239,10 @@ func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
 	if _, err := p.auth.AuthenticateRelay(context.Background(), accessA); err == nil {
 		t.Fatal("replay left the owning grant's access token valid")
 	}
-	usageAfter, err := p.quota.Eligibility(ctx, p.account, credentialA.Generation)
+	if !p.quota.AccountingReady(p.account) {
+		t.Fatal("grant replay marked account quota unhealthy")
+	}
+	usageAfter, err := p.quota.Eligibility(ctx, p.account)
 	if err != nil || usageAfter.RecordedBytes != usageBefore.RecordedBytes || usageAfter.EffectiveBytes != usageBefore.EffectiveBytes || usageAfter.CapBytes != usageBefore.CapBytes {
 		t.Fatalf("grant replay changed account quota: before=%+v after=%+v err=%v", usageBefore, usageAfter, err)
 	}
@@ -450,7 +453,7 @@ func TestProductionObservedPolicyEditsPreservePendingAndEnforceEquality(t *testi
 	if err := p.quota.FlushAccounting(context.Background(), p.account); err != nil && err != quota.ErrTemporary {
 		t.Fatal(err)
 	}
-	eligible, err := p.quota.Eligibility(context.Background(), p.account, 0)
+	eligible, err := p.quota.Eligibility(context.Background(), p.account)
 	if err != nil || eligible.EffectiveBytes != 60 {
 		t.Fatalf("policy edit reset consumption: %+v %v", eligible, err)
 	}
@@ -481,8 +484,11 @@ func TestProductionObservedSuspensionRetainsUsage(t *testing.T) {
 	if err != nil || usage.RecordedBytes != 83 {
 		t.Fatalf("suspension lost usage: %+v %v", usage, err)
 	}
-	if _, err := p.quota.Eligibility(context.Background(), p.account, 0); err != quota.ErrTemporary {
-		t.Fatalf("suspended account eligible: %v", err)
+	if _, err := p.quota.Eligibility(context.Background(), p.account); err != nil {
+		t.Fatalf("suspension made quota unavailable: %v", err)
+	}
+	if !p.quota.AccountingReady(p.account) {
+		t.Fatal("suspension marked accounting unhealthy")
 	}
 	replacement := protectedClient(t, p)
 	requireProtectedAuthentication(t, replacement, p, "authentication_failed")
@@ -490,11 +496,7 @@ func TestProductionObservedSuspensionRetainsUsage(t *testing.T) {
 
 func TestOwnerAccountRevocationInvalidatesOnlyThatAccountsSessions(t *testing.T) {
 	p := protectedPortalFixture(t)
-	credential, err := p.auth.AuthenticateRelay(context.Background(), p.access)
-	if err != nil {
-		t.Fatal(err)
-	}
-	usage, err := p.quota.Eligibility(context.Background(), p.account, credential.Generation)
+	usage, err := p.quota.Eligibility(context.Background(), p.account)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +506,7 @@ func TestOwnerAccountRevocationInvalidatesOnlyThatAccountsSessions(t *testing.T)
 	if err := p.quota.Observe(p.account, 55); err != nil {
 		t.Fatal(err)
 	}
-	usageBefore, err := p.quota.Eligibility(context.Background(), p.account, credential.Generation)
+	usageBefore, err := p.quota.Eligibility(context.Background(), p.account)
 	if err != nil || usageBefore.RecordedBytes != 123 || usageBefore.EffectiveBytes != 178 {
 		t.Fatalf("seed usage before revocation=%+v err=%v", usageBefore, err)
 	}
@@ -554,13 +556,12 @@ func TestOwnerAccountRevocationInvalidatesOnlyThatAccountsSessions(t *testing.T)
 	if _, err := p.auth.AuthenticateRelay(context.Background(), otherAccess); err != nil {
 		t.Fatalf("account revocation invalidated unrelated credentials: %v", err)
 	}
-	var generation int64
-	if err := p.auth.Pool.QueryRow(context.Background(), `SELECT credential_generation FROM public.accounts WHERE id=$1`, p.account).Scan(&generation); err != nil {
-		t.Fatal(err)
-	}
-	usageAfter, err := p.quota.Eligibility(context.Background(), p.account, generation)
+	usageAfter, err := p.quota.Eligibility(context.Background(), p.account)
 	if err != nil || usageAfter.RecordedBytes != usageBefore.RecordedBytes || usageAfter.EffectiveBytes != usageBefore.EffectiveBytes || usageAfter.CapBytes != usageBefore.CapBytes {
 		t.Fatalf("account revocation changed allowance or usage: before=%+v after=%+v err=%v", usageBefore, usageAfter, err)
+	}
+	if !p.quota.AccountingReady(p.account) {
+		t.Fatal("account-wide revocation marked accounting unhealthy")
 	}
 }
 

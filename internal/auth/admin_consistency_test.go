@@ -176,7 +176,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 	}
 	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"routine_administration"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
 	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
-	if out.Code != 503 || changed.AccountID != target || !changed.CloseAll || !changed.InvalidateEligibility {
+	if out.Code != 503 || changed.AccountID != target || !changed.CloseAll {
 		t.Fatalf("ambiguous commit response=%d invalidated=%+v", out.Code, changed)
 	}
 	var status string
@@ -214,7 +214,7 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 	}
 	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {"1"}}
 	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
-	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !changed.InvalidateEligibility || !closed {
+	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !closed {
 		t.Fatalf("ambiguous security mutation response=%d callback=%+v closed=%t", out.Code, changed, closed)
 	}
 	var status string
