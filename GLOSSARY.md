@@ -97,7 +97,7 @@ A service-wide or per-Peer-ID resource bound protecting relay availability indep
 _Avoid_: Relay Quota
 
 **Relay Session**:
-A live libp2p connection associated with the Relay Account that authenticated it. The association is ephemeral and ends at its fixed expiry unless successful same-account reauthentication extends it; ending a Relay Session closes the connection.
+A live libp2p connection associated with the Relay Account and Login Grant that authenticated it. The associations are ephemeral. A supported grant revocation invalidates sessions authenticated with that grant; Account-wide Revocation and account access restrictions invalidate all affected account sessions. Invalidation immediately removes authorization, while physical connection closure may complete asynchronously. Otherwise, a session ends at its fixed expiry unless successful same-account reauthentication extends it.
 _Avoid_: Device enrollment, login session
 
 **Relay Authentication**:
