@@ -4,7 +4,7 @@
 
 **Blocked by:** 05: Manage account access and Quota Plans atomically; 06: Record and reconcile Relay Usage.
 
-**Status:** ready-for-agent
+**Status:** claimed — persistence 07 (coordinator: root), 2026-10-26
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I5, I8–I10; T1–T3, T5–T6, applicable T7–T8.
 
@@ -18,4 +18,4 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+- Claimed for implementation after tickets 05 and 06 were integrated.

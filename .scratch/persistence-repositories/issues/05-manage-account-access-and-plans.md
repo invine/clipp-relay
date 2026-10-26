@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Rotate Login Grants and handle refresh replay; 04: Register Relay Accounts and manage Portal Sessions.
 
-**Status:** claimed — persistence 05 (coordinator: root), 2026-10-26
+**Status:** resolved — account-access repository integration; focused Auth/persistence tests and `go vet ./internal/auth ./internal/persistence/...` passed. PostgreSQL 17/18 qualification remains in ticket 11.
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I5, I9–I10; T1–T4, applicable T7–T8.
 
@@ -18,4 +18,5 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Claimed for implementation after tickets 03 and 04 were integrated.
+- Administrator account actions, plan creation/archival/assignment, quota overrides, and owner-wide revocation use repository-backed transactions.
+- Focused tests and vet passed. PostgreSQL 17/18 smoke qualification is tracked by ticket 11.
