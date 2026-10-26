@@ -36,6 +36,7 @@ func NewSession(p Principal) fosite.Session {
 
 type txKey struct{}
 type persistenceTxKey struct{}
+type authorizationTxKey struct{}
 type clientKey struct{}
 type rawTokenKey struct{}
 type operationKey struct{}
@@ -53,13 +54,27 @@ func InTransaction(ctx context.Context, tx pgx.Tx, client ClientType, token stri
 }
 
 // InPersistenceTransaction attaches the narrow access-token repository used
-// during discovery and relay-authentication validation. Other Fosite operations
-// continue to use their compatibility transaction until their migration ticket.
+// during Discovery and Relay Authentication.
 func InPersistenceTransaction(ctx context.Context, tx persistence.Transaction, client ClientType, token string) context.Context {
 	ctx = context.WithValue(ctx, persistenceTxKey{}, tx)
 	ctx = context.WithValue(ctx, clientKey{}, client)
 	ctx = context.WithValue(ctx, rawTokenKey{}, token)
 	return context.WithValue(ctx, operationKey{}, &operation{})
+}
+
+// InAuthorizationTransaction attaches the complete-operation repository set
+// used by native authorization-code issuance and redemption.
+func InAuthorizationTransaction(ctx context.Context, tx persistence.AuthorizationTransaction, client ClientType, token string) context.Context {
+	ctx = context.WithValue(ctx, authorizationTxKey{}, tx)
+	ctx = context.WithValue(ctx, persistenceTxKey{}, tx)
+	ctx = context.WithValue(ctx, clientKey{}, client)
+	ctx = context.WithValue(ctx, rawTokenKey{}, token)
+	return context.WithValue(ctx, operationKey{}, &operation{})
+}
+
+func authorizationTxFrom(ctx context.Context) (persistence.AuthorizationTransaction, bool) {
+	tx, ok := ctx.Value(authorizationTxKey{}).(persistence.AuthorizationTransaction)
+	return tx, ok && tx != nil
 }
 
 func ReplayCanCommit(ctx context.Context) bool {
@@ -128,137 +143,128 @@ func expectedClient(ctx context.Context) ClientType {
 }
 
 func (s *Storage) CreateAuthorizeCodeSession(ctx context.Context, signature string, req fosite.Requester) error {
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return err
+	if tx, ok := authorizationTxFrom(ctx); ok {
+		digest, err := LookupDigest(AuthorizationCode, signature)
+		if err != nil {
+			return err
+		}
+		p, err := principalFrom(req)
+		if err != nil {
+			return err
+		}
+		if p.GrantID == "" {
+			p.GrantID = req.GetID()
+		}
+		if _, err = url.ParseRequestURI(req.GetRequestForm().Get("redirect_uri")); err != nil {
+			return err
+		}
+		challenge := req.GetRequestForm().Get("code_challenge")
+		if len(challenge) != 43 || p.AccountID == "" || p.Generation < 0 || req.GetClient().GetID() != string(p.Client) {
+			return errors.New("incomplete native authorization request")
+		}
+		expires := req.GetSession().GetExpiresAt(fosite.AuthorizeCode)
+		if expires.IsZero() {
+			return errors.New("Fosite authorization-code expiry is missing")
+		}
+		return tx.StoreAuthorizationCode(ctx, digest, persistence.AuthorizationCode{AccountID: p.AccountID, Generation: p.Generation, ClientType: string(p.Client), RedirectURI: req.GetRequestForm().Get("redirect_uri"), Challenge: challenge, GrantID: p.GrantID, ExpiresAt: expires})
 	}
-	digest, err := LookupDigest(AuthorizationCode, signature)
-	if err != nil {
-		return err
-	}
-	p, err := principalFrom(req)
-	if err != nil {
-		return err
-	}
-	if p.GrantID == "" {
-		p.GrantID = req.GetID()
-	}
-	if _, err = url.ParseRequestURI(req.GetRequestForm().Get("redirect_uri")); err != nil {
-		return err
-	}
-	challenge := req.GetRequestForm().Get("code_challenge")
-	if len(challenge) != 43 || p.AccountID == "" || p.Generation < 0 || req.GetClient().GetID() != string(p.Client) {
-		return errors.New("incomplete native authorization request")
-	}
-	expires := req.GetSession().GetExpiresAt(fosite.AuthorizeCode)
-	if expires.IsZero() {
-		return errors.New("Fosite authorization-code expiry is missing")
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO public.native_authorization_codes(credential_digest,account_id,credential_generation,client_type,redirect_uri,code_challenge,grant_id,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),$8)`, digest[:], p.AccountID, p.Generation, p.Client, req.GetRequestForm().Get("redirect_uri"), challenge, p.GrantID, expires)
-	return err
+	return errors.New("Fosite authorization-code operations require authorization repositories")
 }
-
 func (s *Storage) GetAuthorizeCodeSession(ctx context.Context, signature string, session fosite.Session) (fosite.Requester, error) {
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return nil, err
+	if tx, ok := authorizationTxFrom(ctx); ok {
+		digest, err := LookupDigest(AuthorizationCode, signature)
+		if err != nil {
+			return nil, fosite.ErrNotFound
+		}
+		code, err := tx.LoadAuthorizationCode(ctx, digest)
+		if errors.Is(err, persistence.ErrInvalidCredential) || code.Consumed {
+			return nil, fosite.ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		client, err := s.client(code.ClientType)
+		expected := expectedClient(ctx)
+		if err != nil || expected != "" && expected != ClientType(code.ClientType) {
+			return nil, fosite.ErrNotFound
+		}
+		if session == nil {
+			session = &fosite.DefaultSession{}
+		}
+		setPrincipal(session, Principal{AccountID: code.AccountID, Generation: code.Generation, Client: ClientType(code.ClientType), GrantID: code.GrantID})
+		session.SetExpiresAt(fosite.AuthorizeCode, code.ExpiresAt)
+		req := fosite.NewRequest()
+		req.SetID(code.GrantID)
+		req.Client = client
+		req.Form = url.Values{"redirect_uri": {code.RedirectURI}, "code_challenge": {code.Challenge}, "code_challenge_method": {"S256"}}
+		req.SetSession(session)
+		req.SetRequestedScopes(nil)
+		return req, nil
 	}
-	digest, err := LookupDigest(AuthorizationCode, signature)
-	if err != nil {
-		return nil, fosite.ErrNotFound
-	}
-	var p Principal
-	var redirect, challenge string
-	var expires time.Time
-	var consumed bool
-	err = tx.QueryRow(ctx, `SELECT account_id::text,credential_generation,client_type,redirect_uri,code_challenge,grant_id::text,consumed_at IS NOT NULL,expires_at FROM public.native_authorization_codes WHERE credential_digest=$1 AND expires_at>clock_timestamp() FOR UPDATE`, digest[:]).Scan(&p.AccountID, &p.Generation, &p.Client, &redirect, &challenge, &p.GrantID, &consumed, &expires)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fosite.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if consumed {
-		return nil, fosite.ErrNotFound
-	}
-	client, err := s.client(string(p.Client))
-	if err != nil {
-		return nil, fosite.ErrNotFound
-	}
-	if expected := expectedClient(ctx); expected != "" && expected != p.Client {
-		return nil, fosite.ErrNotFound
-	}
-	if session == nil {
-		session = &fosite.DefaultSession{}
-	}
-	setPrincipal(session, p)
-	session.SetExpiresAt(fosite.AuthorizeCode, expires)
-	req := fosite.NewRequest()
-	req.SetID(p.GrantID)
-	req.Client = client
-	req.Form = url.Values{"redirect_uri": {redirect}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}}
-	req.SetSession(session)
-	req.SetRequestedScopes(nil)
-	return req, nil
+	return nil, errors.New("Fosite authorization-code operations require authorization repositories")
 }
-
 func (s *Storage) InvalidateAuthorizeCodeSession(ctx context.Context, signature string) error {
-	tx, err := txFrom(ctx)
-	if err != nil {
+	if tx, ok := authorizationTxFrom(ctx); ok {
+		digest, err := LookupDigest(AuthorizationCode, signature)
+		if err != nil {
+			return fosite.ErrNotFound
+		}
+		if err = tx.ConsumeAuthorizationCode(ctx, digest); errors.Is(err, persistence.ErrInvalidCredential) {
+			return fosite.ErrNotFound
+		}
 		return err
 	}
-	digest, err := LookupDigest(AuthorizationCode, signature)
-	if err != nil {
-		return fosite.ErrNotFound
-	}
-	tag, err := tx.Exec(ctx, `UPDATE public.native_authorization_codes SET consumed_at=clock_timestamp() WHERE credential_digest=$1 AND consumed_at IS NULL AND expires_at>clock_timestamp()`, digest[:])
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return fosite.ErrNotFound
-	}
-	return nil
+	return errors.New("Fosite authorization-code operations require authorization repositories")
 }
-
 func (s *Storage) GetPKCERequestSession(ctx context.Context, signature string, _ fosite.Session) (fosite.Requester, error) {
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return nil, err
+	if tx, ok := authorizationTxFrom(ctx); ok {
+		digest, err := LookupDigest(AuthorizationCode, signature)
+		if err != nil {
+			return nil, fosite.ErrNotFound
+		}
+		code, err := tx.LoadAuthorizationCode(ctx, digest)
+		if errors.Is(err, persistence.ErrInvalidCredential) || code.Consumed {
+			return nil, fosite.ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		client, err := s.client(code.ClientType)
+		if err != nil {
+			return nil, fosite.ErrNotFound
+		}
+		req := fosite.NewRequest()
+		req.SetID(code.GrantID)
+		req.Client = client
+		req.Form = url.Values{"redirect_uri": {code.RedirectURI}, "code_challenge": {code.Challenge}, "code_challenge_method": {"S256"}}
+		return req, nil
 	}
-	digest, err := LookupDigest(AuthorizationCode, signature)
-	if err != nil {
-		return nil, fosite.ErrNotFound
-	}
-	var p Principal
-	var challenge, redirect string
-	err = tx.QueryRow(ctx, `SELECT account_id::text,credential_generation,client_type,grant_id::text,code_challenge,redirect_uri FROM public.native_authorization_codes WHERE credential_digest=$1 AND consumed_at IS NULL AND expires_at>clock_timestamp() FOR UPDATE`, digest[:]).Scan(&p.AccountID, &p.Generation, &p.Client, &p.GrantID, &challenge, &redirect)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fosite.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	client, err := s.client(string(p.Client))
-	if err != nil {
-		return nil, fosite.ErrNotFound
-	}
-	req := fosite.NewRequest()
-	req.SetID(p.GrantID)
-	req.Client = client
-	req.Form = url.Values{"redirect_uri": {redirect}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}}
-	return req, nil
+	return nil, errors.New("Fosite authorization-code operations require authorization repositories")
 }
-
-// PKCE storage shares the typed challenge on the authorization-code record.
-// Fosite calls Delete before validating the verifier; leaving it in place is
-// necessary so an invalid verifier cannot consume an otherwise valid code.
 func (s *Storage) CreatePKCERequestSession(context.Context, string, fosite.Requester) error {
 	return nil
 }
 func (s *Storage) DeletePKCERequestSession(context.Context, string) error { return nil }
 
 func (s *Storage) CreateAccessTokenSession(ctx context.Context, signature string, req fosite.Requester) error {
+	if tx, ok := authorizationTxFrom(ctx); ok {
+		digest, err := LookupDigest(AccessToken, signature)
+		if err != nil {
+			return err
+		}
+		p, err := principalFrom(req)
+		if err != nil {
+			return err
+		}
+		if err = tx.CreateLoginGrant(ctx, persistence.LoginGrant{ID: p.GrantID, AccountID: p.AccountID, Generation: p.Generation, ClientType: string(p.Client)}); err != nil {
+			return err
+		}
+		expires := req.GetSession().GetExpiresAt(fosite.AccessToken)
+		if expires.IsZero() {
+			expires = time.Now().UTC().Add(15 * time.Minute)
+		}
+		return tx.StoreRelayAccessToken(ctx, digest, p.GrantID, expires)
+	}
 	tx, err := txFrom(ctx)
 	if err != nil {
 		return err
@@ -338,6 +344,21 @@ func (s *Storage) DeleteAccessTokenSession(ctx context.Context, signature string
 }
 
 func (s *Storage) CreateRefreshTokenSession(ctx context.Context, signature, _ string, req fosite.Requester) error {
+	if tx, ok := authorizationTxFrom(ctx); ok {
+		digest, err := LookupDigest(RefreshToken, signature)
+		if err != nil {
+			return err
+		}
+		p, err := principalFrom(req)
+		if err != nil {
+			return err
+		}
+		generation, err := tx.CurrentRefreshGeneration(ctx, p.GrantID)
+		if err != nil {
+			return err
+		}
+		return tx.StoreRefreshGeneration(ctx, digest, p.GrantID, generation)
+	}
 	tx, err := txFrom(ctx)
 	if err != nil {
 		return err

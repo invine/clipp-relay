@@ -23,6 +23,7 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/relay"
 	"github.com/jackc/pgx/v5"
 	ma "github.com/multiformats/go-multiaddr"
@@ -405,19 +406,19 @@ func TestNativeFositeUncertainCommitAcknowledgements(t *testing.T) {
 	code := issueCode("uncertain-code-state-00000001")
 	codeForm := url.Values{"grant_type": {"authorization_code"}, "client_id": {"android"}, "redirect_uri": {c.PublicClients.AndroidRedirect}, "code": {code}, "code_verifier": {verifier}}
 	codeCommitCalls := 0
-	s.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetAuthorizationCommitHookForTest(func(ctx context.Context, tx persistence.Transaction) error {
 		codeCommitCalls++
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
-		return errors.New("simulated authorization-code commit acknowledgment loss")
+		return persistence.ErrUncertainCommit
 	})
 	uncertainCodeResponse := tokenPost(codeForm)
 	if uncertainCodeResponse.Code != http.StatusServiceUnavailable || codeCommitCalls != 1 {
 		t.Fatalf("uncertain code exchange status=%d commit attempts=%d", uncertainCodeResponse.Code, codeCommitCalls)
 	}
 	assertNoCredentials(uncertainCodeResponse)
-	s.SetCredentialCommitHookForTest(nil)
+	s.SetAuthorizationCommitHookForTest(nil)
 	if retry := tokenPost(codeForm); retry.Code != http.StatusUnauthorized {
 		t.Fatalf("committed authorization code retry status=%d, want unauthorized", retry.Code)
 	} else {
