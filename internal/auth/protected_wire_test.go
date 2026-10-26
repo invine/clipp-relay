@@ -261,6 +261,55 @@ func requireProtectedAuthentication(t *testing.T, h host.Host, p protectedPortal
 func TestProductionProtectionClosesAllOnSessionCapReduction(t *testing.T) {
 	t.Run("observed", func(t *testing.T) { testProtectedSessionCap(t) })
 }
+
+func TestProductionProtectionReadsCurrentCapAfterAuthReturns(t *testing.T) {
+	p := protectedPortalFixture(t)
+	p.mutate(t, "override", "2", url.Values{"sessions_override": {"5"}})
+	clients := make([]host.Host, 4)
+	for i := range clients {
+		clients[i] = protectedClient(t, p)
+	}
+	for i := 0; i < 3; i++ {
+		requireProtectedAuthentication(t, clients[i], p, `"ok":true`)
+	}
+	if got := p.relay.AccountSessions(p.account); got != 3 {
+		t.Fatalf("initial sessions=%d, want 3", got)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	p.quota.SetAccountingBoundariesForTest(nil, nil, func(ctx context.Context) error {
+		once.Do(func() { close(entered); <-release })
+		return ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := make(chan string, 1)
+	go func() {
+		response, err := protectedAuthenticate(ctx, clients[3], p)
+		result <- fmt.Sprintf("%s %v", response, err)
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not reach pending Quota assessment")
+	}
+	// The pending assessment is ordered after Auth has already returned its
+	// credential, whose SessionLimit still reflects the old policy.
+	p.mutate(t, "override", "3", url.Values{"sessions_override": {"3"}})
+	close(release)
+	select {
+	case response := <-result:
+		if !strings.Contains(response, `"code":"session_limit_exceeded"`) {
+			t.Fatalf("current database cap response=%s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("pending authentication did not finish")
+	}
+	if got := p.relay.AccountSessions(p.account); got != 3 {
+		t.Fatalf("sessions after current cap assessment=%d, want 3", got)
+	}
+}
+
 func testProtectedSessionCap(t *testing.T) {
 	p := protectedPortalFixture(t)
 	p.mutate(t, "override", "2", url.Values{"sessions_override": {"2"}})

@@ -27,7 +27,7 @@ func (testAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCrede
 type testAccounting struct{}
 
 func (testAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
-	return quota.AccountingEligibility{}, nil
+	return quota.AccountingEligibility{SessionLimit: 5}, nil
 }
 func (testAccounting) Observe(string, int64) error              { return nil }
 func (testAccounting) AccountingFailed(string)                  {}

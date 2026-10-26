@@ -25,7 +25,7 @@ type finiteAccounting struct {
 }
 
 func (c *finiteAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
-	return quota.AccountingEligibility{}, nil
+	return quota.AccountingEligibility{SessionLimit: 5}, nil
 }
 func (c *finiteAccounting) Observe(id string, n int64) error {
 	if id != "a" {

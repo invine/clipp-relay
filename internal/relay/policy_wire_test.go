@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/quota"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -18,6 +19,17 @@ type policyAuthority struct {
 	cap    int
 	active bool
 	seen   chan struct{}
+}
+
+type policyAccounting struct {
+	wireAccounting
+	authority *policyAuthority
+}
+
+func (c policyAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
+	c.authority.mu.Lock()
+	defer c.authority.mu.Unlock()
+	return quota.AccountingEligibility{SessionLimit: c.authority.cap}, nil
 }
 
 func (a *policyAuthority) AuthenticateRelay(_ context.Context, token string) (auth.RelayCredential, error) {
@@ -49,7 +61,7 @@ func (a *policyAuthority) change(active bool, cap int, s *Server) {
 
 func TestLiveSessionCapReductionClosesAllAndReconnectsWithinCap(t *testing.T) {
 	a := &policyAuthority{active: true, cap: 2}
-	s, err := New(a, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	s, err := New(a, policyAccounting{authority: a}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +116,17 @@ func TestLiveSessionCapReductionClosesAllAndReconnectsWithinCap(t *testing.T) {
 	a.change(false, 1, s)
 	if got := s.AccountSessions("a"); got != 0 {
 		t.Fatalf("revocation left %d sessions", got)
+	}
+	a.change(true, 0, s)
+	until := time.Now().Add(time.Second)
+	for len(clients[0].Network().ConnsToPeer(s.Host.ID())) != 0 && time.Now().Before(until) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := clients[0].Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, clients[0], s.Host.ID(), "authorized"); !strings.Contains(response, "session_limit_exceeded") {
+		t.Fatalf("zero current session cap admitted a session: %s", response)
 	}
 }
 

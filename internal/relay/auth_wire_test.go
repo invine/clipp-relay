@@ -42,6 +42,98 @@ type blockingEligibility struct {
 	armed   bool
 }
 
+type changingCapEligibility struct {
+	wireAccounting
+	mu      sync.Mutex
+	cap     int
+	entered chan struct{}
+	release chan struct{}
+	blocked bool
+}
+
+func (c *changingCapEligibility) Eligibility(ctx context.Context, _ string) (quota.AccountingEligibility, error) {
+	c.mu.Lock()
+	block := c.blocked
+	c.blocked = false
+	cap := c.cap
+	c.mu.Unlock()
+	if block {
+		close(c.entered)
+		select {
+		case <-c.release:
+		case <-ctx.Done():
+			return quota.AccountingEligibility{}, ctx.Err()
+		}
+	}
+	return quota.AccountingEligibility{SessionLimit: cap}, nil
+}
+
+func (c *changingCapEligibility) arm(cap int) {
+	c.mu.Lock()
+	c.cap = cap
+	c.blocked = true
+	c.mu.Unlock()
+}
+
+type oldCapAuthority struct{}
+
+func (oldCapAuthority) AuthenticateRelay(context.Context, string) (auth.RelayCredential, error) {
+	return auth.RelayCredential{AccountID: "a", SessionLimit: 5, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil
+}
+
+func TestCurrentQuotaSessionLimitFencesPendingAuthentication(t *testing.T) {
+	accounting := &changingCapEligibility{cap: 5, entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := New(oldCapAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	clients := make([]host.Host, 4)
+	for i := range clients {
+		clients[i], err = libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clients[i].Close()
+		if err = clients[i].Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if response := authResponse(t, ctx, clients[i], s.Host.ID(), "old-policy"); !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("session %d: %s", i, response)
+		}
+	}
+	if got := s.AccountSessions("a"); got != 3 {
+		t.Fatalf("live sessions=%d, want 3", got)
+	}
+	accounting.arm(3)
+	result := make(chan string, 1)
+	go func() {
+		response, _ := transportAuthResponse(ctx, clients[3], s.Host.ID(), "old-policy")
+		result <- response
+	}()
+	select {
+	case <-accounting.entered:
+	case <-ctx.Done():
+		t.Fatal("fourth authentication did not reach Quota")
+	}
+	close(accounting.release)
+	select {
+	case response := <-result:
+		if !strings.Contains(response, `"code":"session_limit_exceeded"`) {
+			t.Fatalf("current cap response: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("fourth authentication did not finish")
+	}
+	if got := s.AccountSessions("a"); got != 3 {
+		t.Fatalf("live sessions after cap reduction=%d, want 3", got)
+	}
+}
+
 func (c *blockingEligibility) arm() {
 	c.mu.Lock()
 	c.armed = true
@@ -61,7 +153,7 @@ func (c *blockingEligibility) Eligibility(context.Context, string) (quota.Accoun
 			<-c.release
 		})
 	}
-	return quota.AccountingEligibility{}, nil
+	return quota.AccountingEligibility{SessionLimit: 5}, nil
 }
 
 type failingAccounting struct{ err error }
