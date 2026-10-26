@@ -107,14 +107,14 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
+	if purpose == issuer.AuthorizationCode {
+		s.nativeAuthorizationCodeToken(w, r, client, rawToken, digest)
+		return
+	}
 	var account string
 	var grantID string
 	var tokenGeneration int64
-	if purpose == issuer.AuthorizationCode {
-		err = s.Pool.QueryRow(r.Context(), `SELECT account_id::text,credential_generation FROM public.native_authorization_codes WHERE credential_digest=$1 AND consumed_at IS NULL AND expires_at>clock_timestamp()`, digest[:]).Scan(&account, &tokenGeneration)
-	} else {
-		err = s.Pool.QueryRow(r.Context(), `SELECT g.account_id::text,g.id::text,g.credential_generation FROM public.native_refresh_generations rg JOIN public.native_login_grants g ON g.id=rg.grant_id WHERE rg.credential_digest=$1`, digest[:]).Scan(&account, &grantID, &tokenGeneration)
-	}
+	err = s.Pool.QueryRow(r.Context(), `SELECT g.account_id::text,g.id::text,g.credential_generation FROM public.native_refresh_generations rg JOIN public.native_login_grants g ON g.id=rg.grant_id WHERE rg.credential_digest=$1`, digest[:]).Scan(&account, &grantID, &tokenGeneration)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.oauthError(w, 401)
 		return

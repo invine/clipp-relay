@@ -148,3 +148,108 @@ func TestPinnedFositeNativeCredentialsUseTheExpectedOpaquePrefixes(t *testing.T)
 		})
 	}
 }
+
+type authorizationRepository struct {
+	accessRepository
+	code         persistence.AuthorizationCode
+	storedDigest [32]byte
+	storedCode   persistence.AuthorizationCode
+	consumed     bool
+}
+
+func (r *authorizationRepository) AuthorizationCodeOwner(context.Context, [32]byte) (persistence.AuthorizationCodeOwner, error) {
+	return persistence.AuthorizationCodeOwner{}, nil
+}
+func (r *authorizationRepository) SubjectForAccount(context.Context, string) (string, error) {
+	return "subject", nil
+}
+func (r *authorizationRepository) LockAccountAuthorization(context.Context, string) (persistence.AccountAuthorization, error) {
+	return persistence.AccountAuthorization{Status: "Active", Generation: 4}, nil
+}
+func (r *authorizationRepository) LockPortalSessionForConsent(context.Context, [32]byte, uint64, string, int64) (persistence.PortalSessionForConsent, error) {
+	return persistence.PortalSessionForConsent{}, nil
+}
+func (r *authorizationRepository) PortalSessionForAuthorization(context.Context, [32]byte, uint64) (persistence.PortalAuthorizationSession, error) {
+	return persistence.PortalAuthorizationSession{}, nil
+}
+func (r *authorizationRepository) TouchPortalSession(context.Context, [32]byte, uint64, string, int64) (bool, error) {
+	return true, nil
+}
+func (r *authorizationRepository) CountActiveLoginGrants(context.Context, string, int64) (int, error) {
+	return 0, nil
+}
+func (r *authorizationRepository) RecordCredentialAudit(context.Context, string, string, string) error {
+	return nil
+}
+func (r *authorizationRepository) StoreAuthorizationCode(_ context.Context, digest [32]byte, code persistence.AuthorizationCode) error {
+	r.storedDigest, r.storedCode = digest, code
+	return nil
+}
+func (r *authorizationRepository) LoadAuthorizationCode(context.Context, [32]byte) (persistence.AuthorizationCode, error) {
+	return r.code, nil
+}
+func (r *authorizationRepository) ConsumeAuthorizationCode(context.Context, [32]byte) error {
+	r.consumed = true
+	return nil
+}
+func (r *authorizationRepository) CreateLoginGrant(context.Context, persistence.LoginGrant) error {
+	return nil
+}
+func (r *authorizationRepository) StoreRelayAccessToken(context.Context, [32]byte, string, time.Time) error {
+	return nil
+}
+func (r *authorizationRepository) CurrentRefreshGeneration(context.Context, string) (int64, error) {
+	return 1, nil
+}
+func (r *authorizationRepository) StoreRefreshGeneration(context.Context, [32]byte, string, int64) error {
+	return nil
+}
+
+func TestFositeAuthorizationCodeReadsAndConsumptionUseTypedRepositories(t *testing.T) {
+	client := issuer.ClientType("android")
+	storage := issuer.NewStorage(issuer.Redirects{issuer.Android: "clipp-relay://oauth/callback"})
+	repository := &authorizationRepository{code: persistence.AuthorizationCode{
+		AccountID: "account-7", Generation: 4, ClientType: string(client),
+		RedirectURI: "clipp-relay://oauth/callback", Challenge: strings.Repeat("A", 43), GrantID: "grant-9",
+		ExpiresAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
+	}}
+	signature := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
+	ctx := issuer.InAuthorizationTransaction(context.Background(), repository, client, "")
+	request, err := storage.GetAuthorizeCodeSession(ctx, signature, &fosite.DefaultSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.GetID() != "grant-9" || request.GetClient().GetID() != "android" || request.GetRequestForm().Get("redirect_uri") != "clipp-relay://oauth/callback" {
+		t.Fatalf("authorization code projection is incomplete: id=%q client=%q form=%v", request.GetID(), request.GetClient().GetID(), request.GetRequestForm())
+	}
+	if err := storage.InvalidateAuthorizeCodeSession(ctx, signature); err != nil {
+		t.Fatal(err)
+	}
+	if !repository.consumed {
+		t.Fatal("Fosite did not consume the authorization code through the repository")
+	}
+}
+
+func TestFositeAuthorizationCodeCreationUsesTypedRepository(t *testing.T) {
+	client, err := issuer.NewStorage(issuer.Redirects{issuer.Android: "clipp-relay://oauth/callback"}).GetClient(context.Background(), "android")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := issuer.NewStorage(issuer.Redirects{issuer.Android: "clipp-relay://oauth/callback"})
+	repository := &authorizationRepository{}
+	session := issuer.NewSession(issuer.Principal{AccountID: "account-7", Generation: 4, Client: issuer.Android, GrantID: "grant-9"})
+	session.SetExpiresAt(fosite.AuthorizeCode, time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC))
+	request := fosite.NewRequest()
+	request.Client = client
+	request.SetID("grant-9")
+	request.Form = url.Values{"redirect_uri": {"clipp-relay://oauth/callback"}, "code_challenge": {strings.Repeat("A", 43)}}
+	request.SetSession(session)
+	signature := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	ctx := issuer.InAuthorizationTransaction(context.Background(), repository, issuer.Android, "")
+	if err := storage.CreateAuthorizeCodeSession(ctx, signature, request); err != nil {
+		t.Fatal(err)
+	}
+	if repository.storedCode.AccountID != "account-7" || repository.storedCode.GrantID != "grant-9" || repository.storedCode.ClientType != "android" || repository.storedDigest == ([32]byte{}) {
+		t.Fatalf("authorization code was not mapped to a typed repository record: %+v", repository.storedCode)
+	}
+}
