@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: Authorize native clients and redeem authorization codes.
 
-**Status:** ready-for-agent
+**Status:** claimed — persistence 03 (coordinator: root), 2026-10-26
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I6, I9–I10; T1–T4, applicable T8.
 

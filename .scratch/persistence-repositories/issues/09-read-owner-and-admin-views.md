@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Introduce repository scopes through credential validation.
 
-**Status:** ready-for-agent
+**Status:** claimed — persistence 09 (coordinator: root), 2026-10-26
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I3, I7, I9–I10; T1, T7–T8.
 
