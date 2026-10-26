@@ -15,22 +15,22 @@ func (s *Server) authenticateNativeAccess(ctx context.Context, raw string) (stri
 	if s.nativeIssuer == nil {
 		return "", time.Time{}, errors.New("native issuer unavailable")
 	}
-	unitCtx, release, err := s.db.StartUnit(ctx)
+	op, err := s.persistence.Start(ctx)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	defer release()
-	tx, err := s.db.Begin(unitCtx)
+	defer op.Close()
+	tx, err := op.Begin(op.Context())
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	defer tx.Rollback(unitCtx)
-	txCtx := issuer.InTransaction(unitCtx, tx, "", raw)
+	defer tx.Rollback(op.Context())
+	txCtx := issuer.InPersistenceTransaction(op.Context(), tx, "", raw)
 	principal, expires, err := s.nativeIssuer.AuthenticateAccess(txCtx, raw)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	if err = tx.Commit(unitCtx); err != nil {
+	if err = tx.Commit(op.Context()); err != nil {
 		return "", time.Time{}, err
 	}
 	return principal.AccountID, expires, nil
