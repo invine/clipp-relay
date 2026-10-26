@@ -53,3 +53,17 @@ func TestNativeTokenHTTPRejectsClientAssertionsBeforeFosite(t *testing.T) {
 		t.Fatalf("HTTP assertion request was not rejected by Clipp's strict boundary: %d %s", out.Code, out.Body.String())
 	}
 }
+
+func TestNativeOAuthRefusesToServeWithoutGrantInvalidationRecipient(t *testing.T) {
+	server := New(nil, config.Config{}, config.Material{}, Provider{})
+	if err := server.EnableNativeOAuth(bytes.Repeat([]byte{0x31}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader("grant_type=refresh_token&client_id=android&refresh_token=invalid"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("token endpoint without a grant invalidation recipient returned %d, want 503", response.Code)
+	}
+}

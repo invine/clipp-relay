@@ -160,6 +160,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var admitted, uncertain bool
+	var invalidationFailed bool
 	var closeConnections func()
 	if s.beforeAccountActionGuard != nil {
 		s.beforeAccountActionGuard()
@@ -176,10 +177,12 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			defer tx.Rollback(ctx)
 			var live bool
 			var authenticatedAt time.Time
+			var weeklyBytes int64
+			var sessionLimit int
 			if s.beforeOwnerRecheck != nil {
 				s.beforeOwnerRecheck(ctx, tx)
 			}
-			err = tx.QueryRow(ctx, `SELECT ps.google_authenticated_at,ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id WHERE a.id=$1 AND a.subject=$2 AND a.deletion_started_at IS NULL AND ps.credential_digest=$3 AND ps.pepper_version=$4 FOR UPDATE OF a`, id, subject, s.sessionDigest(r, version), version).Scan(&authenticatedAt, &live)
+			err = tx.QueryRow(ctx, `SELECT ps.google_authenticated_at,ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes,0),COALESCE(a.sessions_override,p.sessions,0) FROM public.accounts a LEFT JOIN public.quota_plans p ON p.id=a.plan_id JOIN public.portal_sessions ps ON ps.account_id=a.id WHERE a.id=$1 AND a.subject=$2 AND a.deletion_started_at IS NULL AND ps.credential_digest=$3 AND ps.pepper_version=$4 FOR UPDATE OF a`, id, subject, s.sessionDigest(r, version), version).Scan(&authenticatedAt, &live, &weeklyBytes, &sessionLimit)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					markDiagnostic(r, "refused", "invalid_credentials")
@@ -239,7 +242,8 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.uncertainAccounts.Store(id, uncertainDeletion{operationID: operation})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, CloseAll: true, InvalidateEligibility: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true})
+			invalidationFailed = s.deliverAccountInvalidation(id) != nil
 			admitted, uncertain = true, err != nil
 		}); accountGuardErr != nil {
 			markGuardDiagnostic(r, accountGuardErr)
@@ -264,6 +268,11 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	if uncertain {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		uncertainResponse(w)
+		return
+	}
+	if invalidationFailed {
+		markDiagnostic(r, "failed", "invalidation_incomplete")
+		http.Error(w, "Deletion admission committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Location", "/auth/deletion/"+operation)

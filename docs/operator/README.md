@@ -53,6 +53,16 @@ lost. Quota cleanup cancels workers and bounds its wait at 100 ms even when a
 faulty dependency ignores cancellation. Confirmed totals and compact receipts
 survive restart; restart never reconstructs lost observations or live sessions.
 
+Supported grant revocation invalidates established Relay Sessions authenticated
+with that grant. Account-wide revocation, suspension, denial and deletion
+invalidate the account's affected sessions. A successful mutation means the
+single-process Session Manager has processed logical invalidation; physical
+connection closure is asynchronous, and already-admitted streams or buffered
+traffic may finish. There is no recurring grant-status polling. Direct database
+edits do not publish notifications, so they do not guarantee immediate session
+invalidation. Multiple relay processes or external database writers require a
+separate notification design and are outside the supported deployment model.
+
 Offline accounting schema transitions: [observed accounting cutover](accounting-migration.md).
 
 Native OAuth startup, first cutover, signing-key replacement and uncertain

@@ -183,7 +183,7 @@ func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
 				if restartedRelay.Host.ID() == p.relay.Host.ID() || restartedRelay.AccountSessions(p.account) != 0 {
 					t.Fatal("restart inherited relay identity or sessions")
 				}
-				got, e := restartedQuota.Eligibility(ctx, p.account, 0)
+				got, e := restartedQuota.Eligibility(ctx, p.account)
 				if e != nil || got.RecordedBytes != usage.RecordedBytes || got.EffectiveBytes != usage.RecordedBytes {
 					t.Fatalf("restart accounting %+v %v", got, e)
 				}

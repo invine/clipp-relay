@@ -35,14 +35,6 @@ var ErrSettlementUncertain = errors.New("settlement commit outcome unknown; reco
 var ErrSettlementUnresolved = errors.New("previous settlement must be reconciled")
 var ErrUsageRetired = errors.New("account or weekly usage retired")
 
-// SettlementProtection joins complete settlement to Auth's account guards.
-// Configure before starting observed accounting; database work is admitted first.
-type SettlementProtection interface {
-	WithAccountGuards(context.Context, []string, func(context.Context)) bool
-}
-
-func (q *Quota) SetSettlementProtection(p SettlementProtection) { q.settlementProtection = p }
-
 type settlementKey struct {
 	id   string
 	week time.Time
@@ -97,39 +89,27 @@ func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUs
 	}
 	batch.WeekStart = batch.WeekStart.UTC()
 	err = q.runtime.WithUnit(ctx, func(unitCtx context.Context) error {
-		if q.settlementProtection == nil {
-			return ErrTemporary
+		key := settlementKey{batch.AccountID, batch.WeekStart}
+		s := q.acquireSettlement(key)
+		defer q.releaseSettlement(key, s)
+		for !s.mu.TryLock() {
+			select {
+			case <-unitCtx.Done():
+				return ErrTemporary
+			case <-time.After(time.Millisecond):
+			}
 		}
-		var workErr error = ErrTemporary
-		guarded := q.settlementProtection.WithAccountGuards(unitCtx, []string{batch.AccountID}, func(guardCtx context.Context) {
-			key := settlementKey{batch.AccountID, batch.WeekStart}
-			s := q.acquireSettlement(key)
-			defer q.releaseSettlement(key, s)
-			for !s.mu.TryLock() {
-				select {
-				case <-guardCtx.Done():
-					return
-				case <-time.After(time.Millisecond):
-				}
-			}
-			defer s.mu.Unlock()
-			if s.unresolved != nil && *s.unresolved != batch {
-				workErr = ErrSettlementUnresolved
-				return
-			}
-			result, workErr = q.settle(guardCtx, batch)
-			if errors.Is(workErr, ErrSettlementUncertain) {
-				copy := batch
-				s.unresolved = &copy
-			} else if workErr == nil || errors.Is(workErr, ErrUsageRetired) || errors.Is(workErr, ErrSettlementConflict) {
-				s.unresolved = nil
-			}
-		})
-		if !guarded {
-			if errors.Is(workErr, ErrSettlementUncertain) {
-				return workErr
-			}
-			return ErrTemporary
+		defer s.mu.Unlock()
+		if s.unresolved != nil && *s.unresolved != batch {
+			return ErrSettlementUnresolved
+		}
+		var workErr error
+		result, workErr = q.settle(unitCtx, batch)
+		if errors.Is(workErr, ErrSettlementUncertain) {
+			copy := batch
+			s.unresolved = &copy
+		} else if workErr == nil || errors.Is(workErr, ErrUsageRetired) || errors.Is(workErr, ErrSettlementConflict) {
+			s.unresolved = nil
 		}
 		return workErr
 	})

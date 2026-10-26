@@ -3,15 +3,18 @@ package auth_test
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
+	"github.com/jackc/pgx/v5"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -103,13 +107,17 @@ func protectedClient(t *testing.T, p protectedPortal, options ...libp2p.Option) 
 }
 
 func protectedAuthenticate(ctx context.Context, h host.Host, p protectedPortal) (string, error) {
+	return protectedAuthenticateToken(ctx, h, p, p.access)
+}
+
+func protectedAuthenticateToken(ctx context.Context, h host.Host, p protectedPortal, token string) (string, error) {
 	st, err := h.NewStream(ctx, p.relay.Host.ID(), relay.AuthProtocol)
 	if err != nil {
 		return "", err
 	}
 	defer st.Close()
 	_ = st.SetDeadline(time.Now().Add(5 * time.Second))
-	body := []byte(fmt.Sprintf(`{"accessToken":%q}`, p.access))
+	body := []byte(fmt.Sprintf(`{"accessToken":%q}`, token))
 	var header [10]byte
 	n := binary.PutUvarint(header[:], uint64(len(body)))
 	if _, err = st.Write(append(header[:n], body...)); err != nil {
@@ -130,6 +138,116 @@ func protectedAuthenticate(ctx context.Context, h host.Host, p protectedPortal) 
 	return string(response), err
 }
 
+func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
+	p := protectedPortalFixture(t)
+	accessA, refreshA := redeemClient(t, p.auth, "android", p.config.PublicClients.AndroidRedirect, authorizeClient(t, p.auth, p.owner, "android", p.config.PublicClients.AndroidRedirect))
+	accessB, _ := redeemClient(t, p.auth, "android", p.config.PublicClients.AndroidRedirect, authorizeClient(t, p.auth, p.owner, "android", p.config.PublicClients.AndroidRedirect))
+	credentialA, err := p.auth.AuthenticateRelay(context.Background(), accessA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	initial, err := p.quota.Eligibility(ctx, p.account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.quota.Settle(ctx, quota.Settlement{AccountID: p.account, WeekStart: initial.WeekStart, Sequence: 1, DeltaBytes: 123, OperationID: "5f29fe63-8676-49e0-b918-f792896323f0"}); err != nil {
+		t.Fatalf("seed recorded usage: %v", err)
+	}
+	if err = p.quota.Observe(p.account, 55); err != nil {
+		t.Fatalf("seed pending usage: %v", err)
+	}
+	usageBefore, err := p.quota.Eligibility(ctx, p.account)
+	if err != nil || usageBefore.RecordedBytes != 123 || usageBefore.EffectiveBytes != 178 {
+		t.Fatalf("seed quota usage=%+v err=%v", usageBefore, err)
+	}
+	grantA, grantB := p, p
+	grantA.access, grantB.access = accessA, accessB
+	clientA, clientB := protectedClient(t, p), protectedClient(t, p)
+	requireProtectedAuthentication(t, clientA, grantA, `"ok":true`)
+	requireProtectedAuthentication(t, clientB, grantB, `"ok":true`)
+	if got := p.relay.AccountSessions(p.account); got != 2 {
+		t.Fatalf("sessions before replay=%d, want 2", got)
+	}
+	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {"android"}, "refresh_token": {refreshA}}
+	if rotated := nativeTokenPost(t, p.auth.Handler(), form); rotated.Code != http.StatusOK {
+		t.Fatalf("ordinary refresh status=%d %s", rotated.Code, rotated.Body.String())
+	}
+	if got := p.relay.AccountSessions(p.account); got != 2 {
+		t.Fatalf("ordinary refresh invalidated a Relay Session: %d", got)
+	}
+	p.auth.SetCredentialCommitHookForTest(func(context.Context, pgx.Tx) error {
+		return errors.New("simulated refresh replay rollback")
+	})
+	rolledBack := nativeTokenPost(t, p.auth.Handler(), form)
+	p.auth.SetCredentialCommitHookForTest(nil)
+	if rolledBack.Code != http.StatusServiceUnavailable {
+		t.Fatalf("confirmed replay rollback status=%d %s", rolledBack.Code, rolledBack.Body.String())
+	}
+	if got := p.relay.AccountSessions(p.account); got != 2 {
+		t.Fatalf("rolled-back replay sessions=%d, want 2", got)
+	}
+	if _, err := p.auth.AuthenticateRelay(context.Background(), accessA); err != nil {
+		t.Fatalf("confirmed rollback revoked its grant: %v", err)
+	}
+	// Simulate a wrapper failure. The composed direct manager retry must still
+	// retire the owning grant before the committed replay returns.
+	p.auth.SetGrantRevokedForTest(func(string) error { return errors.New("simulated notification wrapper failure") })
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	p.auth.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		cancelRequest() // Model request cancellation after the database commit.
+		return errors.New("simulated lost refresh replay commit acknowledgment")
+	})
+	replayRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode())).WithContext(requestCtx)
+	replayRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	replay := httptest.NewRecorder()
+	p.auth.Handler().ServeHTTP(replay, replayRequest)
+	cancelRequest()
+	p.auth.SetCredentialCommitHookForTest(nil)
+	if replay.Code != http.StatusUnauthorized {
+		t.Fatalf("confirmed refresh replay status=%d %s", replay.Code, replay.Body.String())
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(clientA.Network().ConnsToPeer(p.relay.Host.ID())) != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(clientA.Network().ConnsToPeer(p.relay.Host.ID())); got != 0 {
+		t.Fatalf("revoked grant retained %d physical connections", got)
+	}
+	if got := p.relay.AccountSessions(p.account); got != 1 {
+		t.Fatalf("sessions after replay=%d, want unrelated grant's 1", got)
+	}
+	if got := len(clientB.Network().ConnsToPeer(p.relay.Host.ID())); got != 1 {
+		t.Fatalf("unrelated grant retained %d physical connections, want 1", got)
+	}
+	// Duplicate delivery is harmless and cannot disturb the unrelated grant.
+	if err := p.relay.InvalidateGrant(credentialA.GrantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.relay.InvalidateGrant(credentialA.GrantID); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.relay.AccountSessions(p.account); got != 1 || len(clientB.Network().ConnsToPeer(p.relay.Host.ID())) != 1 {
+		t.Fatalf("duplicate grant delivery affected unrelated session: sessions=%d connections=%d", got, len(clientB.Network().ConnsToPeer(p.relay.Host.ID())))
+	}
+	if _, err := p.auth.AuthenticateRelay(context.Background(), accessB); err != nil {
+		t.Fatalf("replay invalidated unrelated grant's access token: %v", err)
+	}
+	if _, err := p.auth.AuthenticateRelay(context.Background(), accessA); err == nil {
+		t.Fatal("replay left the owning grant's access token valid")
+	}
+	if !p.quota.AccountingReady(p.account) {
+		t.Fatal("grant replay marked account quota unhealthy")
+	}
+	usageAfter, err := p.quota.Eligibility(ctx, p.account)
+	if err != nil || usageAfter.RecordedBytes != usageBefore.RecordedBytes || usageAfter.EffectiveBytes != usageBefore.EffectiveBytes || usageAfter.CapBytes != usageBefore.CapBytes {
+		t.Fatalf("grant replay changed account quota: before=%+v after=%+v err=%v", usageBefore, usageAfter, err)
+	}
+}
+
 func requireProtectedAuthentication(t *testing.T, h host.Host, p protectedPortal, want string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -143,6 +261,55 @@ func requireProtectedAuthentication(t *testing.T, h host.Host, p protectedPortal
 func TestProductionProtectionClosesAllOnSessionCapReduction(t *testing.T) {
 	t.Run("observed", func(t *testing.T) { testProtectedSessionCap(t) })
 }
+
+func TestProductionProtectionReadsCurrentCapAfterAuthReturns(t *testing.T) {
+	p := protectedPortalFixture(t)
+	p.mutate(t, "override", "2", url.Values{"sessions_override": {"5"}})
+	clients := make([]host.Host, 4)
+	for i := range clients {
+		clients[i] = protectedClient(t, p)
+	}
+	for i := 0; i < 3; i++ {
+		requireProtectedAuthentication(t, clients[i], p, `"ok":true`)
+	}
+	if got := p.relay.AccountSessions(p.account); got != 3 {
+		t.Fatalf("initial sessions=%d, want 3", got)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	p.quota.SetAccountingBoundariesForTest(nil, nil, func(ctx context.Context) error {
+		once.Do(func() { close(entered); <-release })
+		return ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := make(chan string, 1)
+	go func() {
+		response, err := protectedAuthenticate(ctx, clients[3], p)
+		result <- fmt.Sprintf("%s %v", response, err)
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not reach pending Quota assessment")
+	}
+	// The pending assessment is ordered after Auth has already returned its
+	// credential, whose SessionLimit still reflects the old policy.
+	p.mutate(t, "override", "3", url.Values{"sessions_override": {"3"}})
+	close(release)
+	select {
+	case response := <-result:
+		if !strings.Contains(response, `"code":"session_limit_exceeded"`) {
+			t.Fatalf("current database cap response=%s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("pending authentication did not finish")
+	}
+	if got := p.relay.AccountSessions(p.account); got != 3 {
+		t.Fatalf("sessions after current cap assessment=%d, want 3", got)
+	}
+}
+
 func testProtectedSessionCap(t *testing.T) {
 	p := protectedPortalFixture(t)
 	p.mutate(t, "override", "2", url.Values{"sessions_override": {"2"}})
@@ -199,8 +366,8 @@ func testProtectedInvalidation(t *testing.T) {
 	releaseAuth()
 	select {
 	case response := <-result:
-		if !strings.Contains(response, "authentication_failed") {
-			t.Fatalf("stale credential admitted: %s", response)
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("account invalidation did not cancel the in-flight attempt safely: %s", response)
 		}
 	case <-ctx.Done():
 		t.Fatal("authentication did not finish")
@@ -335,7 +502,7 @@ func TestProductionObservedPolicyEditsPreservePendingAndEnforceEquality(t *testi
 	if err := p.quota.FlushAccounting(context.Background(), p.account); err != nil && err != quota.ErrTemporary {
 		t.Fatal(err)
 	}
-	eligible, err := p.quota.Eligibility(context.Background(), p.account, 0)
+	eligible, err := p.quota.Eligibility(context.Background(), p.account)
 	if err != nil || eligible.EffectiveBytes != 60 {
 		t.Fatalf("policy edit reset consumption: %+v %v", eligible, err)
 	}
@@ -366,9 +533,155 @@ func TestProductionObservedSuspensionRetainsUsage(t *testing.T) {
 	if err != nil || usage.RecordedBytes != 83 {
 		t.Fatalf("suspension lost usage: %+v %v", usage, err)
 	}
-	if _, err := p.quota.Eligibility(context.Background(), p.account, 0); err != quota.ErrTemporary {
-		t.Fatalf("suspended account eligible: %v", err)
+	if _, err := p.quota.Eligibility(context.Background(), p.account); err != nil {
+		t.Fatalf("suspension made quota unavailable: %v", err)
+	}
+	if !p.quota.AccountingReady(p.account) {
+		t.Fatal("suspension marked accounting unhealthy")
 	}
 	replacement := protectedClient(t, p)
 	requireProtectedAuthentication(t, replacement, p, "authentication_failed")
+}
+
+func TestOwnerAccountRevocationInvalidatesOnlyThatAccountsSessions(t *testing.T) {
+	p := protectedPortalFixture(t)
+	usage, err := p.quota.Eligibility(context.Background(), p.account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.quota.Settle(context.Background(), quota.Settlement{AccountID: p.account, WeekStart: usage.WeekStart, Sequence: 1, DeltaBytes: 123, OperationID: "a550e1a9-755e-4cba-8e87-a36da25d1d98"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.quota.Observe(p.account, 55); err != nil {
+		t.Fatal(err)
+	}
+	usageBefore, err := p.quota.Eligibility(context.Background(), p.account)
+	if err != nil || usageBefore.RecordedBytes != 123 || usageBefore.EffectiveBytes != 178 {
+		t.Fatalf("seed usage before revocation=%+v err=%v", usageBefore, err)
+	}
+	accessAgain, _ := redeemClient(t, p.auth, "android", p.config.PublicClients.AndroidRedirect,
+		authorizeClient(t, p.auth, p.owner, "android", p.config.PublicClients.AndroidRedirect))
+	otherOwner := loginAs(t, p.auth, p.provider, "protected-unrelated-"+strconv.FormatInt(time.Now().UnixNano(), 10), "unrelated@example.test", "")
+	var otherAccount string
+	if err := p.auth.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE email='unrelated@example.test' ORDER BY created_at DESC LIMIT 1`).Scan(&otherAccount); err != nil {
+		t.Fatal(err)
+	}
+	approve := url.Values{"csrf": {csrfFrom(t, p.auth, p.admin)}, "reason": {"routine_administration"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
+	if out := portalRequest(p.auth, "POST", "/admin/accounts/"+otherAccount, p.admin, approve, p.config.PortalOrigin); out.Code != http.StatusSeeOther {
+		t.Fatalf("approve unrelated account: %d %s", out.Code, out.Body.String())
+	}
+	otherAccess, _ := redeemClient(t, p.auth, "android", p.config.PublicClients.AndroidRedirect,
+		authorizeClient(t, p.auth, otherOwner, "android", p.config.PublicClients.AndroidRedirect))
+	first, second, unrelated := protectedClient(t, p), protectedClient(t, p), protectedClient(t, p)
+	requireProtectedAuthentication(t, first, p, `"ok":true`)
+	requireProtectedAuthentication(t, second, protectedPortal{auth: p.auth, relay: p.relay, access: accessAgain}, `"ok":true`)
+	other := protectedPortal{auth: p.auth, relay: p.relay, access: otherAccess}
+	requireProtectedAuthentication(t, unrelated, other, `"ok":true`)
+	if p.relay.AccountSessions(p.account) != 2 || p.relay.AccountSessions(otherAccount) != 1 {
+		t.Fatal("fixture did not establish the expected account sessions")
+	}
+	var delivered atomic.Int32
+	p.auth.SetAccountInvalidatedForTest(func(string) error {
+		if delivered.Add(1) == 1 {
+			return errors.New("simulated notification wrapper failure")
+		}
+		return nil
+	})
+	form := url.Values{"csrf": {csrfFrom(t, p.auth, p.owner)}}
+	out := portalRequest(p.auth, "POST", "/auth/revoke", p.owner, form, p.config.PortalOrigin)
+	if out.Code != http.StatusSeeOther || delivered.Load() != 1 {
+		t.Fatalf("owner revocation status=%d deliveries=%d body=%s", out.Code, delivered.Load(), out.Body.String())
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && (p.relay.AccountSessions(p.account) != 0 || len(first.Network().ConnsToPeer(p.relay.Host.ID())) != 0 || len(second.Network().ConnsToPeer(p.relay.Host.ID())) != 0) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.relay.AccountSessions(p.account) != 0 || p.relay.AccountSessions(otherAccount) != 1 {
+		t.Fatalf("account revocation sessions: target=%d unrelated=%d", p.relay.AccountSessions(p.account), p.relay.AccountSessions(otherAccount))
+	}
+	if len(unrelated.Network().ConnsToPeer(p.relay.Host.ID())) != 1 {
+		t.Fatal("account revocation closed an unrelated account's connection")
+	}
+	if _, err := p.auth.AuthenticateRelay(context.Background(), otherAccess); err != nil {
+		t.Fatalf("account revocation invalidated unrelated credentials: %v", err)
+	}
+	usageAfter, err := p.quota.Eligibility(context.Background(), p.account)
+	if err != nil || usageAfter.RecordedBytes != usageBefore.RecordedBytes || usageAfter.EffectiveBytes != usageBefore.EffectiveBytes || usageAfter.CapBytes != usageBefore.CapBytes {
+		t.Fatalf("account revocation changed allowance or usage: before=%+v after=%+v err=%v", usageBefore, usageAfter, err)
+	}
+	if !p.quota.AccountingReady(p.account) {
+		t.Fatal("account-wide revocation marked accounting unhealthy")
+	}
+}
+
+func TestSuspensionInvalidatesAuthenticationAfterCredentialValidation(t *testing.T) {
+	p := protectedPortalFixture(t)
+	h := protectedClient(t, p)
+	entered, release := make(chan struct{}), make(chan struct{})
+	p.auth.SetRelayCredentialHookForTest(func() {
+		close(entered)
+		<-release
+	})
+	result := make(chan string, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		response, _ := protectedAuthenticate(ctx, h, p)
+		result <- response
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("authentication did not reach the returned-but-unapplied credential seam")
+	}
+	p.mutate(t, "suspend", "2", nil)
+	close(release)
+	p.auth.SetRelayCredentialHookForTest(nil)
+	select {
+	case response := <-result:
+		if strings.Contains(response, `"ok":true`) {
+			t.Fatalf("suspension allowed the late authentication result: %s", response)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("late authentication did not finish")
+	}
+	if got := p.relay.AccountSessions(p.account); got != 0 {
+		t.Fatalf("suspension left %d Relay Sessions", got)
+	}
+}
+
+func TestOwnerRevocationDeliverySurvivesRequestCancellationAfterCommit(t *testing.T) {
+	p := protectedPortalFixture(t)
+	var subject string
+	if err := p.auth.Pool.QueryRow(context.Background(), `SELECT subject FROM public.accounts WHERE id=$1`, p.account).Scan(&subject); err != nil {
+		t.Fatal(err)
+	}
+	owner := loginAs(t, p.auth, p.provider, subject, "protected-owner@example.test", "")
+	access, _ := redeemClient(t, p.auth, "android", p.config.PublicClients.AndroidRedirect,
+		authorizeClient(t, p.auth, owner, "android", p.config.PublicClients.AndroidRedirect))
+	client := protectedClient(t, p)
+	grant := protectedPortal{auth: p.auth, relay: p.relay, access: access}
+	requireProtectedAuthentication(t, client, grant, `"ok":true`)
+	ctx, cancel := context.WithCancel(context.Background())
+	p.auth.SetAccountCommitHookForTest(func(commitCtx context.Context, tx pgx.Tx) error {
+		if err := tx.Commit(commitCtx); err != nil {
+			return err
+		}
+		cancel()
+		return errors.New("lost commit acknowledgment after request cancellation")
+	})
+	form := url.Values{"csrf": {csrfFrom(t, p.auth, owner)}}
+	req := httptest.NewRequest(http.MethodPost, "/auth/revoke", strings.NewReader(form.Encode())).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", p.config.PortalOrigin)
+	req.AddCookie(owner)
+	response := httptest.NewRecorder()
+	p.auth.Handler().ServeHTTP(response, req)
+	p.auth.SetAccountCommitHookForTest(nil)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "Result could not be confirmed") {
+		t.Fatalf("canceled ambiguous revocation response=%d %s", response.Code, response.Body.String())
+	}
+	if got := p.relay.AccountSessions(p.account); got != 0 {
+		t.Fatalf("canceled request suppressed account invalidation; sessions=%d", got)
+	}
 }

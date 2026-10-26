@@ -16,6 +16,7 @@ var ErrInvalidAccess = errors.New("invalid relay access")
 // The Peer ID is intentionally absent: accounts do not own device identities.
 type RelayCredential struct {
 	AccountID    string
+	GrantID      string
 	Generation   int64
 	SessionLimit int
 	ExpiresAt    time.Time
@@ -70,7 +71,7 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 	var accountGeneration, grantGeneration int64
 	var dbNow time.Time
 	before := time.Now()
-	err = tx.QueryRow(unitCtx, `SELECT g.account_id::text,g.credential_generation,a.credential_generation,a.status,
+	err = tx.QueryRow(unitCtx, `SELECT g.account_id::text,g.id::text,g.credential_generation,a.credential_generation,a.status,
 		COALESCE(a.sessions_override,p.sessions),t.expires_at,clock_timestamp()
 		FROM public.native_access_tokens t
 		JOIN public.native_login_grants g ON g.id=t.grant_id
@@ -81,7 +82,7 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 		AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp()
 		AND g.absolute_expires_at>clock_timestamp() AND t.expires_at>clock_timestamp()
 		AND g.credential_generation=a.credential_generation`, digest[:], principal.GrantID, principal.AccountID).
-		Scan(&result.AccountID, &grantGeneration, &accountGeneration, &status, &result.SessionLimit, &result.ExpiresAt, &dbNow)
+		Scan(&result.AccountID, &result.GrantID, &grantGeneration, &accountGeneration, &status, &result.SessionLimit, &result.ExpiresAt, &dbNow)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RelayCredential{}, ErrInvalidAccess
 	}

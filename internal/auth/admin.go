@@ -457,6 +457,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	var applied *AccountChange
 	var uncertain bool
+	var invalidationFailed bool
 	var securitySubject string
 	var closeConnections func()
 	if s.beforeAccountActionGuard != nil {
@@ -466,6 +467,9 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
 		if applied != nil {
 			closeConnections = s.accountChanged(*applied)
+			if applied.CloseAll {
+				invalidationFailed = s.deliverAccountInvalidation(applied.AccountID) != nil
+			}
 		}
 	}
 	if spec.security {
@@ -504,6 +508,9 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		if uncertain {
 			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			uncertainResponse(w)
+		} else if invalidationFailed {
+			markDiagnostic(r, "failed", "invalidation_incomplete")
+			http.Error(w, "Account change committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
 		} else {
 			http.Redirect(w, r, "/admin?selected="+url.QueryEscape(target), http.StatusSeeOther)
 		}
@@ -685,7 +692,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 	// Auth invalidates under account protection after SQL completion, then runs
 	// the returned connection-close I/O after releasing the logical guards.
 	closeAll := security || commitErr != nil
-	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, InvalidateEligibility: security || commitErr != nil}
+	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll}
 	*uncertain = commitErr != nil
 }
 

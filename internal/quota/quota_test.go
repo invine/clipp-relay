@@ -68,7 +68,7 @@ func TestClockWarningIntervalIsVisibleWithoutClosingEligibility(t *testing.T) {
 	if safe, warning, _ := q.ClockHealth(); !safe || !warning {
 		t.Fatalf("clock status safe=%v warning=%v", safe, warning)
 	}
-	if _, err := q.Eligibility(context.Background(), id, 0); err != nil {
+	if _, err := q.Eligibility(context.Background(), id); err != nil {
 		t.Fatalf("warning alone closed eligibility: %v", err)
 	}
 }
@@ -116,7 +116,7 @@ func TestClockUncertaintyIntervalBoundaries(t *testing.T) {
 func TestAgedClockProbeHasBoundedPoolAdmission(t *testing.T) {
 	q, id, pool := fixture(t)
 	ctx := context.Background()
-	first, err := q.Eligibility(ctx, id, 0)
+	first, err := q.Eligibility(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestAgedClockProbeHasBoundedPoolAdmission(t *testing.T) {
 	}
 	defer release()
 	result := make(chan error, 1)
-	go func() { _, e := q.Eligibility(context.Background(), id, 0); result <- e }()
+	go func() { _, e := q.Eligibility(context.Background(), id); result <- e }()
 	select {
 	case err := <-result:
 		if !errors.Is(err, ErrTemporary) {
@@ -158,7 +158,7 @@ func TestAgedClockProbeHasBoundedPoolAdmission(t *testing.T) {
 	q.clock.sampledMono = time.Now()
 	q.clock.safe = true
 	q.clock.mu.Unlock()
-	last, err := q.Eligibility(ctx, id, 0)
+	last, err := q.Eligibility(ctx, id)
 	if err != nil || last.EffectiveBytes != first.EffectiveBytes {
 		t.Fatalf("eligibility changed despite unavailable probe: %+v %v", last, err)
 	}

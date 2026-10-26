@@ -36,6 +36,20 @@ func (s *Server) authenticateNativeAccess(ctx context.Context, raw string) (stri
 	return principal.AccountID, expires, nil
 }
 
+func (s *Server) deliverGrantRevocation(grantID string) error {
+	if grantID == "" || s.nativeIssuer == nil || s.grantRevoked == nil || s.grantRevocationFallback == nil {
+		return errors.New("grant invalidation is not configured")
+	}
+	s.nativeIssuer.CancelPendingValidations()
+	if err := s.grantRevoked(grantID); err == nil {
+		return nil
+	}
+	// A notification is an in-process operation. Retry it synchronously through
+	// the composed manager recipient so an injected wrapper failure cannot leave
+	// matching established sessions authorized after the committed mutation.
+	return s.grantRevocationFallback(grantID)
+}
+
 func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 	if s.nativeIssuer == nil || r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.Header.Get("Content-Encoding") != "" || r.URL.RawQuery != "" {
 		s.oauthError(w, 400)
@@ -94,17 +108,22 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var account string
+	var grantID string
 	var tokenGeneration int64
 	if purpose == issuer.AuthorizationCode {
 		err = s.Pool.QueryRow(r.Context(), `SELECT account_id::text,credential_generation FROM public.native_authorization_codes WHERE credential_digest=$1 AND consumed_at IS NULL AND expires_at>clock_timestamp()`, digest[:]).Scan(&account, &tokenGeneration)
 	} else {
-		err = s.Pool.QueryRow(r.Context(), `SELECT g.account_id::text,g.credential_generation FROM public.native_refresh_generations rg JOIN public.native_login_grants g ON g.id=rg.grant_id WHERE rg.credential_digest=$1`, digest[:]).Scan(&account, &tokenGeneration)
+		err = s.Pool.QueryRow(r.Context(), `SELECT g.account_id::text,g.id::text,g.credential_generation FROM public.native_refresh_generations rg JOIN public.native_login_grants g ON g.id=rg.grant_id WHERE rg.credential_digest=$1`, digest[:]).Scan(&account, &grantID, &tokenGeneration)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.oauthError(w, 401)
 		return
 	}
 	if err != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	if purpose == issuer.RefreshToken && grantID == "" {
 		s.oauthError(w, 503)
 		return
 	}
@@ -153,7 +172,27 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if issuer.ReplayCanCommit(ctx) {
 			if err = s.commitCredentialTx(unitCtx, tx); err != nil {
-				markDiagnostic(r, "uncertain", "commit_unconfirmed")
+				// A lost commit acknowledgment is resolved from the durable grant
+				// row after releasing the transaction. Never infer commit from a
+				// cancellation sweep.
+				_ = tx.Rollback(context.Background())
+				resolveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				var terminated bool
+				resolveErr := s.Pool.QueryRow(resolveCtx, `SELECT terminated_at IS NOT NULL FROM public.native_login_grants WHERE id=$1`, grantID).Scan(&terminated)
+				cancel()
+				if resolveErr != nil {
+					markDiagnostic(r, "uncertain", "commit_unconfirmed")
+					s.oauthError(w, 503)
+					return
+				}
+				if !terminated {
+					markDiagnostic(r, "failed", "database_unavailable")
+					s.oauthError(w, 503)
+					return
+				}
+			}
+			if s.deliverGrantRevocation(grantID) != nil {
+				markDiagnostic(r, "failed", "invalidation_incomplete")
 				s.oauthError(w, 503)
 				return
 			}

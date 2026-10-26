@@ -495,7 +495,7 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	}
 	accounting := quota.New(db.Pool)
 	defer accounting.Close()
-	result, err := accounting.Eligibility(context.Background(), newID, 0)
+	result, err := accounting.Eligibility(context.Background(), newID)
 	if err != nil || result.RecordedBytes != 12345 {
 		t.Fatalf("confirmed usage after import: %+v %v", result, err)
 	}

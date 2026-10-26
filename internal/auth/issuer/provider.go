@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ory/fosite"
@@ -19,10 +20,14 @@ type Redirects map[ClientType]string
 // Issuer holds Fosite behind the private auth boundary. Its composition exposes
 // only authorization_code and refresh_token grants, public clients, and S256.
 type Issuer struct {
-	provider fosite.OAuth2Provider
-	storage  *Storage
-	strategy *oauth2.HMACSHAStrategy
+	provider     fosite.OAuth2Provider
+	storage      *Storage
+	strategy     *oauth2.HMACSHAStrategy
+	validationMu sync.Mutex
+	validations  map[*accessValidation]struct{}
 }
+
+type accessValidation struct{ cancel context.CancelFunc }
 
 func NewProvider(secret []byte, redirects Redirects, storage *Storage) *Issuer {
 	if storage == nil {
@@ -51,7 +56,7 @@ func NewProvider(secret []byte, redirects Redirects, storage *Storage) *Issuer {
 		compose.OAuth2RefreshTokenGrantFactory,
 		compose.OAuth2PKCEFactory,
 	)
-	return &Issuer{provider: provider, storage: storage, strategy: strategy}
+	return &Issuer{provider: provider, storage: storage, strategy: strategy, validations: make(map[*accessValidation]struct{})}
 }
 
 func (i *Issuer) TokenDigest(purpose Purpose, token string) ([32]byte, error) {
@@ -120,6 +125,18 @@ func (i *Issuer) NewAccessResponse(ctx context.Context, req fosite.AccessRequest
 }
 
 func (i *Issuer) AuthenticateAccess(ctx context.Context, raw string) (Principal, time.Time, error) {
+	validationCtx, cancel := context.WithCancel(ctx)
+	validation := &accessValidation{cancel: cancel}
+	i.validationMu.Lock()
+	i.validations[validation] = struct{}{}
+	i.validationMu.Unlock()
+	defer func() {
+		cancel()
+		i.validationMu.Lock()
+		delete(i.validations, validation)
+		i.validationMu.Unlock()
+	}()
+	ctx = validationCtx
 	if _, err := i.TokenDigest(AccessToken, raw); err != nil {
 		return Principal{}, time.Time{}, fosite.ErrNotFound
 	}
@@ -136,6 +153,20 @@ func (i *Issuer) AuthenticateAccess(ctx context.Context, raw string) (Principal,
 		return Principal{}, time.Time{}, fosite.ErrNotFound
 	}
 	return principal, request.GetSession().GetExpiresAt(fosite.AccessToken), nil
+}
+
+// CancelPendingValidations stops only active access-token validation calls.
+// Each call owns a child context; no issuance or refresh operation is canceled.
+func (i *Issuer) CancelPendingValidations() {
+	i.validationMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(i.validations))
+	for validation := range i.validations {
+		cancels = append(cancels, validation.cancel)
+	}
+	i.validationMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (i *Issuer) WriteAccessResponse(ctx context.Context, w http.ResponseWriter, req fosite.AccessRequester, response fosite.AccessResponder) {

@@ -46,8 +46,7 @@ func TestObservedProcessCrashAtCommitBoundary(t *testing.T) {
 		default:
 			t.Fatalf("unknown crash mode %q", mode)
 		}
-		q.SetSettlementProtection(settlementTestProtection{})
-		_, _ = q.Eligibility(context.Background(), os.Getenv("CLIPP_CRASH_ACCOUNT"), 0)
+		_, _ = q.Eligibility(context.Background(), os.Getenv("CLIPP_CRASH_ACCOUNT"))
 		_ = q.Observe(os.Getenv("CLIPP_CRASH_ACCOUNT"), 12345)
 		_ = q.FlushAccounting(context.Background(), os.Getenv("CLIPP_CRASH_ACCOUNT"))
 		t.Fatal("settlement returned before process kill")
@@ -107,8 +106,7 @@ func TestObservedProcessCrashAtCommitBoundary(t *testing.T) {
 			}
 			restarted := New(pool)
 			defer restarted.Close()
-			restarted.SetSettlementProtection(settlementTestProtection{})
-			got, err := restarted.Eligibility(ctx, id, 0)
+			got, err := restarted.Eligibility(ctx, id)
 			if err != nil || got.RecordedBytes != tc.restarted || got.EffectiveBytes != tc.restarted {
 				t.Fatalf("restart after %s = %+v: %v", tc.mode, got, err)
 			}

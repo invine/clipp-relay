@@ -260,12 +260,3 @@ func TestFakeServiceRealClientDrainRestartAndRediscovery(t *testing.T) {
 		t.Fatalf("device identity changed: %s -> %s", deviceID, h.ID())
 	}
 }
-
-func (lifecycleAuthority) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
-	work(ctx)
-	return ctx.Err() == nil
-}
-func (lifecycleAuthority) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
-	work(ctx)
-	return ctx.Err() == nil
-}

@@ -180,18 +180,18 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	set := func(rev, bytes, sessions string, close, discard bool) {
+	set := func(rev, bytes, sessions string, close bool) {
 		t.Helper()
 		form := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {rev}, "weekly_bytes_override": {bytes}, "sessions_override": {sessions}}
 		if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, form, c.PortalOrigin); out.Code != 303 {
 			t.Fatalf("override %s: %d %s", bytes, out.Code, out.Body.String())
 		}
 		change := changes[len(changes)-1]
-		if change.CloseAll != close || change.InvalidateEligibility != discard || change.WeeklyBytes != mustInt64(t, bytes) || change.SessionLimit != mustInt(t, sessions) {
+		if change.CloseAll != close || change.WeeklyBytes != mustInt64(t, bytes) || change.SessionLimit != mustInt(t, sessions) {
 			t.Fatalf("override %s callback: %+v", bytes, change)
 		}
 	}
-	set("2", "1000", "5", false, false)
+	set("2", "1000", "5", false)
 	selected := portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
 	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="1000"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) {
 		t.Fatalf("selected policy does not show current overrides: %d %s", selected.Code, selected.Body.String())
@@ -200,7 +200,7 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, onlyBytes, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("one-field override: %d", out.Code)
 	}
-	if change := changes[len(changes)-1]; change.WeeklyBytes != 999 || change.SessionLimit != 5 || change.CloseAll || change.InvalidateEligibility {
+	if change := changes[len(changes)-1]; change.WeeklyBytes != 999 || change.SessionLimit != 5 || change.CloseAll {
 		t.Fatalf("one-field override reset other limit: %+v", change)
 	}
 	onlySessions := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {"4"}, "sessions_override": {"0"}}
@@ -479,7 +479,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+userID, admin, assign, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("explicit replacement = %d", out.Code)
 	}
-	if accountChanges[len(accountChanges)-1].AccountID != userID || accountChanges[len(accountChanges)-1].CloseAll || accountChanges[len(accountChanges)-1].InvalidateEligibility || accountChanges[len(accountChanges)-1].WeeklyBytes != 1073741824 || accountChanges[len(accountChanges)-1].SessionLimit != 5 {
+	if accountChanges[len(accountChanges)-1].AccountID != userID || accountChanges[len(accountChanges)-1].CloseAll || accountChanges[len(accountChanges)-1].WeeklyBytes != 1073741824 || accountChanges[len(accountChanges)-1].SessionLimit != 5 {
 		t.Fatal("plan assignment did not invalidate account")
 	}
 	if out := portalRequest(s, "GET", "/", user, nil, ""); !strings.Contains(out.Body.String(), "1 GiB") {
@@ -494,7 +494,7 @@ func TestAdministratorApprovalAndImmutablePlanThroughPortal(t *testing.T) {
 	if out := portalRequest(s, "POST", "/admin/accounts/"+deniedID, admin, deny, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("deny pending = %d", out.Code)
 	}
-	if accountChanges[len(accountChanges)-1].AccountID != deniedID || !accountChanges[len(accountChanges)-1].CloseAll || !accountChanges[len(accountChanges)-1].InvalidateEligibility {
+	if accountChanges[len(accountChanges)-1].AccountID != deniedID || !accountChanges[len(accountChanges)-1].CloseAll {
 		t.Fatal("denial did not invalidate account")
 	}
 	if out := portalRequest(s, "GET", "/", denied, nil, ""); strings.Contains(out.Body.String(), "Your relay account") {

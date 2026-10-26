@@ -52,6 +52,7 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 		t.Fatal(err)
 	}
 	s.SetAccountChangedForTest(func(AccountChange) func() { return nil })
+	s.SetGrantRevokedForTest(func(string) error { return nil })
 	id, err := uuid()
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +176,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 	}
 	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"routine_administration"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
 	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
-	if out.Code != 503 || changed.AccountID != target || !changed.CloseAll || !changed.InvalidateEligibility {
+	if out.Code != 503 || changed.AccountID != target || !changed.CloseAll {
 		t.Fatalf("ambiguous commit response=%d invalidated=%+v", out.Code, changed)
 	}
 	var status string
@@ -213,7 +214,7 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 	}
 	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {"1"}}
 	out := internalRequest(s, "POST", "/admin/accounts/"+target, cookie, form, origin)
-	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !changed.InvalidateEligibility || !closed {
+	if out.Code != 503 || !strings.Contains(out.Body.String(), "Result could not be confirmed") || !changed.CloseAll || !closed {
 		t.Fatalf("ambiguous security mutation response=%d callback=%+v closed=%t", out.Code, changed, closed)
 	}
 	var status string
@@ -224,6 +225,26 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 	}
 	if _, quarantined := s.uncertainAccounts.Load(target); !quarantined {
 		t.Fatal("lost security commit did not quarantine admission")
+	}
+}
+
+func TestCommittedOwnerRevocationReportsIncompleteAccountInvalidation(t *testing.T) {
+	s, cookie, db, origin := adminFixture(t)
+	var accountID string
+	if err := db.Pool.QueryRow(context.Background(), `SELECT account_id FROM public.portal_sessions WHERE credential_digest=$1`, s.digest(s.CurrentPepper, "portal-session", cookie.Value)).Scan(&accountID); err != nil {
+		t.Fatal(err)
+	}
+	s.SetAccountInvalidatedForTest(func(string) error { return errors.New("notification failed") })
+	s.SetAccountInvalidationFallbackForTest(func(string) error { return errors.New("reconciliation failed") })
+	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
+	out := internalRequest(s, http.MethodPost, "/auth/revoke", cookie, form, origin)
+	if out.Code != http.StatusServiceUnavailable || !strings.Contains(out.Body.String(), "committed") || !strings.Contains(out.Body.String(), "invalidation") {
+		t.Fatalf("incomplete invalidation response=%d %s", out.Code, out.Body.String())
+	}
+	var generation int64
+	var audited bool
+	if err := db.Pool.QueryRow(context.Background(), `SELECT credential_generation,EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=accounts.id AND e.event='owner_credentials_revoked') FROM public.accounts WHERE id=$1`, accountID).Scan(&generation, &audited); err != nil || generation != 1 || !audited {
+		t.Fatalf("committed revocation generation=%d audited=%t err=%v", generation, audited, err)
 	}
 }
 
