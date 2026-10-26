@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Introduce repository scopes through credential validation.
 
-**Status:** claimed — persistence 04 (coordinator: root), 2026-10-26
+**Status:** resolved
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I5, I8–I10; T1–T3, applicable T6–T8.
 
@@ -19,3 +19,8 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 ## Comments
 
 - Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+
+
+## Resolution
+
+Coordinator integrated source commit 76a1a9214644625baaf12b67c235d55a62f4ac5e on codex/persistence-repositories-integration at 5dc03ae5e3f04be5790395376570c2f0ccb3376a. Account registration, retained usage import, Portal Session create/validate/renew/remove, audit and uncertainty confirmation were migrated behind repositories. Integrated Auth, issuer, and persistence package tests passed; vet, gofmt, and diff checks passed. Real disposable PostgreSQL was unavailable because Docker is not running; final database qualification remains ticket 11.
