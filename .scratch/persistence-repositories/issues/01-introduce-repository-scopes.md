@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** claimed — agent 01 (coordinator: root), 2026-10-26
+**Status:** resolved
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I3, I5–I6, I9–I10; T1, T3–T4, applicable T8.
 
@@ -19,3 +19,8 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 ## Comments
 
 - Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+
+
+## Resolution
+
+Coordinator integrated implementation commit a18068a9b3c51e4d777c2f0b2c93a9a98024b388 on codex/persistence-repositories-integration at 94de969. Verified package tests for persistence and issuer, the focused Auth seam test, full internal/auth tests, go vet on auth/issuer/auth/persistence, go build ./..., and git diff --check. Real disposable PostgreSQL coverage was unavailable because Docker is not available; retained as a final qualification requirement under ticket 11.
