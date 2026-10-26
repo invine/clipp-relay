@@ -37,6 +37,7 @@ func NewSession(p Principal) fosite.Session {
 type txKey struct{}
 type persistenceTxKey struct{}
 type authorizationTxKey struct{}
+type refreshTxKey struct{}
 type clientKey struct{}
 type rawTokenKey struct{}
 type operationKey struct{}
@@ -70,6 +71,18 @@ func InAuthorizationTransaction(ctx context.Context, tx persistence.Authorizatio
 	ctx = context.WithValue(ctx, clientKey{}, client)
 	ctx = context.WithValue(ctx, rawTokenKey{}, token)
 	return context.WithValue(ctx, operationKey{}, &operation{})
+}
+
+// InRefreshTransaction attaches the complete refresh repository scope. The
+// transaction remains owned and committed by the HTTP coordinator.
+func InRefreshTransaction(ctx context.Context, tx persistence.RefreshTransaction, client ClientType, token string) context.Context {
+	ctx = InAuthorizationTransaction(ctx, tx, client, token)
+	return context.WithValue(ctx, refreshTxKey{}, tx)
+}
+
+func refreshTxFrom(ctx context.Context) (persistence.RefreshTransaction, bool) {
+	tx, ok := ctx.Value(refreshTxKey{}).(persistence.RefreshTransaction)
+	return tx, ok && tx != nil
 }
 
 func authorizationTxFrom(ctx context.Context) (persistence.AuthorizationTransaction, bool) {
@@ -247,6 +260,23 @@ func (s *Storage) CreatePKCERequestSession(context.Context, string, fosite.Reque
 func (s *Storage) DeletePKCERequestSession(context.Context, string) error { return nil }
 
 func (s *Storage) CreateAccessTokenSession(ctx context.Context, signature string, req fosite.Requester) error {
+	if tx, ok := refreshTxFrom(ctx); ok {
+		digest, err := LookupDigest(AccessToken, signature)
+		if err != nil {
+			return err
+		}
+		p, err := principalFrom(req)
+		if err != nil {
+			return err
+		}
+		// Refresh rotation issues a replacement access token for the existing
+		// Login Grant. Only authorization-code redemption creates a grant.
+		expires := req.GetSession().GetExpiresAt(fosite.AccessToken)
+		if expires.IsZero() {
+			expires = time.Now().UTC().Add(15 * time.Minute)
+		}
+		return tx.StoreRelayAccessToken(ctx, digest, p.GrantID, expires)
+	}
 	if tx, ok := authorizationTxFrom(ctx); ok {
 		digest, err := LookupDigest(AccessToken, signature)
 		if err != nil {
@@ -344,7 +374,7 @@ func (s *Storage) DeleteAccessTokenSession(ctx context.Context, signature string
 }
 
 func (s *Storage) CreateRefreshTokenSession(ctx context.Context, signature, _ string, req fosite.Requester) error {
-	if tx, ok := authorizationTxFrom(ctx); ok {
+	if tx, ok := refreshTxFrom(ctx); ok {
 		digest, err := LookupDigest(RefreshToken, signature)
 		if err != nil {
 			return err
@@ -384,6 +414,9 @@ func (s *Storage) CreateRefreshTokenSession(ctx context.Context, signature, _ st
 }
 
 func (s *Storage) GetRefreshTokenSession(ctx context.Context, signature string, session fosite.Session) (fosite.Requester, error) {
+	if tx, ok := refreshTxFrom(ctx); ok {
+		return s.getRefreshTokenSession(ctx, tx, signature, session)
+	}
 	tx, err := txFrom(ctx)
 	if err != nil {
 		return nil, err
@@ -447,9 +480,72 @@ func (s *Storage) GetRefreshTokenSession(ctx context.Context, signature string, 
 	return req, nil
 }
 
+func (s *Storage) getRefreshTokenSession(ctx context.Context, tx persistence.RefreshTransaction, signature string, session fosite.Session) (fosite.Requester, error) {
+	digest, err := LookupDigest(RefreshToken, signature)
+	if err != nil {
+		return nil, fosite.ErrNotFound
+	}
+	c, err := tx.LoadRefreshCredential(ctx, digest)
+	if errors.Is(err, persistence.ErrInvalidCredential) {
+		return nil, fosite.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if expected := expectedClient(ctx); expected == "" || string(expected) != c.ClientType {
+		return nil, fosite.ErrNotFound
+	}
+	client, err := s.client(c.ClientType)
+	if err != nil {
+		return nil, fosite.ErrNotFound
+	}
+	if session == nil {
+		session = &fosite.DefaultSession{}
+	}
+	p := Principal{AccountID: c.AccountID, Generation: c.AccountGeneration, Client: ClientType(c.ClientType), GrantID: c.GrantID}
+	setPrincipal(session, p)
+	expiry := c.IdleExpiresAt
+	if c.AbsoluteExpiresAt.Before(expiry) {
+		expiry = c.AbsoluteExpiresAt
+	}
+	session.SetExpiresAt(fosite.RefreshToken, expiry)
+	req := fosite.NewRequest()
+	req.SetID(c.GrantID)
+	req.Client = client
+	req.SetSession(session)
+	if c.Consumed {
+		if !c.Active {
+			return nil, fosite.ErrNotFound
+		}
+		if op, ok := ctx.Value(operationKey{}).(*operation); ok {
+			op.replay = true
+		}
+		raw, _ := ctx.Value(rawTokenKey{}).(string)
+		if raw == "" || s.refresh == nil || s.refresh.ValidateRefreshToken(ctx, req, raw) != nil {
+			return nil, fosite.ErrNotFound
+		}
+		return req, fosite.ErrInactiveToken
+	}
+	current, err := tx.CurrentRefreshGeneration(ctx, c.GrantID)
+	if err != nil {
+		return nil, err
+	}
+	if !c.Active || current != c.Generation {
+		return nil, fosite.ErrNotFound
+	}
+	return req, nil
+}
+
 func (s *Storage) DeleteRefreshTokenSession(context.Context, string) error { return nil }
 
 func (s *Storage) RotateRefreshToken(ctx context.Context, requestID, signature string) error {
+	if tx, ok := refreshTxFrom(ctx); ok {
+		digest, err := LookupDigest(RefreshToken, signature)
+		if err != nil {
+			return fosite.ErrNotFound
+		}
+		return tx.RotateRefreshCredential(ctx, digest, requestID)
+	}
 	tx, err := txFrom(ctx)
 	if err != nil {
 		return err
@@ -474,6 +570,10 @@ func (s *Storage) RotateRefreshToken(ctx context.Context, requestID, signature s
 }
 
 func (s *Storage) RevokeRefreshToken(ctx context.Context, requestID string) error {
+	if tx, ok := refreshTxFrom(ctx); ok {
+		_, err := tx.RevokeRefreshGrant(ctx, requestID)
+		return err
+	}
 	tx, err := txFrom(ctx)
 	if err != nil {
 		return err
@@ -491,6 +591,15 @@ func (s *Storage) RevokeRefreshToken(ctx context.Context, requestID string) erro
 }
 
 func (s *Storage) RevokeAccessToken(ctx context.Context, requestID string) error {
+	if tx, ok := refreshTxFrom(ctx); ok {
+		err := tx.DeleteGrantAccessTokens(ctx, requestID)
+		if err == nil {
+			if op, ok := ctx.Value(operationKey{}).(*operation); ok && op.replay {
+				op.replayComplete = true
+			}
+		}
+		return err
+	}
 	tx, err := txFrom(ctx)
 	if err != nil {
 		return err
