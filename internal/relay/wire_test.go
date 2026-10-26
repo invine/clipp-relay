@@ -34,7 +34,7 @@ func (wireAuthority) AuthenticateRelay(_ context.Context, token string) (auth.Re
 type wireAccounting struct{}
 
 func (wireAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
-	return quota.AccountingEligibility{}, nil
+	return quota.AccountingEligibility{SessionLimit: 5}, nil
 }
 
 func sendWireAuth(t *testing.T, ctx context.Context, h host.Host, id peer.ID) {
@@ -82,7 +82,7 @@ type recordingAccounting struct {
 }
 
 func (c *recordingAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
-	return quota.AccountingEligibility{}, nil
+	return quota.AccountingEligibility{SessionLimit: 5}, nil
 }
 
 func (c *recordingAccounting) count(id string) int64 {

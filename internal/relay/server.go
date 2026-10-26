@@ -887,7 +887,7 @@ func (m *sessionManager) authenticateAdmitted(ctx context.Context, c network.Con
 		if replaced != nil && replaced.account == credential.AccountID {
 			count--
 		}
-		if count >= credential.SessionLimit {
+		if count >= eligibility.SessionLimit {
 			s.mu.Unlock()
 			*reason = "session_limit"
 			return time.Time{}, 0, "session_limit_exceeded"

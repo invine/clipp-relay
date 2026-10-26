@@ -15,6 +15,7 @@ const maxAccountingAccounts = 6000
 
 type AccountingEligibility struct {
 	RecordedBytes, EffectiveBytes, CapBytes int64
+	SessionLimit                            int
 	WeekStart                               time.Time
 	Revision                                uint64
 }
@@ -105,7 +106,7 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 		}
 	}
 	var now time.Time
-	err = q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &result.CapBytes)
+	err = q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &result.CapBytes, &result.SessionLimit)
 	if err != nil {
 		return result, ErrTemporary
 	}
