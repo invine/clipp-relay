@@ -93,7 +93,8 @@ func run() int {
 		if err = database.VerifySchema(startup, pool); err != nil {
 			return fail("database_unavailable")
 		}
-		if _, err = auth.ResetNativeOAuthCredentials(startup, pool, material.NativeSigningKey); err != nil {
+		issuerStore := postgres.NewIssuerMaintenance(pool)
+		if _, err = auth.ResetNativeOAuthCredentials(startup, issuerStore, material.NativeSigningKey); err != nil {
 			return fail("credential_reset_unconfirmed")
 		}
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "success", Reason: "none", SchemaRevision: database.ExpectedRevision})
@@ -103,7 +104,8 @@ func run() int {
 		if err = database.VerifyServing(startup, pool); err != nil {
 			return fail("database_unavailable")
 		}
-		if err = auth.VerifyNativeOAuthKey(startup, pool, material.NativeSigningKey); err != nil {
+		issuerStore := postgres.NewIssuerMaintenance(pool)
+		if err = auth.VerifyNativeOAuthKey(startup, issuerStore, material.NativeSigningKey); err != nil {
 			if errors.Is(err, auth.ErrNativeIssuerResetRequired) {
 				return fail("credential_reset_required")
 			}
