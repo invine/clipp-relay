@@ -11,16 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-type settlementTestProtection struct{}
-
-func (settlementTestProtection) WithAccountGuards(ctx context.Context, _ []string, work func(context.Context)) bool {
-	work(ctx)
-	return ctx.Err() == nil
-}
-
 func TestRecordedUsageSettlesFullOverrunAndIdenticalRetry(t *testing.T) {
 	q, id, _ := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
@@ -41,7 +33,6 @@ func TestRecordedUsageSettlesFullOverrunAndIdenticalRetry(t *testing.T) {
 
 func TestRecordedUsageRollbackAndLostCommitReply(t *testing.T) {
 	q, id, _ := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
@@ -83,7 +74,6 @@ func TestRecordedUsageRollbackAndLostCommitReply(t *testing.T) {
 
 func TestRecordedUsageRejectsConflictsGapsAndStaleRetriesAcrossRestart(t *testing.T) {
 	q, id, pool := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
@@ -117,7 +107,6 @@ func TestRecordedUsageRejectsConflictsGapsAndStaleRetriesAcrossRestart(t *testin
 	}
 	restarted := New(pool)
 	t.Cleanup(restarted.Close)
-	restarted.SetSettlementProtection(settlementTestProtection{})
 	durable, err := restarted.RecordedUsage(ctx, id, week)
 	if err != nil || durable.RecordedBytes != 80007 || durable.Sequence != 2 || durable.OperationID != next.OperationID {
 		t.Fatalf("restart=%+v %v", durable, err)
@@ -132,7 +121,6 @@ func TestRecordedUsageRejectsConflictsGapsAndStaleRetriesAcrossRestart(t *testin
 
 func TestRecordedUsageCancellationAfterCommitRemainsUncertain(t *testing.T) {
 	q, id, _ := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	week := weekStart(time.Now())
@@ -151,14 +139,13 @@ func TestRecordedUsageCancellationAfterCommitRemainsUncertain(t *testing.T) {
 
 func TestRecordedUsageSettlesAfterPolicyChangesButNeverResurrectsDeletedAccount(t *testing.T) {
 	q, id, pool := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
 	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET status='Suspended',credential_generation=credential_generation+1,weekly_bytes_override=0,deletion_started_at=clock_timestamp() WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
-	q.ApplyAccountingPolicy(id, 1<<30, true)
+	q.ApplyAccountingPolicy(id, 1<<30)
 	batch := Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: 999999, Sequence: 1}
 	if result, err := q.Settle(ctx, batch); err != nil || result.RecordedBytes != 999999 {
 		t.Fatalf("observations discarded on policy change=%+v %v", result, err)
@@ -205,7 +192,6 @@ func TestRecordedUsageSettlesAfterPolicyChangesButNeverResurrectsDeletedAccount(
 
 func TestRecordedUsageRetirementUsesDatabaseTimeAfterAccountWait(t *testing.T) {
 	q, id, pool := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
@@ -258,7 +244,6 @@ func TestRecordedUsageRetirementUsesDatabaseTimeAfterAccountWait(t *testing.T) {
 
 func TestRecordedUsageOpeningTotalAndOverflow(t *testing.T) {
 	q, id, pool := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	if _, err := pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_delta_bytes) VALUES($1,$2,$3,0,0)`, id, week, int64(math.MaxInt64-9)); err != nil {
@@ -285,23 +270,23 @@ func TestRecordedUsageOpeningTotalAndOverflow(t *testing.T) {
 	}
 }
 
-func TestRecordedUsageRequiresAccountProtection(t *testing.T) {
+func TestRecordedUsageSettlesWithoutAuthorizationProtection(t *testing.T) {
 	q, id, _ := fixture(t)
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
-	if _, err := q.Settle(ctx, Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: 5, Sequence: 1}); !errors.Is(err, ErrTemporary) {
-		t.Fatalf("unprotected debit=%v", err)
+	want := RecordedUsage{RecordedBytes: 5, Sequence: 1, OperationID: op, DeltaBytes: 5, WeekStart: week}
+	if got, err := q.Settle(ctx, Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: 5, Sequence: 1}); err != nil || got != want {
+		t.Fatalf("settlement without authorization guard=%+v err=%v", got, err)
 	}
 	durable, err := q.RecordedUsage(ctx, id, week)
-	if err != nil || durable.RecordedBytes != 0 || durable.Sequence != 0 {
-		t.Fatalf("unprotected durable=%+v %v", durable, err)
+	if err != nil || durable != want {
+		t.Fatalf("durable=%+v %v", durable, err)
 	}
 }
 
 func TestRecordedUsageCommitRollbackIsKnownFailure(t *testing.T) {
 	q, id, _ := fixture(t)
-	q.SetSettlementProtection(settlementTestProtection{})
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()

@@ -24,7 +24,7 @@ type finiteAccounting struct {
 	server   *Server
 }
 
-func (c *finiteAccounting) Eligibility(context.Context, string, int64) (quota.AccountingEligibility, error) {
+func (c *finiteAccounting) Eligibility(context.Context, string) (quota.AccountingEligibility, error) {
 	return quota.AccountingEligibility{}, nil
 }
 func (c *finiteAccounting) Observe(id string, n int64) error {

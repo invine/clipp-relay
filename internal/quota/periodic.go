@@ -31,13 +31,11 @@ type observedWeek struct {
 type observedAccount struct {
 	sessions           int
 	weeks              map[time.Time]*observedWeek
-	generation         int64
 	eligibleWeek       time.Time
 	healthy            time.Time
 	eligibilityHealthy time.Time
 	revision           uint64
 	blocked            bool
-	invalidated        bool
 	reason             string
 	busy               bool
 	retiring           bool
@@ -94,9 +92,8 @@ func (q *Quota) Observe(id string, n int64) error {
 	return nil
 }
 
-// Eligibility is an authoritative admission assessment. Its caller holds Auth's
-// account guard and admitted database budget; it never reenters that guard.
-func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (result AccountingEligibility, err error) {
+// Eligibility reads current quota policy and usage independently of credentials.
+func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEligibility, err error) {
 	started := time.Now()
 	defer func() { q.accountingDiagnostic("quota.eligibility", err, started) }()
 	if !q.clockOK() {
@@ -107,11 +104,9 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (r
 			return result, err
 		}
 	}
-	var status string
-	var actual int64
 	var now time.Time
-	err = q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),a.status,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND NOT a.recovery_review_hold AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &status, &actual, &result.CapBytes)
-	if err != nil || status != "Active" || actual != generation {
+	err = q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),COALESCE(a.weekly_bytes_override,p.weekly_bytes) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &result.CapBytes)
+	if err != nil {
 		return result, ErrTemporary
 	}
 	result.WeekStart = weekStart(q.dbTime(now))
@@ -128,8 +123,6 @@ func (q *Quota) Eligibility(ctx context.Context, id string, generation int64) (r
 	if !result.WeekStart.Equal(weekStart(q.now())) || result.WeekStart.Before(a.eligibleWeek) {
 		return result, ErrTemporary
 	}
-	a.generation = generation
-	a.invalidated = false
 	for week, v := range a.weeks {
 		if week != result.WeekStart && v.pending == 0 && v.flight == nil {
 			delete(a.weeks, week)
@@ -192,7 +185,7 @@ func (q *Quota) AccountingReady(id string) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[id]
-	return a != nil && !a.blocked && !a.invalidated && a.eligibleWeek.Equal(weekStart(q.now())) && !q.accountingExpiredLocked(a)
+	return a != nil && !a.blocked && a.eligibleWeek.Equal(weekStart(q.now())) && !q.accountingExpiredLocked(a)
 }
 
 // accountingExpiredLocked checks write progress and authoritative assessments
@@ -218,8 +211,8 @@ func (q *Quota) accountingDeadlineLocked() time.Duration {
 	return DefaultAccountingFailureDeadline
 }
 
-// AccountingCurrent lets Relay reject an admission whose accounting authority
-// was invalidated between assessment and physical session installation.
+// AccountingCurrent rejects an admission assessed against a stale policy or
+// usage revision before physical session installation.
 func (q *Quota) AccountingCurrent(id string, revision uint64) bool {
 	if !q.clockOK() {
 		return false
@@ -227,7 +220,7 @@ func (q *Quota) AccountingCurrent(id string, revision uint64) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[id]
-	return a != nil && !a.blocked && !a.invalidated && a.revision == revision && a.eligibleWeek.Equal(weekStart(q.now()))
+	return a != nil && !a.blocked && a.revision == revision && a.eligibleWeek.Equal(weekStart(q.now()))
 }
 
 // FlushAccounting attempts each original observation week once. An immutable
@@ -439,8 +432,8 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 func (q *Quota) StartAccounting(closeAccount func(ClosureOutcome)) error {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
-	if q.periodic.started || closeAccount == nil || q.settlementProtection == nil {
-		return errors.New("accounting requires complete protection and one closure consumer")
+	if q.periodic.started || closeAccount == nil {
+		return errors.New("accounting requires one closure consumer")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	q.periodic.started = true
@@ -464,26 +457,17 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 					return
 				case id := <-jobs:
 					_ = q.FlushAccounting(ctx, id)
-					q.periodic.mu.Lock()
-					a := q.periodic.accounts[id]
-					generation := int64(0)
-					if a != nil {
-						generation = a.generation
-					}
-					q.periodic.mu.Unlock()
-					// Background reads and decisions share Auth protection with admission.
+					// Background reads and decisions share Quota's account state.
 					q.runtime.WithUnit(ctx, func(unit context.Context) error {
-						q.settlementProtection.WithAccountGuards(unit, []string{id}, func(guard context.Context) {
-							_, err := q.Eligibility(guard, id, generation)
-							if errors.Is(err, ErrExhausted) {
-								q.cutoff(id, "quota_exhausted")
-							}
-							q.periodic.mu.Lock()
-							if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
-								delete(q.periodic.accounts, id)
-							}
-							q.periodic.mu.Unlock()
-						})
+						_, err := q.Eligibility(unit, id)
+						if errors.Is(err, ErrExhausted) {
+							q.cutoff(id, "quota_exhausted")
+						}
+						q.periodic.mu.Lock()
+						if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
+							delete(q.periodic.accounts, id)
+						}
+						q.periodic.mu.Unlock()
 						return nil
 					})
 				}
@@ -623,10 +607,9 @@ func (q *Quota) ConfigureAccountingFailureDeadline(deadline time.Duration) error
 	return nil
 }
 
-// ApplyAccountingPolicy runs under Auth account protection after a policy
-// mutation. It fences prior assessments and preserves every observed byte.
+// ApplyAccountingPolicy fences prior assessments and preserves every observed byte.
 // The caller owns synchronous physical detachment and deferred connection I/O.
-func (q *Quota) ApplyAccountingPolicy(id string, cap int64, invalidate bool) bool {
+func (q *Quota) ApplyAccountingPolicy(id string, cap int64) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[id]
@@ -634,7 +617,6 @@ func (q *Quota) ApplyAccountingPolicy(id string, cap int64, invalidate bool) boo
 		return cap <= 0
 	}
 	a.revision++
-	a.invalidated = a.invalidated || invalidate
 	exhausted := cap <= 0
 	if w := a.weeks[weekStart(q.now())]; w != nil {
 		effective := w.recorded.RecordedBytes

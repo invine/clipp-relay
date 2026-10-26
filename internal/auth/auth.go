@@ -127,21 +127,6 @@ type Server struct {
 	cleanupAccountCursors              []string
 }
 
-// WithServingUnit admits relay authentication before its peer guard and first
-// credential read. Nested account and quota work reuses the same unit context.
-func (s *Server) WithServingUnit(ctx context.Context, work func(context.Context)) bool {
-	return s.db.WithUnit(ctx, func(unitCtx context.Context) error {
-		work(unitCtx)
-		return nil
-	}) == nil
-}
-
-// WithAccountGuards orders all local account operations before their SQL row
-// locks. Relay admission holds the same guard through registry installation.
-func (s *Server) WithAccountGuards(ctx context.Context, ids []string, work func(context.Context)) bool {
-	return s.withAccountGuards(ctx, ids, work) == nil
-}
-
 func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(context.Context)) error {
 	if s.accountChanged == nil {
 		return errors.New("relay account protection not configured")
@@ -199,11 +184,10 @@ func (s *Server) SetCapacitySampler(sample func(context.Context, string) (Capaci
 // Auth command. Local invalidation runs under account protection; connection
 // close I/O is deferred until all logical guards have been released.
 type AccountChange struct {
-	AccountID             string
-	WeeklyBytes           int64
-	SessionLimit          int
-	CloseAll              bool
-	InvalidateEligibility bool
+	AccountID    string
+	WeeklyBytes  int64
+	SessionLimit int
+	CloseAll     bool
 }
 
 // SetAccountChangedForTest installs a controlled invalidation adapter. Production
@@ -250,7 +234,7 @@ func (s *Server) SetGrantRevokedForTest(revoked func(string) error) {
 
 // QuotaProtection applies current policy without discarding observations.
 type QuotaProtection interface {
-	ApplyAccountingPolicy(string, int64, bool) bool
+	ApplyAccountingPolicy(string, int64) bool
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
@@ -272,7 +256,7 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	s.accountInvalidated = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
 	s.accountInvalidationFallback = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
 	s.accountChanged = func(change AccountChange) func() {
-		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes, change.InvalidateEligibility)
+		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes)
 		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
 			return sessions.DetachAccount(change.AccountID)
 		}
@@ -1233,7 +1217,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true, InvalidateEligibility: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true})
 			invalidationFailed = s.deliverAccountInvalidation(id) != nil
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {

@@ -22,9 +22,8 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := quota.New(db.Pool)
-	q.SetSettlementProtection(s)
 	t.Cleanup(q.Close)
-	if _, err := q.Eligibility(context.Background(), id, 0); err != nil {
+	if _, err := q.Eligibility(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Observe(id, 10*1024); err != nil {

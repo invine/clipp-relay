@@ -80,7 +80,7 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	if got := portalRequest(s, "GET", "/", cookie, nil, ""); got.Code != http.StatusOK || !containsSignedOut(got.Body.String()) {
 		t.Fatal("restored portal credential survived")
 	}
-	if _, err := q.Eligibility(ctx, id, 1); err == nil {
+	if _, err := q.Eligibility(ctx, id); err == nil {
 		t.Fatal("recovery hold allowed admission")
 	}
 	if _, err := s.AuthenticateRelay(ctx, access); err == nil {
@@ -123,7 +123,7 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, review, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("review=%d %s", out.Code, out.Body.String())
 	}
-	if _, err := q.Eligibility(ctx, id, 1); err != nil {
+	if _, err := q.Eligibility(ctx, id); err != nil {
 		t.Fatalf("review did not permit fresh eligibility: %v", err)
 	}
 	freshAccess, _ := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, fresh, "android", c.PublicClients.AndroidRedirect))

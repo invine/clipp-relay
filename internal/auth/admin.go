@@ -692,7 +692,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 	// Auth invalidates under account protection after SQL completion, then runs
 	// the returned connection-close I/O after releasing the logical guards.
 	closeAll := security || commitErr != nil
-	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll, InvalidateEligibility: security || commitErr != nil}
+	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll}
 	*uncertain = commitErr != nil
 }
 

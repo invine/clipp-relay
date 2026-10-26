@@ -60,7 +60,6 @@ func TestQuotaDiagnosticsKnownRollbackAndReconciledSettlement(t *testing.T) {
 	defer log.Close()
 	q.SetDiagnostics(log)
 	ctx := context.Background()
-	q.SetSettlementProtection(settlementTestProtection{})
 	op, _ := NewOperationID()
 	b := Settlement{AccountID: id, WeekStart: weekStart(time.Now()), Sequence: 1, DeltaBytes: 12345, OperationID: op}
 	q.SetSettlementHooksForTest(func(context.Context, pgx.Tx) error { return errors.New("private-rollback-canary") }, nil)
