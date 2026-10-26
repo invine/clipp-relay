@@ -18,6 +18,7 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -168,7 +169,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 	})
 	var changed AccountChange
 	s.SetAccountChangedForTest(func(change AccountChange) func() { changed = change; return nil })
-	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitAccountAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -206,7 +207,7 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 		changed = change
 		return func() { closed = true }
 	})
-	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitAccountAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -360,7 +361,7 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 	})
 	lost := true
 	requestContext, cancelRequest := context.WithCancel(context.Background())
-	s.commitPlan = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitPlanAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		err := tx.Commit(ctx)
 		if err != nil {
 			return err

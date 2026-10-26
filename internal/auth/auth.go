@@ -109,8 +109,11 @@ type Server struct {
 	beforeOwnerSubjectRead             func()
 	beforeAccountActionGuard           func()
 	beforeOwnerRecheck                 func(context.Context, pgx.Tx)
+	beforeOwnerAccessRecheck           func(context.Context) error
 	commitPlan                         func(context.Context, pgx.Tx) error
+	commitPlanAccess                   func(context.Context, persistence.AccountAccessTransaction) error
 	commitAccount                      func(context.Context, pgx.Tx) error
+	commitAccountAccess                func(context.Context, persistence.AccountAccessTransaction) error
 	relayCredentialHook                func()
 	commitCredential                   func(context.Context, pgx.Tx) error
 	commitAuthorization                func(context.Context, persistence.Transaction) error
@@ -1189,12 +1192,27 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403)
 		return
 	}
-	var subject string
 	if s.beforeOwnerSubjectRead != nil {
 		s.beforeOwnerSubjectRead()
 	}
-	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, id).Scan(&subject); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	readOp, err := s.persistence.Start(r.Context())
+	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return
+	}
+	readTx, err := beginAdminAccessTransaction(readOp)
+	if err != nil {
+		readOp.Close()
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return
+	}
+	ownerState, err := readTx.AccountAccessState(readOp.Context(), id, false)
+	_ = readTx.Rollback(readOp.Context())
+	readOp.Close()
+	if err != nil {
+		if errors.Is(err, persistence.ErrNotFound) {
 			markDiagnostic(r, "refused", "invalid_credentials")
 		} else {
 			markDiagnostic(r, "failed", "database_unavailable")
@@ -1202,6 +1220,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
+	subject := ownerState.Subject
 	var applied, uncertain bool
 	var invalidationFailed bool
 	var closeConnections func()
@@ -1212,57 +1231,50 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 		guardEntered = true
 		if guardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
-			tx, e := s.db.Begin(ctx)
+			op, e := s.persistence.Start(ctx)
 			if e != nil {
 				fail(w, 503)
 				return
 			}
-			defer tx.Rollback(ctx)
-			var locked, status string
-			var accountRevision, oldGeneration, weeklyBytes int64
-			var sessionLimit int
-			e = tx.QueryRow(ctx, `SELECT a.id,a.status,a.revision,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes,0),COALESCE(a.sessions_override,p.sessions,0) FROM public.accounts a LEFT JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 FOR UPDATE OF a`, id).Scan(&locked, &status, &accountRevision, &oldGeneration, &weeklyBytes, &sessionLimit)
+			defer op.Close()
+			tx, e := beginAdminAccessTransaction(op)
 			if e != nil {
 				fail(w, 503)
 				return
 			}
-			var live bool
-			if s.beforeOwnerRecheck != nil {
-				s.beforeOwnerRecheck(ctx, tx)
+			defer tx.Rollback(op.Context())
+			if s.beforeOwnerAccessRecheck != nil {
+				if e = s.beforeOwnerAccessRecheck(ctx); e != nil {
+					markDiagnostic(r, "failed", "database_unavailable")
+					fail(w, 401)
+					return
+				}
 			}
-			e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.account_id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp())`, id, s.sessionDigest(r, version), version).Scan(&live)
+			auditID, e := uuid()
 			if e != nil {
-				markDiagnostic(r, "failed", "database_unavailable")
-				fail(w, 401)
+				fail(w, 503)
 				return
 			}
-			if !live {
+			state, e := tx.RevokeAccountAccess(op.Context(), id, s.sessionDigest(r, version), version, auditID)
+			if errors.Is(e, persistence.ErrInvalidCredential) {
 				markDiagnostic(r, "refused", "invalid_credentials")
 				fail(w, 401)
 				return
 			}
-			e = revokeAccountCredentials(ctx, tx, id)
-			if e == nil {
-				var auditID string
-				auditID, e = uuid()
-				if e == nil {
-					_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES($1,clock_timestamp(),'owner_credentials_revoked',$2)`, auditID, id)
-				}
-			}
 			if e != nil {
 				fail(w, 503)
 				return
 			}
-			if s.commitAccount != nil {
-				e = s.commitAccount(ctx, tx)
+			if s.commitAccountAccess != nil {
+				e = s.commitAccountAccess(op.Context(), tx)
 			} else {
-				e = tx.Commit(ctx)
+				e = tx.Commit(op.Context())
 			}
 			s.installIdentityFence(subject)
 			if e != nil {
-				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
+				s.uncertainAccounts.Store(id, uncertainMutation{revision: state.Revision, generation: state.Generation + 1, status: state.Status})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: state.WeeklyBytes, SessionLimit: state.Sessions, CloseAll: true})
 			invalidationFailed = s.deliverAccountInvalidation(id) != nil
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {
