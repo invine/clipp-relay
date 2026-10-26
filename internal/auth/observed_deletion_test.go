@@ -35,7 +35,7 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 			j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageHash: zero, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 			p.auth.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
 			var subject string
-			if err := p.auth.Pool.QueryRow(context.Background(), `SELECT subject FROM public.accounts WHERE id=$1`, p.account).Scan(&subject); err != nil {
+			if err := p.runtime.Pool.QueryRow(context.Background(), `SELECT subject FROM public.accounts WHERE id=$1`, p.account).Scan(&subject); err != nil {
 				t.Fatal(err)
 			}
 			if tc.fail {
@@ -105,7 +105,7 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 				if got := portalRequest(p.auth, "GET", out.Header().Get("Location"), p.owner, nil, ""); got.Code != http.StatusAccepted {
 					t.Fatal("journal failure did not retain pending deletion")
 				}
-				if _, err := p.auth.Pool.Exec(context.Background(), `UPDATE public.deletion_operations SET next_attempt_at=clock_timestamp() WHERE account_id=$1`, p.account); err != nil {
+				if _, err := p.runtime.Pool.Exec(context.Background(), `UPDATE public.deletion_operations SET next_attempt_at=clock_timestamp() WHERE account_id=$1`, p.account); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -132,7 +132,7 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 				t.Fatal("registration inherited approval")
 			}
 			var id string
-			if err := p.auth.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
+			if err := p.runtime.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
 				t.Fatal(err)
 			}
 

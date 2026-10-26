@@ -19,6 +19,9 @@ func New(runtime *database.Runtime) *Work { return &Work{runtime: runtime} }
 func (w *Work) Start(parent context.Context) (persistence.Operation, error) {
 	ctx, release, err := w.runtime.StartUnit(parent)
 	if err != nil {
+		if errors.Is(err, database.ErrWorkUnavailable) {
+			return nil, errors.Join(persistence.ErrUnavailable, persistence.ErrWorkUnavailable)
+		}
 		return nil, unavailable(err)
 	}
 	return &operation{runtime: w.runtime, ctx: ctx, release: release}, nil

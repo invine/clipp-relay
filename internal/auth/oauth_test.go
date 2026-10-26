@@ -297,7 +297,7 @@ func TestNativeRelayUncertainAccountReconciliationAndOutage(t *testing.T) {
 		close(release)
 		t.Fatal(err)
 	}
-	s.SetAccountCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetAccountCommitHookForTest(func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -445,7 +445,7 @@ func TestNativeFositeUncertainCommitAcknowledgements(t *testing.T) {
 	}
 	oldAccess, oldRefresh := decode(grantResponse)
 	refreshCommitCalls := 0
-	s.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetCredentialCommitHookForTest(func(ctx context.Context, tx persistence.Transaction) error {
 		refreshCommitCalls++
 		if err := tx.Commit(ctx); err != nil {
 			return err

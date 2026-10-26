@@ -19,14 +19,10 @@ import (
 
 	"clipp-relay/internal/auth/issuer"
 	"clipp-relay/internal/config"
-	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/persistence"
-	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/portal"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
 
@@ -43,8 +39,8 @@ type Provider struct {
 // SetAccountCommitHookForTest injects an account-mutation commit result so
 // integration tests can exercise a lost acknowledgment after PostgreSQL commits.
 // Serving code leaves this unset.
-func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
-	s.commitAccount = commit
+func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, persistence.AccountAccessTransaction) error) {
+	s.commitAccountAccess = commit
 }
 
 // SetRelayCredentialHookForTest controls the gap after a credential observation
@@ -53,8 +49,8 @@ func (s *Server) SetRelayCredentialHookForTest(hook func()) { s.relayCredentialH
 
 // SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
 // Production leaves this unset.
-func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
-	s.commitCredential = commit
+func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
+	s.commitRefresh = commit
 }
 
 // SetAuthorizationCommitHookForTest injects storage-neutral commit outcomes for
@@ -76,8 +72,6 @@ func Google() Provider {
 type Server struct {
 	diagnostics                        *diagnostic.Logger
 	transitions                        *diagnostic.Transitions
-	Pool                               *pgxpool.Pool
-	db                                 *database.Runtime
 	persistence                        persistence.Work
 	deletions                          persistence.DeletionRepository
 	recovery                           persistence.RecoveryRepository
@@ -112,13 +106,11 @@ type Server struct {
 	beforeAccountActionGuard           func()
 	beforeOwnerDeletionRecheck         func(context.Context) error
 	beforeOwnerAccessRecheck           func(context.Context) error
-	commitPlan                         func(context.Context, pgx.Tx) error
 	commitPlanAccess                   func(context.Context, persistence.AccountAccessTransaction) error
-	commitAccount                      func(context.Context, pgx.Tx) error
 	commitAccountAccess                func(context.Context, persistence.AccountAccessTransaction) error
 	relayCredentialHook                func()
-	commitCredential                   func(context.Context, pgx.Tx) error
 	commitAuthorization                func(context.Context, persistence.Transaction) error
+	commitRefresh                      func(context.Context, persistence.Transaction) error
 	nativeIssuer                       *issuer.Issuer
 	commitPortal                       func(context.Context, persistence.Transaction) error
 	commitDeletionAdmission            func(context.Context, persistence.DeletionTransaction) error
@@ -150,7 +142,14 @@ func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(
 		return errors.New("relay account protection not configured")
 	}
 	executed := false
-	err := s.db.WithUnit(ctx, func(unitCtx context.Context) error {
+	var workErr error
+	op, err := s.persistence.Start(ctx)
+	if err != nil {
+		return err
+	}
+	defer op.Close()
+	unitCtx := op.Context()
+	{
 		ordered := append([]string(nil), ids...)
 		sort.Strings(ordered)
 		guards := make([]chan struct{}, 0, len(ordered))
@@ -179,10 +178,10 @@ func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(
 		}
 		executed = true
 		work(unitCtx)
-		return nil
-	})
-	if err != nil {
-		return err
+		workErr = unitCtx.Err()
+	}
+	if workErr != nil {
+		return workErr
 	}
 	if !executed {
 		return errors.New("account guard work did not execute")
@@ -314,8 +313,7 @@ func (s *Server) deliverAccountInvalidation(accountID string) error {
 func (s *Server) SampleActiveGrants(parent context.Context, accountID string) (CapacitySample, error) {
 	ctx, cancel := context.WithTimeout(parent, 500*time.Millisecond)
 	defer cancel()
-	var count int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
+	count, err := s.readViews.ActiveLoginGrantCount(ctx, accountID)
 	if err != nil {
 		return CapacitySample{}, err
 	}
@@ -366,14 +364,17 @@ type uncertainMutation struct {
 	status               string
 }
 
-func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provider) *Server {
-	return NewWithRuntime(database.NewRuntime(pool), c, m, provider)
+// Dependencies are selected by startup composition. Functional Auth has no
+// PostgreSQL constructor or driver handle.
+type Dependencies struct {
+	Work        persistence.Work
+	Deletions   persistence.DeletionRepository
+	Recovery    persistence.RecoveryRepository
+	ReadViews   persistence.ReadViews
+	Maintenance persistence.Maintenance
 }
 
-// NewWithRuntime joins the Account module to the serving process's shared DB
-// admission budget. The runtime must be the same one passed to Quota.
-func NewWithRuntime(runtime *database.Runtime, c config.Config, m config.Material, provider Provider) *Server {
-	pool := runtime.Pool
+func New(deps Dependencies, c config.Config, m config.Material, provider Provider) *Server {
 	httpSlots := make(chan struct{}, 8)
 	client := newProviderHTTPClient(provider.Client, httpSlots)
 	googleOAuth := &oauth2.Config{
@@ -389,7 +390,7 @@ func NewWithRuntime(runtime *database.Runtime, c config.Config, m config.Materia
 	}
 	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), provider.KeysURL)
 	googleVerifier := oidc.NewVerifier(googleIssuer, keySet, &oidc.Config{ClientID: m.GoogleClientID, SupportedSigningAlgs: []string{"RS256"}})
-	s := &Server{Pool: pool, db: runtime, persistence: postgres.New(runtime), deletions: postgres.NewDeletions(runtime), recovery: postgres.NewRecovery(runtime), readViews: postgres.NewReadViews(runtime), maintenance: postgres.NewMaintenance(runtime), Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
+	s := &Server{persistence: deps.Work, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
@@ -432,11 +433,12 @@ func (s *Server) WithIdentityFence(subject string, work func() error) error {
 }
 
 func (s *Server) withIdentityGuard(ctx context.Context, subject string, work func(context.Context) error) error {
-	unitCtx, releaseUnit, err := s.db.StartUnit(ctx)
+	op, err := s.persistence.Start(ctx)
 	if err != nil {
 		return err
 	}
-	defer releaseUnit()
+	defer op.Close()
+	unitCtx := op.Context()
 	key := s.identityKey(subject)
 	guard := s.identityGuard(key)
 	if !lockIdentity(unitCtx, guard) {
@@ -1029,7 +1031,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
 		recoveryHeld = profile.RecoveryHeld
 		weeklyBytes, sessions, recorded, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, persistence.ErrNotFound) {
 			e = errInvalidSession
 		} else if err != nil {
 			fail(w, 503)

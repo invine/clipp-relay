@@ -20,10 +20,11 @@ import (
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
+	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
-	"github.com/jackc/pgx/v5"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -33,6 +34,7 @@ import (
 type protectedPortal struct {
 	provider              *providerDouble
 	config                config.Config
+	runtime               *database.Runtime
 	auth                  *auth.Server
 	relay                 *relay.Server
 	quota                 *quota.Quota
@@ -53,7 +55,7 @@ func protectedPortalFixtureWithAccounting(t *testing.T, configure func(*quota.Qu
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.NewWithRuntime(db, c, m, d.endpoints())
+	s := newAuthWithRuntime(db, c, m, d.endpoints())
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +76,7 @@ func protectedPortalFixtureWithAccounting(t *testing.T, configure func(*quota.Qu
 	if err := db.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, "protected-owner-"+suffix).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
-	p := protectedPortal{provider: d, config: c, auth: s, relay: r, quota: q, admin: admin, owner: owner, account: id, csrf: csrfFrom(t, s, admin)}
+	p := protectedPortal{provider: d, config: c, runtime: db, auth: s, relay: r, quota: q, admin: admin, owner: owner, account: id, csrf: csrfFrom(t, s, admin)}
 	p.mutate(t, "approve", "1", nil)
 	p.access, _ = redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, owner, "android", c.PublicClients.AndroidRedirect))
 	return p
@@ -177,7 +179,7 @@ func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
 	if got := p.relay.AccountSessions(p.account); got != 2 {
 		t.Fatalf("ordinary refresh invalidated a Relay Session: %d", got)
 	}
-	p.auth.SetCredentialCommitHookForTest(func(context.Context, pgx.Tx) error {
+	p.auth.SetCredentialCommitHookForTest(func(context.Context, persistence.Transaction) error {
 		return errors.New("simulated refresh replay rollback")
 	})
 	rolledBack := nativeTokenPost(t, p.auth.Handler(), form)
@@ -195,7 +197,7 @@ func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
 	// retire the owning grant before the committed replay returns.
 	p.auth.SetGrantRevokedForTest(func(string) error { return errors.New("simulated notification wrapper failure") })
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
-	p.auth.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	p.auth.SetCredentialCommitHookForTest(func(ctx context.Context, tx persistence.Transaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -388,7 +390,7 @@ func TestProductionProtectionCrossAccountReplacementAtCapacity(t *testing.T) {
 	subject := "replacement-target-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	owner := loginAs(t, p.auth, p.provider, subject, "replacement@example.test", "")
 	var id string
-	if err := p.auth.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
+	if err := p.runtime.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	target := p
@@ -564,7 +566,7 @@ func TestOwnerAccountRevocationInvalidatesOnlyThatAccountsSessions(t *testing.T)
 		authorizeClient(t, p.auth, p.owner, "android", p.config.PublicClients.AndroidRedirect))
 	otherOwner := loginAs(t, p.auth, p.provider, "protected-unrelated-"+strconv.FormatInt(time.Now().UnixNano(), 10), "unrelated@example.test", "")
 	var otherAccount string
-	if err := p.auth.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE email='unrelated@example.test' ORDER BY created_at DESC LIMIT 1`).Scan(&otherAccount); err != nil {
+	if err := p.runtime.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE email='unrelated@example.test' ORDER BY created_at DESC LIMIT 1`).Scan(&otherAccount); err != nil {
 		t.Fatal(err)
 	}
 	approve := url.Values{"csrf": {csrfFrom(t, p.auth, p.admin)}, "reason": {"routine_administration"}, "action": {"approve"}, "revision": {"1"}, "plan_id": {"6dd09395-51a0-451c-96b3-716e6038e870"}}
@@ -654,7 +656,7 @@ func TestSuspensionInvalidatesAuthenticationAfterCredentialValidation(t *testing
 func TestOwnerRevocationDeliverySurvivesRequestCancellationAfterCommit(t *testing.T) {
 	p := protectedPortalFixture(t)
 	var subject string
-	if err := p.auth.Pool.QueryRow(context.Background(), `SELECT subject FROM public.accounts WHERE id=$1`, p.account).Scan(&subject); err != nil {
+	if err := p.runtime.Pool.QueryRow(context.Background(), `SELECT subject FROM public.accounts WHERE id=$1`, p.account).Scan(&subject); err != nil {
 		t.Fatal(err)
 	}
 	owner := loginAs(t, p.auth, p.provider, subject, "protected-owner@example.test", "")
@@ -664,7 +666,7 @@ func TestOwnerRevocationDeliverySurvivesRequestCancellationAfterCommit(t *testin
 	grant := protectedPortal{auth: p.auth, relay: p.relay, access: access}
 	requireProtectedAuthentication(t, client, grant, `"ok":true`)
 	ctx, cancel := context.WithCancel(context.Background())
-	p.auth.SetAccountCommitHookForTest(func(commitCtx context.Context, tx pgx.Tx) error {
+	p.auth.SetAccountCommitHookForTest(func(commitCtx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(commitCtx); err != nil {
 			return err
 		}

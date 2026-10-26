@@ -14,7 +14,7 @@ import (
 
 func TestQuotaEligibilityUsesItsOwnDatabaseBudget(t *testing.T) {
 	c, m, db := fixture(t)
-	account := auth.NewWithRuntime(db, c, m, auth.Google())
+	account := newAuthWithRuntime(db, c, m, auth.Google())
 	accounting := quota.New(postgres.New(db))
 	defer accounting.Close()
 	id, err := quota.NewOperationID()

@@ -11,7 +11,7 @@ import (
 )
 
 func TestUncomposedProtectedMutationsAreUnavailable(t *testing.T) {
-	s := auth.New(nil, config.Config{}, config.Material{}, auth.Provider{})
+	s := auth.New(auth.Dependencies{}, config.Config{}, config.Material{}, auth.Provider{})
 	for _, path := range []string{"/auth/revoke", "/auth/delete", "/admin/accounts/00000000-0000-0000-0000-000000000001"} {
 		t.Run(path, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(""))

@@ -176,6 +176,14 @@ func (t *transaction) StoreRelayAccessToken(ctx context.Context, digest [32]byte
 	return nil
 }
 
+func (t *transaction) DeleteRelayAccessToken(ctx context.Context, digest [32]byte) error {
+	_, err := t.tx.Exec(ctx, `DELETE FROM public.native_access_tokens WHERE credential_digest=$1`, digest[:])
+	if err != nil {
+		return unavailable(err)
+	}
+	return nil
+}
+
 func (t *transaction) CurrentRefreshGeneration(ctx context.Context, grantID string) (int64, error) {
 	var generation int64
 	err := t.tx.QueryRow(ctx, `SELECT current_refresh_generation FROM public.native_login_grants WHERE id=$1 FOR UPDATE`, grantID).Scan(&generation)

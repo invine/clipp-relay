@@ -10,9 +10,17 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/persistence/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type probeOverride struct {
+	persistence.Accounting
+	probe func(context.Context) (time.Time, error)
+}
+
+func (p probeOverride) ProbeDatabaseTime(ctx context.Context) (time.Time, error) { return p.probe(ctx) }
 
 func fixture(t *testing.T) (*Quota, string, *pgxpool.Pool) {
 	t.Helper()
@@ -58,11 +66,11 @@ func fixture(t *testing.T) (*Quota, string, *pgxpool.Pool) {
 
 func TestClockWarningIntervalIsVisibleWithoutClosingEligibility(t *testing.T) {
 	q, id, pool := fixture(t)
-	q.probeQuery = func(ctx context.Context) (time.Time, error) {
+	q.accounting = probeOverride{Accounting: q.accounting, probe: func(ctx context.Context) (time.Time, error) {
 		var now time.Time
 		err := pool.QueryRow(ctx, `SELECT clock_timestamp()+interval '2 seconds'`).Scan(&now)
 		return now, err
-	}
+	}}
 	if err := q.Probe(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -94,9 +102,7 @@ func TestClockUncertaintyIntervalBoundaries(t *testing.T) {
 				return t
 			}
 		}
-		q.probeQuery = func(context.Context) (time.Time, error) {
-			return before.Add(200*time.Millisecond + offset), nil
-		}
+		q.accounting = probeOverride{probe: func(context.Context) (time.Time, error) { return before.Add(200*time.Millisecond + offset), nil }}
 	}
 	probeAtOffset(900 * time.Millisecond)
 	if err := q.Probe(context.Background()); err != nil {

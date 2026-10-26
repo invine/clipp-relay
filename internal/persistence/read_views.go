@@ -46,6 +46,7 @@ type ReadViews interface {
 	AdminHome(context.Context, string, string, int) (AdminHome, error)
 	AdminAccount(context.Context, string) (AdminAccount, error)
 	AdminPlan(context.Context, string) (AdminPlan, error)
+	ActiveLoginGrantCount(context.Context, string) (int, error)
 	DeletionSignals(context.Context) (DeletionReadSignals, error)
 }
 

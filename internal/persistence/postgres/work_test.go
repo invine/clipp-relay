@@ -20,8 +20,8 @@ func TestOperationsShareAdmissionAndReleaseCapacity(t *testing.T) {
 		}
 		operations[i] = op
 	}
-	if _, err := work.Start(context.Background()); !errors.Is(err, persistence.ErrUnavailable) {
-		t.Fatalf("overflow start error = %v, want classified unavailability", err)
+	if _, err := work.Start(context.Background()); !errors.Is(err, persistence.ErrUnavailable) || !errors.Is(err, persistence.ErrWorkUnavailable) {
+		t.Fatalf("overflow start error = %v, want classified work unavailability", err)
 	}
 	operations[0].Close()
 	op, err := work.Start(context.Background())

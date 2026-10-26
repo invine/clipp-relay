@@ -92,8 +92,7 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 	if _, uncertain := s.uncertainAccounts.Load(result.AccountID); uncertain {
 		// Wait for any ambiguous account mutation to finish before accepting its
 		// credential snapshot, then perform a fresh token and authority lookup.
-		var resolved string
-		if err := s.db.QueryRow(ctx, `SELECT id FROM public.accounts WHERE id=$1 FOR SHARE`, result.AccountID).Scan(&resolved); err != nil {
+		if err := s.confirmUncertainAccount(ctx, result.AccountID); err != nil {
 			return RelayCredential{}, err
 		}
 		s.uncertainAccounts.Delete(result.AccountID)
@@ -111,4 +110,25 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 	}
 	result.ExpiresAt = after.Add(remaining)
 	return result, nil
+}
+
+func (s *Server) confirmUncertainAccount(ctx context.Context, accountID string) error {
+	op, err := s.persistence.Start(ctx)
+	if err != nil {
+		return err
+	}
+	defer op.Close()
+	tx, err := op.Begin(op.Context())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(op.Context())
+	account, ok := tx.(persistence.AccountTransaction)
+	if !ok {
+		return persistence.ErrUnavailable
+	}
+	if _, err = account.AccountStateAfterUncertain(op.Context(), accountID, ""); err != nil {
+		return err
+	}
+	return tx.Commit(op.Context())
 }

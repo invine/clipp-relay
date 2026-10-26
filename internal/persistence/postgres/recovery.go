@@ -14,6 +14,8 @@ type Recovery struct{ runtime *database.Runtime }
 
 func NewRecovery(runtime *database.Runtime) *Recovery { return &Recovery{runtime: runtime} }
 
+func (r *Recovery) SchemaRevision() int { return database.ExpectedRevision }
+
 func (r *Recovery) CurrentDatabase(ctx context.Context) (string, error) {
 	var name string
 	err := r.runtime.QueryRow(ctx, `SELECT current_database()`).Scan(&name)

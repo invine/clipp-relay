@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"clipp-relay/internal/persistence"
-	"github.com/jackc/pgx/v5"
 	"github.com/ory/fosite"
 	oauth2 "github.com/ory/fosite/handler/oauth2"
 	"github.com/ory/fosite/handler/pkce"
@@ -34,7 +33,6 @@ func NewSession(p Principal) fosite.Session {
 	return session
 }
 
-type txKey struct{}
 type persistenceTxKey struct{}
 type authorizationTxKey struct{}
 type refreshTxKey struct{}
@@ -42,17 +40,6 @@ type clientKey struct{}
 type rawTokenKey struct{}
 type operationKey struct{}
 type operation struct{ replay, replayComplete bool }
-
-// InTransaction attaches the caller-owned transaction. This storage deliberately
-// does not implement Fosite's Transactional hook: grant operations commit once,
-// in the HTTP coordinator, after all policy and audit writes have succeeded.
-func InTransaction(ctx context.Context, tx pgx.Tx, client ClientType, token string) context.Context {
-	op := &operation{}
-	ctx = context.WithValue(ctx, txKey{}, tx)
-	ctx = context.WithValue(ctx, clientKey{}, client)
-	ctx = context.WithValue(ctx, rawTokenKey{}, token)
-	return context.WithValue(ctx, operationKey{}, op)
-}
 
 // InPersistenceTransaction attaches the narrow access-token repository used
 // during Discovery and Relay Authentication.
@@ -140,14 +127,6 @@ func (s *Storage) ClientAssertionJWTValid(context.Context, string) error {
 
 func (s *Storage) SetClientAssertionJWT(context.Context, string, time.Time) error {
 	return errors.New("client assertions are disabled")
-}
-
-func txFrom(ctx context.Context) (pgx.Tx, error) {
-	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
-	if !ok || tx == nil {
-		return nil, errors.New("native issuer operation has no caller-owned transaction")
-	}
-	return tx, nil
 }
 
 func expectedClient(ctx context.Context) ClientType {
@@ -295,33 +274,7 @@ func (s *Storage) CreateAccessTokenSession(ctx context.Context, signature string
 		}
 		return tx.StoreRelayAccessToken(ctx, digest, p.GrantID, expires)
 	}
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return err
-	}
-	digest, err := LookupDigest(AccessToken, signature)
-	if err != nil {
-		return err
-	}
-	p, err := principalFrom(req)
-	if err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO public.native_login_grants(id,account_id,credential_generation,client_type,current_refresh_generation,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES($1,$2,$3,$4,1,clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 days',clock_timestamp()+interval '180 days') ON CONFLICT(id) DO NOTHING`, p.GrantID, p.AccountID, p.Generation, p.Client); err != nil {
-		return err
-	}
-	expires := req.GetSession().GetExpiresAt(fosite.AccessToken)
-	if expires.IsZero() {
-		expires = time.Now().UTC().Add(15 * time.Minute)
-	}
-	tag, err := tx.Exec(ctx, `INSERT INTO public.native_access_tokens(credential_digest,grant_id,issued_at,expires_at) SELECT $1,$2,clock_timestamp(),$3 FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.id=$2 AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp() AND a.status='Active' AND NOT a.recovery_review_hold AND a.credential_generation=g.credential_generation`, digest[:], p.GrantID, expires)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return fosite.ErrNotFound
-	}
-	return nil
+	return errors.New("Fosite access-token creation requires an authorization transaction")
 }
 
 func (s *Storage) GetAccessTokenSession(ctx context.Context, signature string, session fosite.Session) (fosite.Requester, error) {
@@ -361,16 +314,14 @@ func accessTokenRequest(s *Storage, token persistence.AccessToken, session fosit
 }
 
 func (s *Storage) DeleteAccessTokenSession(ctx context.Context, signature string) error {
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return err
-	}
 	digest, err := LookupDigest(AccessToken, signature)
 	if err != nil {
 		return nil
 	}
-	_, err = tx.Exec(ctx, `DELETE FROM public.native_access_tokens WHERE credential_digest=$1`, digest[:])
-	return err
+	if tx, ok := authorizationTxFrom(ctx); ok {
+		return tx.DeleteRelayAccessToken(ctx, digest)
+	}
+	return errors.New("Fosite access-token deletion requires an authorization transaction")
 }
 
 func (s *Storage) CreateRefreshTokenSession(ctx context.Context, signature, _ string, req fosite.Requester) error {
@@ -389,9 +340,9 @@ func (s *Storage) CreateRefreshTokenSession(ctx context.Context, signature, _ st
 		}
 		return tx.StoreRefreshGeneration(ctx, digest, p.GrantID, generation)
 	}
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return err
+	tx, ok := authorizationTxFrom(ctx)
+	if !ok {
+		return errors.New("Fosite refresh-token creation requires an authorization transaction")
 	}
 	digest, err := LookupDigest(RefreshToken, signature)
 	if err != nil {
@@ -401,83 +352,18 @@ func (s *Storage) CreateRefreshTokenSession(ctx context.Context, signature, _ st
 	if err != nil {
 		return err
 	}
-	var generation int64
-	err = tx.QueryRow(ctx, `SELECT current_refresh_generation FROM public.native_login_grants WHERE id=$1 AND terminated_at IS NULL FOR UPDATE`, p.GrantID).Scan(&generation)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fosite.ErrNotFound
-	}
+	generation, err := tx.CurrentRefreshGeneration(ctx, p.GrantID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO public.native_refresh_generations(credential_digest,grant_id,generation,issued_at) VALUES($1,$2,$3,clock_timestamp())`, digest[:], p.GrantID, generation)
-	return err
+	return tx.StoreRefreshGeneration(ctx, digest, p.GrantID, generation)
 }
 
 func (s *Storage) GetRefreshTokenSession(ctx context.Context, signature string, session fosite.Session) (fosite.Requester, error) {
 	if tx, ok := refreshTxFrom(ctx); ok {
 		return s.getRefreshTokenSession(ctx, tx, signature, session)
 	}
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return nil, err
-	}
-	digest, err := LookupDigest(RefreshToken, signature)
-	if err != nil {
-		return nil, fosite.ErrNotFound
-	}
-	var p Principal
-	var generation int64
-	var consumed bool
-	var active bool
-	var idleExpiry, absoluteExpiry time.Time
-	err = tx.QueryRow(ctx, `SELECT g.account_id::text,g.credential_generation,g.client_type,g.id::text,r.generation,r.consumed_at IS NOT NULL,(g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp() AND a.status='Active' AND NOT a.recovery_review_hold AND a.credential_generation=g.credential_generation),g.idle_expires_at,g.absolute_expires_at FROM public.native_refresh_generations r JOIN public.native_login_grants g ON g.id=r.grant_id JOIN public.accounts a ON a.id=g.account_id WHERE r.credential_digest=$1 FOR UPDATE OF r,g`, digest[:]).Scan(&p.AccountID, &p.Generation, &p.Client, &p.GrantID, &generation, &consumed, &active, &idleExpiry, &absoluteExpiry)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fosite.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if expected := expectedClient(ctx); expected == "" || expected != p.Client {
-		return nil, fosite.ErrNotFound
-	}
-	client, err := s.client(string(p.Client))
-	if err != nil {
-		return nil, fosite.ErrNotFound
-	}
-	if session == nil {
-		session = &fosite.DefaultSession{}
-	}
-	setPrincipal(session, p)
-	refreshExpiry := idleExpiry
-	if absoluteExpiry.Before(refreshExpiry) {
-		refreshExpiry = absoluteExpiry
-	}
-	session.SetExpiresAt(fosite.RefreshToken, refreshExpiry)
-	req := fosite.NewRequest()
-	req.SetID(p.GrantID)
-	req.Client = client
-	req.SetSession(session)
-	if consumed {
-		if !active {
-			return nil, fosite.ErrNotFound
-		}
-		if op, ok := ctx.Value(operationKey{}).(*operation); ok {
-			op.replay = true
-		}
-		raw, _ := ctx.Value(rawTokenKey{}).(string)
-		if raw == "" || s.refresh == nil || s.refresh.ValidateRefreshToken(ctx, req, raw) != nil {
-			return nil, fosite.ErrNotFound
-		}
-		return req, fosite.ErrInactiveToken
-	}
-	var current int64
-	if err = tx.QueryRow(ctx, `SELECT current_refresh_generation FROM public.native_login_grants WHERE id=$1`, p.GrantID).Scan(&current); err != nil {
-		return nil, err
-	}
-	if !active || current != generation {
-		return nil, fosite.ErrNotFound
-	}
-	return req, nil
+	return nil, errors.New("Fosite refresh-token reads require a refresh transaction")
 }
 
 func (s *Storage) getRefreshTokenSession(ctx context.Context, tx persistence.RefreshTransaction, signature string, session fosite.Session) (fosite.Requester, error) {
@@ -546,27 +432,7 @@ func (s *Storage) RotateRefreshToken(ctx context.Context, requestID, signature s
 		}
 		return tx.RotateRefreshCredential(ctx, digest, requestID)
 	}
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return err
-	}
-	digest, err := LookupDigest(RefreshToken, signature)
-	if err != nil {
-		return fosite.ErrNotFound
-	}
-	var grantID string
-	err = tx.QueryRow(ctx, `UPDATE public.native_refresh_generations SET consumed_at=clock_timestamp() WHERE credential_digest=$1 AND consumed_at IS NULL RETURNING grant_id::text`, digest[:]).Scan(&grantID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fosite.ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if grantID != requestID {
-		return fosite.ErrNotFound
-	}
-	_, err = tx.Exec(ctx, `UPDATE public.native_login_grants SET current_refresh_generation=current_refresh_generation+1,last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 days') WHERE id=$1 AND terminated_at IS NULL`, grantID)
-	return err
+	return errors.New("Fosite refresh rotation requires a refresh transaction")
 }
 
 func (s *Storage) RevokeRefreshToken(ctx context.Context, requestID string) error {
@@ -574,20 +440,7 @@ func (s *Storage) RevokeRefreshToken(ctx context.Context, requestID string) erro
 		_, err := tx.RevokeRefreshGrant(ctx, requestID)
 		return err
 	}
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return err
-	}
-	var account, client string
-	err = tx.QueryRow(ctx, `UPDATE public.native_login_grants SET terminated_at=COALESCE(terminated_at,clock_timestamp()) WHERE id=$1 RETURNING account_id::text,client_type`, requestID).Scan(&account, &client)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fosite.ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id,client_type) VALUES(gen_random_uuid(),clock_timestamp(),'refresh_reuse',$1,$2)`, account, client)
-	return err
+	return errors.New("Fosite refresh revocation requires a refresh transaction")
 }
 
 func (s *Storage) RevokeAccessToken(ctx context.Context, requestID string) error {
@@ -600,17 +453,7 @@ func (s *Storage) RevokeAccessToken(ctx context.Context, requestID string) error
 		}
 		return err
 	}
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `DELETE FROM public.native_access_tokens WHERE grant_id=$1`, requestID)
-	if err == nil {
-		if op, ok := ctx.Value(operationKey{}).(*operation); ok && op.replay {
-			op.replayComplete = true
-		}
-	}
-	return err
+	return errors.New("Fosite refresh replay invalidation requires a refresh transaction")
 }
 
 func principalFrom(req fosite.Requester) (Principal, error) {

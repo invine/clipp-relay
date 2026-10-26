@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"clipp-relay/internal/diagnostic"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
 )
 
 func assertActionLog(t *testing.T, data string, event, outcome, reason string) {
@@ -286,11 +286,11 @@ func TestOwnerGuardOverloadAndCancellationDoNotClaimDatabaseFailure(t *testing.T
 		}()
 		s.beforeAccountActionGuard = func() {
 			for range 64 {
-				_, release, err := s.db.StartUnit(context.Background())
+				op, err := s.persistence.Start(context.Background())
 				if err != nil {
 					t.Fatal(err)
 				}
-				releases = append(releases, release)
+				releases = append(releases, op.Close)
 			}
 		}
 		form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
@@ -357,7 +357,7 @@ func TestAdministratorAccountDiagnosticsRespectRevisionAndCommit(t *testing.T) {
 	}
 	form.Set("action", "suspend")
 	form.Set("revision", "2")
-	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitAccountAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -409,11 +409,13 @@ func TestAdministratorPlanDiagnosticsDistinguishProofFromUncertainty(t *testing.
 	if out := internalRequest(s, http.MethodPost, "/admin/plans", cookie, wrongCSRF, origin); out.Code != http.StatusForbidden {
 		t.Fatalf("plan CSRF status %d", out.Code)
 	}
-	s.commitPlan = func(context.Context, pgx.Tx) error { return errors.New("SECRET_ROLLBACK_CANARY") }
+	s.commitPlanAccess = func(context.Context, persistence.AccountAccessTransaction) error {
+		return errors.New("SECRET_ROLLBACK_CANARY")
+	}
 	if out := internalRequest(s, http.MethodPost, "/admin/plans", cookie, form, origin); out.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unconfirmed plan status %d", out.Code)
 	}
-	s.commitPlan = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitPlanAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -422,7 +424,7 @@ func TestAdministratorPlanDiagnosticsDistinguishProofFromUncertainty(t *testing.
 	if out := internalRequest(s, http.MethodPost, "/admin/plans", cookie, form, origin); out.Code != http.StatusSeeOther {
 		t.Fatalf("proven plan status %d", out.Code)
 	}
-	s.commitPlan = nil
+	s.commitPlanAccess = nil
 	if out := internalRequest(s, http.MethodPost, "/admin/plans", cookie, form, origin); out.Code != http.StatusSeeOther {
 		t.Fatalf("idempotent replay status %d", out.Code)
 	}

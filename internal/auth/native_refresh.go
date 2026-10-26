@@ -24,6 +24,13 @@ func beginRefreshTransaction(op persistence.Operation) (persistence.Transaction,
 	return tx, rt, nil
 }
 
+func (s *Server) commitRefreshTx(ctx context.Context, tx persistence.Transaction) error {
+	if s.commitRefresh != nil {
+		return s.commitRefresh(ctx, tx)
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, client issuer.ClientType, raw string, digest [32]byte) {
 	op, err := s.persistence.Start(r.Context())
 	if err != nil {
@@ -93,7 +100,7 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 			}
 			return
 		}
-		if err = s.commitAuthorizationTx(op.Context(), tx); err != nil {
+		if err = s.commitRefreshTx(op.Context(), tx); err != nil {
 			// Commit retired the credential transaction. Confirm through a fresh,
 			// independently admitted operation; cancellation cannot imply rollback.
 			_ = tx.Rollback(context.Background())
@@ -127,7 +134,7 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 		}
 		return
 	}
-	if err = s.commitAuthorizationTx(op.Context(), tx); err != nil {
+	if err = s.commitRefreshTx(op.Context(), tx); err != nil {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
