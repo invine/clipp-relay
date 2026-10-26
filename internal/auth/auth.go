@@ -57,6 +57,12 @@ func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx
 	s.commitCredential = commit
 }
 
+// SetAuthorizationCommitHookForTest injects storage-neutral commit outcomes for
+// native authorization tests. Production leaves this unset.
+func (s *Server) SetAuthorizationCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
+	s.commitAuthorization = commit
+}
+
 // SetPortalCommitHookForTest injects a lost portal-session commit acknowledgment.
 // Production leaves this unset.
 func (s *Server) SetPortalCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
@@ -106,6 +112,7 @@ type Server struct {
 	commitAccount                      func(context.Context, pgx.Tx) error
 	relayCredentialHook                func()
 	commitCredential                   func(context.Context, pgx.Tx) error
+	commitAuthorization                func(context.Context, persistence.Transaction) error
 	nativeIssuer                       *issuer.Issuer
 	commitPortal                       func(context.Context, pgx.Tx) error
 	commitDeletion                     func(context.Context, pgx.Tx) error

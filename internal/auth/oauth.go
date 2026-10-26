@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth/issuer"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/portal"
 	"github.com/jackc/pgx/v5"
 	"github.com/ory/fosite"
@@ -110,7 +111,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	markClient(r, client)
-	account, version, _, _, _, e := s.session(r)
+	portalSession, e := s.authorizationPortalSession(r)
 	if e != nil {
 		if errors.Is(e, errInvalidSession) {
 			s.loginFlow(w, r, &oauthIntent{client, redirect, state, challenge})
@@ -119,13 +120,8 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	var subject string
-	if e = s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); e != nil {
-		s.oauthError(w, 503)
-		return
-	}
 	cookie, _ := r.Cookie(sessionCookie)
-	s.presentConsent(w, r, account, cookie.Value, version, subject, oauthIntent{client, redirect, state, challenge})
+	s.presentConsent(w, r, portalSession.account, cookie.Value, portalSession.version, portalSession.subject, oauthIntent{client, redirect, state, challenge})
 }
 
 func (s *Server) nativeAuthorizeRequest(ctx context.Context, intent oauthIntent) (fosite.AuthorizeRequester, error) {
@@ -169,61 +165,58 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		s.oauthError(w, 503)
 		return
 	}
-	unitCtx, releaseUnit, e := s.db.StartUnit(r.Context())
+	op, e := s.persistence.Start(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	unitHeld := true
-	defer func() {
-		if unitHeld {
-			releaseUnit()
-		}
-	}()
+	defer op.Close()
 	guard := s.identityGuard(s.identityKey(subject))
-	if !lockIdentity(unitCtx, guard) {
+	if !lockIdentity(op.Context(), guard) {
 		s.oauthError(w, 503)
 		return
 	}
-	guardHeld := true
-	defer func() {
-		if guardHeld {
-			guard.Unlock()
-		}
-	}()
+	defer guard.Unlock()
 	binding := s.digest(version, "consent-browser", credential)
-	tx, e := s.db.Begin(unitCtx)
+	tx, authorizationTx, e := beginAuthorizationTransaction(op)
 	if e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	defer tx.Rollback(unitCtx)
-	var status string
-	var generation int64
-	if e = tx.QueryRow(unitCtx, `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); e != nil {
+	defer tx.Rollback(op.Context())
+	accountState, e := authorizationTx.LockAccountAuthorization(op.Context(), account)
+	if e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	var sessionGeneration int64
-	var storedCSRF []byte
-	if e = tx.QueryRow(unitCtx, `SELECT credential_generation,csrf_digest FROM public.portal_sessions WHERE credential_digest=$1 AND pepper_version=$2 AND account_id=$3 AND credential_generation=$4 AND idle_expires_at>clock_timestamp() AND absolute_expires_at>clock_timestamp() FOR UPDATE`, s.digest(version, "portal-session", credential), version, account, generation).Scan(&sessionGeneration, &storedCSRF); e != nil {
-		if !errors.Is(e, pgx.ErrNoRows) {
-			s.oauthError(w, 503)
-			return
-		}
+	portalSession, e := authorizationTx.LockPortalSessionForConsent(op.Context(), digest32(s.digest(version, "portal-session", credential)), version, account, accountState.Generation)
+	if errors.Is(e, persistence.ErrInvalidCredential) {
 		s.oauthError(w, 401)
 		return
 	}
-	if sessionGeneration != generation || subtle.ConstantTimeCompare(storedCSRF, s.digest(version, "csrf-store", s.csrf(version, credential))) != 1 {
+	if e != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	if portalSession.Generation != accountState.Generation || subtle.ConstantTimeCompare(portalSession.CSRFHash, s.digest(version, "csrf-store", s.csrf(version, credential))) != 1 {
 		s.oauthError(w, 401)
 		return
 	}
-	if status != "Active" {
-		if s.auditCredential(unitCtx, tx, "credential_blocked", account, intent.client) != nil {
+	touched, e := authorizationTx.TouchPortalSession(op.Context(), digest32(s.digest(version, "portal-session", credential)), version, account, accountState.Generation)
+	if e != nil || !touched {
+		if e != nil {
+			s.oauthError(w, 503)
+		} else {
+			s.oauthError(w, 401)
+		}
+		return
+	}
+	if accountState.Status != "Active" {
+		if authorizationTx.RecordCredentialAudit(op.Context(), "credential_blocked", account, intent.client) != nil {
 			s.oauthError(w, 503)
 			return
 		}
-		if tx.Commit(unitCtx) != nil {
+		if tx.Commit(op.Context()) != nil {
 			if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
 				markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			}
@@ -236,7 +229,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		denyAuthorization(w, r, intent)
 		return
 	}
-	if tx.Commit(unitCtx) != nil {
+	if tx.Commit(op.Context()) != nil {
 		if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
 			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		}
@@ -264,14 +257,10 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		return
 	}
 	if authorizeRequest != nil {
-		authorizeRequest.SetSession(issuer.NewSession(issuer.Principal{AccountID: account, Generation: generation, Client: issuer.ClientType(intent.client), GrantID: grantID}))
+		authorizeRequest.SetSession(issuer.NewSession(issuer.Principal{AccountID: account, Generation: accountState.Generation, Client: issuer.ClientType(intent.client), GrantID: grantID}))
 	}
-	s.consents[id] = oauthConsent{intent: intent, authorizeRequest: authorizeRequest, account: account, generation: generation, binding: binding, version: version, expires: now.Add(10 * time.Minute), epoch: s.flowEpoch}
+	s.consents[id] = oauthConsent{intent: intent, authorizeRequest: authorizeRequest, account: account, generation: accountState.Generation, binding: binding, version: version, expires: now.Add(10 * time.Minute), epoch: s.flowEpoch}
 	s.mu.Unlock()
-	guard.Unlock()
-	guardHeld = false
-	releaseUnit()
-	unitHeld = false
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Browsers also apply form-action to the post-consent redirect. The app
 	// callback was validated against its registered redirect before this flow.
@@ -300,11 +289,16 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 400)
 		return
 	}
-	account, version, _, _, csrf, e := s.session(r)
+	portalSession, e := s.authorizationPortalSession(r)
 	if e != nil {
-		s.oauthError(w, 401)
+		if errors.Is(e, errRateLimit) {
+			s.oauthError(w, 429)
+		} else {
+			s.oauthError(w, 401)
+		}
 		return
 	}
+	account, version, csrf := portalSession.account, portalSession.version, portalSession.csrf
 	if subtle.ConstantTimeCompare([]byte(csrf), []byte(r.PostForm.Get("csrf"))) != 1 {
 		s.oauthError(w, 403)
 		return
@@ -314,20 +308,15 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
-	var subject string
-	if e = s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); e != nil {
-		s.oauthError(w, 401)
-		return
-	}
-	unitCtx, releaseUnit, e := s.db.StartUnit(r.Context())
+	op, e := s.persistence.Start(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	defer releaseUnit()
-	r = r.WithContext(unitCtx)
-	guard := s.identityGuard(s.identityKey(subject))
-	if !lockIdentity(unitCtx, guard) {
+	defer op.Close()
+	r = r.WithContext(op.Context())
+	guard := s.identityGuard(s.identityKey(portalSession.subject))
+	if !lockIdentity(op.Context(), guard) {
 		s.oauthError(w, 503)
 		return
 	}
@@ -354,47 +343,52 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	s.issueNativeCode(w, r, consent.authorizeRequest, account, consent.generation, consent.intent)
+	s.issueNativeCode(w, r, op, cookie.Value, version, consent.authorizeRequest, account, consent.generation, consent.intent)
 }
-func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, authorize fosite.AuthorizeRequester, account string, expectedGeneration int64, intent oauthIntent) {
-	unitCtx := r.Context()
-	var err error
-	var subject string
-	if err = s.Pool.QueryRow(unitCtx, `SELECT subject FROM public.accounts WHERE id=$1`, account).Scan(&subject); err != nil {
-		s.oauthError(w, 401)
-		return
-	}
-	tx, err := s.db.Begin(unitCtx)
+func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, op persistence.Operation, portalCredential string, portalVersion uint64, authorize fosite.AuthorizeRequester, account string, expectedGeneration int64, intent oauthIntent) {
+	tx, authorizationTx, err := beginAuthorizationTransaction(op)
 	if err != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	defer tx.Rollback(unitCtx)
-	var status string
-	var generation int64
-	if err = tx.QueryRow(unitCtx, `SELECT status,credential_generation FROM public.accounts WHERE id=$1 AND NOT recovery_review_hold FOR UPDATE`, account).Scan(&status, &generation); err != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if generation != expectedGeneration {
+	defer tx.Rollback(op.Context())
+	accountState, err := authorizationTx.LockAccountAuthorization(op.Context(), account)
+	if errors.Is(err, persistence.ErrInvalidCredential) {
 		s.oauthError(w, 401)
 		return
 	}
-	if status != "Active" {
-		if s.auditCredential(unitCtx, tx, "credential_blocked", account, intent.client) != nil || s.commitCredentialTx(unitCtx, tx) != nil {
+	if err != nil {
+		s.oauthError(w, 503)
+		return
+	}
+	if accountState.Generation != expectedGeneration {
+		s.oauthError(w, 401)
+		return
+	}
+	touched, err := authorizationTx.TouchPortalSession(op.Context(), digest32(s.digest(portalVersion, "portal-session", portalCredential)), portalVersion, account, accountState.Generation)
+	if err != nil || !touched {
+		if err != nil {
+			s.oauthError(w, 503)
+		} else {
+			s.oauthError(w, 401)
+		}
+		return
+	}
+	if accountState.Status != "Active" {
+		if authorizationTx.RecordCredentialAudit(op.Context(), "credential_blocked", account, intent.client) != nil || tx.Commit(op.Context()) != nil {
 			s.oauthError(w, 503)
 			return
 		}
 		denyAuthorization(w, r, intent)
 		return
 	}
-	ctx := issuer.InTransaction(unitCtx, tx, issuer.ClientType(intent.client), "")
+	ctx := issuer.InAuthorizationTransaction(op.Context(), authorizationTx, issuer.ClientType(intent.client), "")
 	response, err := s.nativeIssuer.NewAuthorizeResponse(ctx, authorize, authorize.GetSession())
 	if err != nil {
 		s.oauthError(w, 400)
 		return
 	}
-	if err = s.commitCredentialTx(unitCtx, tx); err != nil {
+	if err = tx.Commit(op.Context()); err != nil {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		s.oauthError(w, 503)
 		return
