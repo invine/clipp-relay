@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"time"
 
+	"clipp-relay/internal/persistence"
 	"github.com/jackc/pgx/v5"
 	"github.com/ory/fosite"
 	oauth2 "github.com/ory/fosite/handler/oauth2"
@@ -34,6 +35,7 @@ func NewSession(p Principal) fosite.Session {
 }
 
 type txKey struct{}
+type persistenceTxKey struct{}
 type clientKey struct{}
 type rawTokenKey struct{}
 type operationKey struct{}
@@ -48,6 +50,16 @@ func InTransaction(ctx context.Context, tx pgx.Tx, client ClientType, token stri
 	ctx = context.WithValue(ctx, clientKey{}, client)
 	ctx = context.WithValue(ctx, rawTokenKey{}, token)
 	return context.WithValue(ctx, operationKey{}, op)
+}
+
+// InPersistenceTransaction attaches the narrow access-token repository used
+// during discovery and relay-authentication validation. Other Fosite operations
+// continue to use their compatibility transaction until their migration ticket.
+func InPersistenceTransaction(ctx context.Context, tx persistence.Transaction, client ClientType, token string) context.Context {
+	ctx = context.WithValue(ctx, persistenceTxKey{}, tx)
+	ctx = context.WithValue(ctx, clientKey{}, client)
+	ctx = context.WithValue(ctx, rawTokenKey{}, token)
+	return context.WithValue(ctx, operationKey{}, &operation{})
 }
 
 func ReplayCanCommit(ctx context.Context) bool {
@@ -277,34 +289,36 @@ func (s *Storage) CreateAccessTokenSession(ctx context.Context, signature string
 }
 
 func (s *Storage) GetAccessTokenSession(ctx context.Context, signature string, session fosite.Session) (fosite.Requester, error) {
-	tx, err := txFrom(ctx)
-	if err != nil {
-		return nil, err
+	tx, ok := ctx.Value(persistenceTxKey{}).(persistence.Transaction)
+	if !ok || tx == nil {
+		return nil, errors.New("Fosite access-token reads require a persistence transaction")
 	}
 	digest, err := LookupDigest(AccessToken, signature)
 	if err != nil {
 		return nil, fosite.ErrNotFound
 	}
-	var p Principal
-	var expires time.Time
-	err = tx.QueryRow(ctx, `SELECT g.account_id::text,g.credential_generation,g.client_type,g.id::text,a.expires_at FROM public.native_access_tokens a JOIN public.native_login_grants g ON g.id=a.grant_id JOIN public.accounts c ON c.id=g.account_id WHERE a.credential_digest=$1 AND a.expires_at>clock_timestamp() AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp() AND c.status='Active' AND NOT c.recovery_review_hold AND c.credential_generation=g.credential_generation`, digest[:]).Scan(&p.AccountID, &p.Generation, &p.Client, &p.GrantID, &expires)
-	if errors.Is(err, pgx.ErrNoRows) {
+	token, err := tx.AccessToken(ctx, digest)
+	if errors.Is(err, persistence.ErrInvalidCredential) {
 		return nil, fosite.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	client, err := s.client(string(p.Client))
+	return accessTokenRequest(s, token, session)
+}
+
+func accessTokenRequest(s *Storage, token persistence.AccessToken, session fosite.Session) (fosite.Requester, error) {
+	client, err := s.client(token.ClientType)
 	if err != nil {
 		return nil, err
 	}
 	if session == nil {
 		session = &fosite.DefaultSession{}
 	}
-	setPrincipal(session, p)
-	session.SetExpiresAt(fosite.AccessToken, expires)
+	setPrincipal(session, Principal{AccountID: token.AccountID, GrantID: token.GrantID, Generation: token.Generation, Client: ClientType(token.ClientType)})
+	session.SetExpiresAt(fosite.AccessToken, token.ExpiresAt)
 	req := fosite.NewRequest()
-	req.SetID(p.GrantID)
+	req.SetID(token.GrantID)
 	req.Client = client
 	req.SetSession(session)
 	return req, nil

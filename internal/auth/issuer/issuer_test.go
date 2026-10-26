@@ -10,11 +10,63 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"clipp-relay/internal/auth/issuer"
+	"clipp-relay/internal/persistence"
 	"github.com/ory/fosite"
 	"github.com/ory/fosite/compose"
 )
+
+type accessRepository struct {
+	token persistence.AccessToken
+	err   error
+}
+
+func (r accessRepository) AccessToken(context.Context, [32]byte) (persistence.AccessToken, error) {
+	return r.token, r.err
+}
+func (accessRepository) RelayCredential(context.Context, [32]byte, string, string) (persistence.RelayCredential, error) {
+	return persistence.RelayCredential{}, nil
+}
+func (accessRepository) Commit(context.Context) error   { return nil }
+func (accessRepository) Rollback(context.Context) error { return nil }
+
+func TestFositeAccessSessionUsesTypedRepositoryProjection(t *testing.T) {
+	storage := issuer.NewStorage(issuer.Redirects{issuer.Android: "clipp-relay://oauth/android"})
+	tx := accessRepository{token: persistence.AccessToken{
+		AccountID: "account-7", GrantID: "grant-9", Generation: 4,
+		ClientType: string(issuer.Android), ExpiresAt: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC),
+	}}
+	ctx := issuer.InPersistenceTransaction(context.Background(), tx, issuer.Android, "opaque")
+	request, err := storage.GetAccessTokenSession(ctx, base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), &fosite.DefaultSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.GetID() != "grant-9" || request.GetClient().GetID() != "android" {
+		t.Fatalf("repository projection produced request id/client %q/%q", request.GetID(), request.GetClient().GetID())
+	}
+	claims := request.GetSession().(fosite.ExtraClaimsSession).GetExtraClaims()
+	if claims["clipp_account_id"] != "account-7" || claims["clipp_credential_generation"] != int64(4) || claims["clipp_grant_id"] != "grant-9" {
+		t.Fatalf("repository identity was not retained in the Fosite session: %#v", claims)
+	}
+	if got := request.GetSession().GetExpiresAt(fosite.AccessToken); !got.Equal(tx.token.ExpiresAt) {
+		t.Fatalf("access expiry = %s, want repository expiry %s", got, tx.token.ExpiresAt)
+	}
+}
+
+func TestFositeAccessSessionDistinguishesInvalidFromUnavailable(t *testing.T) {
+	storage := issuer.NewStorage(nil)
+	signature := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
+	ctx := issuer.InPersistenceTransaction(context.Background(), accessRepository{err: persistence.ErrInvalidCredential}, "", "")
+	if _, err := storage.GetAccessTokenSession(ctx, signature, &fosite.DefaultSession{}); !errors.Is(err, fosite.ErrNotFound) {
+		t.Fatalf("invalid credential error = %v, want Fosite not-found", err)
+	}
+	ctx = issuer.InPersistenceTransaction(context.Background(), accessRepository{err: persistence.ErrUnavailable}, "", "")
+	if _, err := storage.GetAccessTokenSession(ctx, signature, &fosite.DefaultSession{}); !errors.Is(err, persistence.ErrUnavailable) || errors.Is(err, fosite.ErrNotFound) {
+		t.Fatalf("unavailable repository error = %v, want distinct temporary failure", err)
+	}
+}
 
 func TestPublicClientsRejectJWTClientAssertionsBeforeJWKLookup(t *testing.T) {
 	provider := issuer.NewProvider(bytes.Repeat([]byte{0x42}, 32), nil, nil)
