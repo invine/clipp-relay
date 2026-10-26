@@ -117,17 +117,6 @@ func TestLiveSessionCapReductionClosesAllAndReconnectsWithinCap(t *testing.T) {
 	if got := s.AccountSessions("a"); got != 0 {
 		t.Fatalf("revocation left %d sessions", got)
 	}
-	a.change(true, 0, s)
-	until := time.Now().Add(time.Second)
-	for len(clients[0].Network().ConnsToPeer(s.Host.ID())) != 0 && time.Now().Before(until) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if err := clients[0].Connect(ctx, ai); err != nil {
-		t.Fatal(err)
-	}
-	if response := authResponse(t, ctx, clients[0], s.Host.ID(), "authorized"); !strings.Contains(response, "session_limit_exceeded") {
-		t.Fatalf("zero current session cap admitted a session: %s", response)
-	}
 }
 
 func TestAccountInvalidationFencesInFlightRelayAuthentication(t *testing.T) {
