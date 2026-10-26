@@ -10,6 +10,7 @@ import (
 
 var (
 	ErrInvalidCredential = errors.New("invalid relay access credential")
+	ErrNotFound          = errors.New("persistence record not found")
 	ErrUnavailable       = errors.New("persistence temporarily unavailable")
 	ErrUncertainCommit   = errors.New("persistence commit outcome uncertain")
 )

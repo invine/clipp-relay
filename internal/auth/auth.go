@@ -79,6 +79,7 @@ type Server struct {
 	Pool                               *pgxpool.Pool
 	db                                 *database.Runtime
 	persistence                        persistence.Work
+	readViews                          persistence.ReadViews
 	maintenance                        persistence.Maintenance
 	Origin, ClientID, ClientSecret     string
 	AndroidRedirect, ExtensionRedirect string
@@ -382,7 +383,7 @@ func NewWithRuntime(runtime *database.Runtime, c config.Config, m config.Materia
 	}
 	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), provider.KeysURL)
 	googleVerifier := oidc.NewVerifier(googleIssuer, keySet, &oidc.Config{ClientID: m.GoogleClientID, SupportedSigningAlgs: []string{"RS256"}})
-	s := &Server{Pool: pool, db: runtime, persistence: postgres.New(runtime), maintenance: postgres.NewMaintenance(runtime), Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, accountRates: map[string]rate{}, cleanupAccountCursors: make([]string, cleanupOperationCount)}
+	s := &Server{Pool: pool, db: runtime, persistence: postgres.New(runtime), readViews: postgres.NewReadViews(runtime), maintenance: postgres.NewMaintenance(runtime), Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
