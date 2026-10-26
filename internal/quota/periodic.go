@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"clipp-relay/internal/persistence"
 )
 
 const AccountingCadence = time.Second
@@ -105,16 +107,16 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 			return result, err
 		}
 	}
-	var now time.Time
-	err = q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &result.CapBytes, &result.SessionLimit)
+	if q.accounting == nil {
+		return result, ErrTemporary
+	}
+	policy, err := q.accounting.ReadAccountingEligibility(ctx, id)
 	if err != nil {
 		return result, ErrTemporary
 	}
-	result.WeekStart = weekStart(q.dbTime(now))
-	durable, err := q.RecordedUsage(ctx, id, result.WeekStart)
-	if err != nil {
-		return result, err
-	}
+	result.CapBytes, result.SessionLimit = policy.CapBytes, policy.SessionLimit
+	result.WeekStart = weekStart(q.dbTime(policy.DatabaseNow))
+	durable := resultFromPersistence(persistence.RecordedUsage{RecordedBytes: policy.RecordedBytes, Sequence: policy.Sequence, OperationID: policy.OperationID, DeltaBytes: policy.DeltaBytes, WeekStart: result.WeekStart, DatabaseNow: policy.DatabaseNow})
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
 	a := q.observedAccountLocked(id)
@@ -459,18 +461,15 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 				case id := <-jobs:
 					_ = q.FlushAccounting(ctx, id)
 					// Background reads and decisions share Quota's account state.
-					q.runtime.WithUnit(ctx, func(unit context.Context) error {
-						_, err := q.Eligibility(unit, id)
-						if errors.Is(err, ErrExhausted) {
-							q.cutoff(id, "quota_exhausted")
-						}
-						q.periodic.mu.Lock()
-						if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
-							delete(q.periodic.accounts, id)
-						}
-						q.periodic.mu.Unlock()
-						return nil
-					})
+					_, err := q.Eligibility(ctx, id)
+					if errors.Is(err, ErrExhausted) {
+						q.cutoff(id, "quota_exhausted")
+					}
+					q.periodic.mu.Lock()
+					if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
+						delete(q.periodic.accounts, id)
+					}
+					q.periodic.mu.Unlock()
 				}
 			}
 		}()

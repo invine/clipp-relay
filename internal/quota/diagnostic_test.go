@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/diagnostic"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
 )
 
 type diagnosticOutput struct {
@@ -62,7 +62,9 @@ func TestQuotaDiagnosticsKnownRollbackAndReconciledSettlement(t *testing.T) {
 	ctx := context.Background()
 	op, _ := NewOperationID()
 	b := Settlement{AccountID: id, WeekStart: weekStart(time.Now()), Sequence: 1, DeltaBytes: 12345, OperationID: op}
-	q.SetSettlementHooksForTest(func(context.Context, pgx.Tx) error { return errors.New("private-rollback-canary") }, nil)
+	q.SetSettlementHooksForTest(func(context.Context, persistence.AccountingTransaction) error {
+		return errors.New("private-rollback-canary")
+	}, nil)
 	if _, err := q.Settle(ctx, b); !errors.Is(err, ErrTemporary) {
 		t.Fatalf("rollback: %v", err)
 	}

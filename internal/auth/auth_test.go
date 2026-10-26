@@ -25,6 +25,8 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence/postgres"
+	"clipp-relay/internal/quota"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,6 +43,10 @@ func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.M
 	s.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
 	s.SetGrantRevokedForTest(func(string) error { return nil })
 	return s
+}
+
+func newQuota(pool *pgxpool.Pool) *quota.Quota {
+	return quota.New(postgres.New(database.NewRuntime(pool)))
 }
 
 func fixture(t *testing.T) (config.Config, config.Material, *database.Runtime) {

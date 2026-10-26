@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
-	"clipp-relay/internal/quota"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -493,7 +492,7 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE id=$1`, newID); err != nil {
 		t.Fatal(err)
 	}
-	accounting := quota.New(db.Pool)
+	accounting := newQuota(db.Pool)
 	defer accounting.Close()
 	result, err := accounting.Eligibility(context.Background(), newID)
 	if err != nil || result.RecordedBytes != 12345 {

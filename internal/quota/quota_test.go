@@ -10,6 +10,7 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -50,7 +51,7 @@ func fixture(t *testing.T) (*Quota, string, *pgxpool.Pool) {
 			_, _ = p.Exec(context.Background(), query, id)
 		}
 	})
-	q := New(p)
+	q := New(postgres.New(database.NewRuntime(p)))
 	t.Cleanup(q.Close)
 	return q, id, p
 }

@@ -1,8 +1,10 @@
 package quota
 
 import (
+	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/persistence/postgres"
 	"context"
-	"github.com/jackc/pgx/v5"
 	"sync"
 	"testing"
 	"time"
@@ -92,7 +94,11 @@ func TestPeriodicCutoffIsIndependentOfBlockedPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
-	q.beforeCommit = func(context.Context, pgx.Tx) error { close(entered); <-release; return ErrTemporary }
+	q.beforeCommit = func(context.Context, persistence.AccountingTransaction) error {
+		close(entered)
+		<-release
+		return ErrTemporary
+	}
 	done := make(chan error, 1)
 	go func() { done <- q.FlushAccounting(ctx, id) }()
 	<-entered
@@ -448,7 +454,7 @@ func TestFinalFlushSettlesRevokedAccountAndWaitsForActiveBatch(t *testing.T) {
 
 func TestQuotaCloseIsBoundedWithUnresponsiveAccounting(t *testing.T) {
 	_, id, pool := fixture(t)
-	q := New(pool)
+	q := New(postgres.New(database.NewRuntime(pool)))
 	ctx := context.Background()
 	if _, err := q.Eligibility(ctx, id); err != nil {
 		q.Close()

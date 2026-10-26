@@ -13,7 +13,8 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/persistence/postgres"
 )
 
 func TestObservedProcessCrashAtCommitBoundary(t *testing.T) {
@@ -32,7 +33,7 @@ func TestObservedProcessCrashAtCommitBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer pool.Close()
-		q := New(pool)
+		q := New(postgres.New(database.NewRuntime(pool)))
 		defer q.Close()
 		hold := func() {
 			_, _ = fmt.Fprintln(os.Stdout, "at-commit-boundary")
@@ -40,7 +41,7 @@ func TestObservedProcessCrashAtCommitBoundary(t *testing.T) {
 		}
 		switch mode {
 		case "before":
-			q.SetSettlementHooksForTest(func(context.Context, pgx.Tx) error { hold(); return nil }, nil)
+			q.SetSettlementHooksForTest(func(context.Context, persistence.AccountingTransaction) error { hold(); return nil }, nil)
 		case "after":
 			q.SetSettlementHooksForTest(nil, func(context.Context) error { hold(); return nil })
 		default:
@@ -104,7 +105,7 @@ func TestObservedProcessCrashAtCommitBoundary(t *testing.T) {
 			if err := pool.QueryRow(ctx, `SELECT COALESCE((SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1),0)`, id).Scan(&durable); err != nil || durable != tc.durable {
 				t.Fatalf("durable debit after %s crash = %d, want %d: %v", tc.mode, durable, tc.durable, err)
 			}
-			restarted := New(pool)
+			restarted := New(postgres.New(database.NewRuntime(pool)))
 			defer restarted.Close()
 			got, err := restarted.Eligibility(ctx, id)
 			if err != nil || got.RecordedBytes != tc.restarted || got.EffectiveBytes != tc.restarted {

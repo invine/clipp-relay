@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/quota"
 	"github.com/jackc/pgx/v5"
 )
@@ -65,7 +66,7 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 			}
 			if tc.fail || tc.activeFail {
 				var enteredOnce sync.Once
-				p.quota.SetSettlementHooksForTest(func(ctx context.Context, _ pgx.Tx) error {
+				p.quota.SetSettlementHooksForTest(func(ctx context.Context, _ persistence.AccountingTransaction) error {
 					enteredOnce.Do(func() { close(committed) })
 					<-ctx.Done()
 					return ctx.Err()

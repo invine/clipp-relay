@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/persistence/postgres"
 )
 
 func TestRecordedUsageSettlesFullOverrunAndIdenticalRetry(t *testing.T) {
@@ -37,7 +39,9 @@ func TestRecordedUsageRollbackAndLostCommitReply(t *testing.T) {
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
 	batch := Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: 987654, Sequence: 1}
-	q.beforeCommit = func(context.Context, pgx.Tx) error { return errors.New("known failure before commit") }
+	q.beforeCommit = func(context.Context, persistence.AccountingTransaction) error {
+		return errors.New("known failure before commit")
+	}
 	if _, err := q.Settle(ctx, batch); !errors.Is(err, ErrTemporary) {
 		t.Fatalf("rollback=%v", err)
 	}
@@ -105,7 +109,7 @@ func TestRecordedUsageRejectsConflictsGapsAndStaleRetriesAcrossRestart(t *testin
 	if _, err := q.Settle(ctx, first); !errors.Is(err, ErrSettlementConflict) {
 		t.Fatalf("stale=%v", err)
 	}
-	restarted := New(pool)
+	restarted := New(postgres.New(database.NewRuntime(pool)))
 	t.Cleanup(restarted.Close)
 	durable, err := restarted.RecordedUsage(ctx, id, week)
 	if err != nil || durable.RecordedBytes != 80007 || durable.Sequence != 2 || durable.OperationID != next.OperationID {
@@ -291,7 +295,9 @@ func TestRecordedUsageCommitRollbackIsKnownFailure(t *testing.T) {
 	week := weekStart(time.Now())
 	op, _ := NewOperationID()
 	batch := Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: 19, Sequence: 1}
-	q.beforeCommit = func(ctx context.Context, tx pgx.Tx) error { _, _ = tx.Exec(ctx, `SELECT 1/0`); return nil }
+	q.beforeCommit = func(context.Context, persistence.AccountingTransaction) error {
+		return errors.New("known failure before commit")
+	}
 	if _, err := q.Settle(ctx, batch); !errors.Is(err, ErrTemporary) || errors.Is(err, ErrSettlementUncertain) {
 		t.Fatalf("known commit rollback=%v", err)
 	}

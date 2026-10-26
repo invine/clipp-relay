@@ -12,7 +12,6 @@ import (
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/portal"
-	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -173,7 +172,7 @@ func TestObservedRealCircuitSettlesDuringDrainAndFinalFlush(t *testing.T) {
 				if err := restartedAuth.EnableNativeOAuth(material.NativeSigningKey); err != nil {
 					t.Fatal(err)
 				}
-				restartedQuota := quota.New(p.auth.Pool)
+				restartedQuota := newQuota(p.auth.Pool)
 				defer restartedQuota.Close()
 				restartedRelay, e := relay.NewProtected(restartedAuth, restartedQuota, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 				if e != nil {
