@@ -13,7 +13,6 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/quota"
-	"github.com/jackc/pgx/v5"
 )
 
 func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
@@ -50,7 +49,7 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.lost {
-				p.auth.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+				p.auth.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx persistence.DeletionTransaction) error {
 					if err := tx.Commit(ctx); err != nil {
 						return err
 					}

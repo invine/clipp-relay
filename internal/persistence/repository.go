@@ -13,6 +13,8 @@ var (
 	ErrNotFound          = errors.New("persistence record not found")
 	ErrUnavailable       = errors.New("persistence temporarily unavailable")
 	ErrUncertainCommit   = errors.New("persistence commit outcome uncertain")
+	ErrRecentAuthentication = errors.New("recent authentication required")
+	ErrCapacityExceeded = errors.New("persistence capacity exceeded")
 )
 
 // AccessToken is the typed Fosite session associated with a Relay Access Token.

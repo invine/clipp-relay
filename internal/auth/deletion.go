@@ -15,9 +15,8 @@ import (
 	"time"
 
 	"clipp-relay/internal/diagnostic"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/portal"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // DeletionJournal is the serving identity's complete storage authority. Its
@@ -34,8 +33,12 @@ type DeletionJournal interface {
 
 // SetDeletionFinalizeCommitHookForTest simulates lost finalization responses
 // after PostgreSQL has committed; serving code leaves this unset.
-func (s *Server) SetDeletionFinalizeCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
-	s.commitDeletion = commit
+func (s *Server) SetDeletionFinalizeCommitHookForTest(commit func(context.Context, persistence.DeletionTransaction) error) {
+	s.commitDeletionRepository = commit
+}
+
+func (s *Server) SetDeletionAdmissionCommitHookForTest(commit func(context.Context, persistence.DeletionTransaction) error) {
+	s.commitDeletionAdmission = commit
 }
 
 type JournalHead struct {
@@ -71,13 +74,10 @@ func deletionDatabaseError(err error) error {
 }
 
 func deletionPrepareError(err error) error {
-	var rejected *pgconn.PgError
-	if errors.As(err, &rejected) {
-		// PostgreSQL rejected the statement before its implicit commit.
-		return deletionDatabaseError(err)
+	if errors.Is(err, persistence.ErrUncertainCommit) {
+		return fmt.Errorf("%w: %w", errDeletionPreparationUnconfirmed, err)
 	}
-	// A lost acknowledgement of an autocommit UPDATE cannot prove rollback.
-	return fmt.Errorf("%w: %w", errDeletionPreparationUnconfirmed, err)
+	return deletionDatabaseError(err)
 }
 
 // SetDeletionJournal requires an operator-supplied repository identity and
@@ -141,12 +141,19 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	var subject string
 	if s.beforeOwnerSubjectRead != nil {
 		s.beforeOwnerSubjectRead()
 	}
-	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, id).Scan(&subject); err != nil {
-		if err == pgx.ErrNoRows {
+	readTx, err := s.deletions.BeginDeletion(r.Context())
+	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return
+	}
+	owner, err := readTx.DeletionOwner(r.Context(), id)
+	_ = readTx.Rollback(r.Context())
+	if err != nil {
+		if errors.Is(err, persistence.ErrNotFound) || errors.Is(err, persistence.ErrInvalidCredential) {
 			markDiagnostic(r, "refused", "invalid_credentials")
 		} else {
 			markDiagnostic(r, "failed", "database_unavailable")
@@ -154,6 +161,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409)
 		return
 	}
+	subject := owner.Subject
 	operation, e := uuid()
 	if e != nil {
 		fail(w, 503)
@@ -169,72 +177,41 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 		guardEntered = true
 		if accountGuardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
-			tx, err := s.db.Begin(ctx)
+			tx, err := s.deletions.BeginDeletion(ctx)
 			if err != nil {
 				fail(w, 503)
 				return
 			}
 			defer tx.Rollback(ctx)
-			var live bool
-			var authenticatedAt time.Time
-			var weeklyBytes int64
-			var sessionLimit int
-			if s.beforeOwnerRecheck != nil {
-				s.beforeOwnerRecheck(ctx, tx)
-			}
-			err = tx.QueryRow(ctx, `SELECT ps.google_authenticated_at,ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes,0),COALESCE(a.sessions_override,p.sessions,0) FROM public.accounts a LEFT JOIN public.quota_plans p ON p.id=a.plan_id JOIN public.portal_sessions ps ON ps.account_id=a.id WHERE a.id=$1 AND a.subject=$2 AND a.deletion_started_at IS NULL AND ps.credential_digest=$3 AND ps.pepper_version=$4 FOR UPDATE OF a`, id, subject, s.sessionDigest(r, version), version).Scan(&authenticatedAt, &live, &weeklyBytes, &sessionLimit)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					markDiagnostic(r, "refused", "invalid_credentials")
-				} else {
+			if s.beforeOwnerDeletionRecheck != nil {
+				if err = s.beforeOwnerDeletionRecheck(ctx); err != nil {
 					markDiagnostic(r, "failed", "database_unavailable")
+					fail(w, 503)
+					return
 				}
-				fail(w, 401)
-				return
 			}
-			if !live {
+			admission, err := tx.AdmitDeletion(ctx, persistence.DeletionAdmissionRequest{AccountID: id, OperationID: operation, ExpectedSubject: subject, SessionDigest: s.sessionDigest(r, version), PepperVersion: version})
+			if errors.Is(err, persistence.ErrInvalidCredential) {
 				markDiagnostic(r, "refused", "invalid_credentials")
 				fail(w, 401)
 				return
 			}
-			var recent bool
-			if err := tx.QueryRow(ctx, `SELECT $1::timestamptz >= clock_timestamp()-interval '10 minutes' AND $1::timestamptz <= clock_timestamp()`, authenticatedAt).Scan(&recent); err != nil || !recent {
-				if err != nil {
-					markDiagnostic(r, "failed", "database_unavailable")
-				} else {
-					markDiagnostic(r, "refused", "recent_auth_required")
-				}
+			if errors.Is(err, persistence.ErrRecentAuthentication) {
+				markDiagnostic(r, "refused", "recent_auth_required")
 				fail(w, 403)
 				return
 			}
-			var pending int
-			if tx.QueryRow(ctx, `SELECT pending FROM public.deletion_capacity WHERE singleton=true FOR UPDATE`).Scan(&pending) != nil {
-				fail(w, 503)
-				return
-			}
-			if pending >= 1024 {
+			if errors.Is(err, persistence.ErrCapacityExceeded) {
 				markDiagnostic(r, "refused", "deletion_capacity")
 				fail(w, 503)
 				return
 			}
-			if _, err = tx.Exec(ctx, `INSERT INTO public.deletion_operations(id,account_id,admitted_at,next_attempt_at) VALUES($1,$2,clock_timestamp(),clock_timestamp())`, operation, id); err != nil {
+			if err != nil {
 				fail(w, 503)
 				return
 			}
-			if _, err = tx.Exec(ctx, `UPDATE public.accounts SET deletion_started_at=clock_timestamp() WHERE id=$1`, id); err != nil {
-				fail(w, 503)
-				return
-			}
-			if err = revokeAccountCredentials(ctx, tx, id); err != nil {
-				fail(w, 503)
-				return
-			}
-			if _, err = tx.Exec(ctx, `UPDATE public.deletion_capacity SET pending=pending+1 WHERE singleton=true`); err != nil {
-				fail(w, 503)
-				return
-			}
-			if s.commitAccount != nil {
-				err = s.commitAccount(ctx, tx)
+			if s.commitDeletionAdmission != nil {
+				err = s.commitDeletionAdmission(ctx, tx)
 			} else {
 				err = tx.Commit(ctx)
 			}
@@ -242,7 +219,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.uncertainAccounts.Store(id, uncertainDeletion{operationID: operation})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: admission.WeeklyBytes, SessionLimit: admission.Sessions, CloseAll: true})
 			invalidationFailed = s.deliverAccountInvalidation(id) != nil
 			admitted, uncertain = true, err != nil
 		}); accountGuardErr != nil {
@@ -286,9 +263,8 @@ func (s *Server) deletionStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404)
 		return
 	}
-	var completed *time.Time
-	err := s.db.QueryRow(r.Context(), `SELECT completed_at FROM public.deletion_operations WHERE id=$1`, id).Scan(&completed)
-	if err == pgx.ErrNoRows {
+	completed, err := s.deletions.DeletionStatus(r.Context(), id)
+	if errors.Is(err, persistence.ErrNotFound) {
 		fail(w, 404)
 		return
 	}
@@ -296,7 +272,7 @@ func (s *Server) deletionStatus(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	renderDeletion(w, completed == nil, r.URL.Path)
+	renderDeletion(w, !completed, r.URL.Path)
 }
 
 type pendingDeletion struct {
@@ -309,9 +285,11 @@ type pendingDeletion struct {
 }
 
 func (s *Server) nextDeletion(ctx context.Context) (pendingDeletion, error) {
-	var x pendingDeletion
-	err := s.db.QueryRow(ctx, `SELECT id,account_id,admitted_at,event_sequence,event_hash,event_data,journal_generation,attempts FROM public.deletion_operations WHERE completed_at IS NULL AND next_attempt_at<=clock_timestamp() ORDER BY next_attempt_at,admitted_at,id LIMIT 1`).Scan(&x.ID, &x.Account, &x.Admitted, &x.Sequence, &x.Hash, &x.Data, &x.Generation, &x.Attempts)
-	return x, err
+	row, err := s.deletions.NextDeletion(ctx)
+	if err != nil {
+		return pendingDeletion{}, err
+	}
+	return pendingDeletion{ID: row.ID, Account: row.AccountID, Admitted: row.AdmittedAt, Sequence: row.EventSequence, Hash: row.EventHash, Data: row.EventData, Generation: row.JournalGeneration, Attempts: row.Attempts}, nil
 }
 
 func (s *Server) readHead(ctx context.Context) (result JournalHead, resultETag string, resultErr error) {
@@ -479,11 +457,11 @@ func (s *Server) eventFor(ctx context.Context, x pendingDeletion, h JournalHead)
 	if len(data) > 4<<10 {
 		return event, nil, errors.New("deletion event too large")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence IS NULL AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration)
+	updated, err := s.deletions.PrepareDeletionEvent(ctx, persistence.DeletionEventPreparation{OperationID: x.ID, Sequence: event.Sequence, Hash: digest[:], Data: data, Generation: h.MaintenanceGeneration})
 	if err != nil {
 		return event, nil, deletionPrepareError(err)
 	}
-	if tag.RowsAffected() != 1 {
+	if !updated {
 		return event, nil, errors.New("deletion event preparation uncertain")
 	}
 	return event, data, nil
@@ -509,11 +487,11 @@ func (s *Server) rebaseDeletionEvent(ctx context.Context, x pendingDeletion, h J
 	if len(data) > 4<<10 {
 		return deletionEvent{}, nil, errors.New("deletion event too large")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE public.deletion_operations SET event_sequence=$2,event_hash=$3,event_data=$4,journal_generation=$5 WHERE id=$1 AND event_sequence=$6 AND event_hash=$7 AND journal_generation=$8 AND completed_at IS NULL`, x.ID, event.Sequence, digest[:], data, h.MaintenanceGeneration, *x.Sequence, x.Hash, *x.Generation)
+	updated, err := s.deletions.PrepareDeletionEvent(ctx, persistence.DeletionEventPreparation{OperationID: x.ID, Sequence: event.Sequence, Hash: digest[:], Data: data, Generation: h.MaintenanceGeneration, ExpectedSequence: x.Sequence, ExpectedHash: x.Hash, ExpectedGeneration: x.Generation})
 	if err != nil {
 		return deletionEvent{}, nil, deletionPrepareError(err)
 	}
-	if tag.RowsAffected() != 1 {
+	if !updated {
 		return deletionEvent{}, nil, errors.New("deletion event rebase uncertain")
 	}
 	return event, data, nil
@@ -540,7 +518,7 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 	x, err := s.nextDeletion(ctx)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, persistence.ErrNotFound) {
 		return nil
 	}
 	if err != nil {
@@ -584,7 +562,7 @@ func (s *Server) ReconcileOneDeletion(parent context.Context) error {
 		// Durable backoff is fair across pending operations and cannot be bypassed
 		// by manual calls to this same entry point.
 		retryCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		_, _ = s.db.Exec(retryCtx, `UPDATE public.deletion_operations SET attempts=attempts+1,next_attempt_at=clock_timestamp()+make_interval(secs=>$2) WHERE id=$1 AND completed_at IS NULL`, x.ID, retrySeconds(x.ID, x.Attempts))
+		_ = s.deletions.RecordDeletionRetry(retryCtx, x.ID, x.Attempts, retrySeconds(x.ID, x.Attempts))
 		stop()
 	} else {
 		s.deletionCompleted.Add(1)
@@ -685,66 +663,26 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 		_ = s.deletionAccounting.FlushDeletionAccounting(flushCtx, x.Account)
 		stop()
 	}
-	tx, err := s.db.Begin(ctx)
+	subject, err := s.deletions.DeletionIdentity(ctx, x.Account)
 	if err != nil {
-		return deletionDatabaseError(err)
-	}
-	defer tx.Rollback(ctx)
-	var subject *string
-	var deleted *time.Time
-	if err = tx.QueryRow(ctx, `SELECT subject,deleted_at FROM public.accounts WHERE id=$1 FOR UPDATE`, x.Account).Scan(&subject, &deleted); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		return deletionDatabaseError(err)
-	}
-	if deleted != nil {
-		return errors.New("deletion operation/account state inconsistent")
-	}
-	if subject == nil {
-		return errors.New("deleting account identity missing")
-	}
-	var completed *time.Time
-	if err = tx.QueryRow(ctx, `SELECT completed_at FROM public.deletion_operations WHERE id=$1 AND account_id=$2 FOR UPDATE`, x.ID, x.Account).Scan(&completed); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return deletionDatabaseError(err)
-	}
-	if err != nil || completed != nil {
-		return errors.New("deletion operation changed")
-	}
-	var week time.Time
-	var committed int64
-	if err = tx.QueryRow(ctx, `SELECT date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date`).Scan(&week); err != nil {
-		return deletionDatabaseError(err)
-	}
-	usageQuery := `SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=$2`
-	err = tx.QueryRow(ctx, usageQuery, x.Account, week).Scan(&committed)
-	if err != nil && err != pgx.ErrNoRows {
-		return deletionDatabaseError(err)
-	}
-	if err == nil {
-		digest := s.digest(s.CurrentPepper, "retained-quota", googleIssuer+"\x00"+*subject)
-		if _, err = tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes) VALUES($1,$2,$3,$4)`, s.CurrentPepper, digest, week, committed); err != nil {
-			return deletionDatabaseError(err)
-		}
-	}
-	if _, err = tx.Exec(ctx, `UPDATE public.accounts SET issuer=NULL,subject=NULL,email=NULL,email_verified=NULL,hosted_domain=NULL,plan_id=NULL,weekly_bytes_override=NULL,sessions_override=NULL,status='Pending',deleted_at=clock_timestamp(),credential_generation=credential_generation+1 WHERE id=$1`, x.Account); err != nil {
 		return deletionDatabaseError(err)
 	}
 	auditID, err := uuid()
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES($1,clock_timestamp(),'account_deleted',$2)`, auditID, x.Account); err != nil {
+	digest := s.digest(s.CurrentPepper, "retained-quota", googleIssuer+"\x00"+subject)
+	tx, err := s.deletions.BeginDeletion(ctx)
+	if err != nil {
 		return deletionDatabaseError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE public.deletion_operations SET completed_at=clock_timestamp() WHERE id=$1`, x.ID); err != nil {
+	defer tx.Rollback(ctx)
+	err = tx.FinalizeDeletion(ctx, x.ID, x.Account, subject, s.CurrentPepper, digest, auditID)
+	if err != nil {
 		return deletionDatabaseError(err)
 	}
-	if _, err = tx.Exec(ctx, `UPDATE public.deletion_capacity SET pending=pending-1 WHERE singleton=true`); err != nil {
-		return deletionDatabaseError(err)
-	}
-	if s.commitDeletion != nil {
-		err = s.commitDeletion(ctx, tx)
+	if s.commitDeletionRepository != nil {
+		err = s.commitDeletionRepository(ctx, tx)
 	} else {
 		err = tx.Commit(ctx)
 	}
@@ -754,8 +692,7 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	}
 	checkCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer stop()
-	var complete bool
-	checkErr := s.db.QueryRow(checkCtx, `SELECT d.completed_at IS NOT NULL AND a.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM public.audit_events e WHERE e.account_id=a.id AND e.event='account_deleted') FROM public.deletion_operations d JOIN public.accounts a ON a.id=d.account_id WHERE d.id=$1`, x.ID).Scan(&complete)
+	complete, checkErr := s.deletions.DeletionCommitted(checkCtx, x.ID)
 	if checkErr == nil && complete {
 		s.forgetDeletedAccounting(x.Account)
 		return nil
@@ -778,17 +715,13 @@ type DeletionSignals struct {
 }
 
 func (s *Server) SampleDeletionSignals(ctx context.Context) (DeletionSignals, error) {
-	var count int
-	var ageSeconds float64
-	if err := s.db.QueryRow(ctx, `SELECT count(*),COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-min(admitted_at)),0) FROM public.deletion_operations WHERE completed_at IS NULL`).Scan(&count, &ageSeconds); err != nil {
+	read, err := s.deletions.DeletionSignals(ctx)
+	if err != nil {
 		return DeletionSignals{}, err
 	}
-	out := DeletionSignals{Pending: count, Completed: s.deletionCompleted.Load(), Retried: s.deletionRetried.Load()}
-	if ageSeconds > 0 {
-		out.OldestAge = time.Duration(ageSeconds * float64(time.Second))
-	}
+	out := DeletionSignals{Pending: read.Pending, OldestAge: read.OldestAge, Completed: s.deletionCompleted.Load(), Retried: s.deletionRetried.Load()}
 	out.Warning = out.OldestAge >= 15*time.Minute
-	out.Critical = out.OldestAge >= time.Hour || count >= 820
+	out.Critical = out.OldestAge >= time.Hour || out.Pending >= 820
 	return out, nil
 }
 
