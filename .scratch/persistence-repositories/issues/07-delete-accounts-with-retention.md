@@ -4,7 +4,7 @@
 
 **Blocked by:** 05: Manage account access and Quota Plans atomically; 06: Record and reconcile Relay Usage.
 
-**Status:** claimed — persistence 07 (coordinator: root), 2026-10-26
+**Status:** resolved — deletion repository integration; eight focused deletion tests ran without skips, and persistence tests, vet, build, and diff checks passed. PostgreSQL 17/18 smoke qualification remains in ticket 11.
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I5, I8–I10; T1–T3, T5–T6, applicable T7–T8.
 
@@ -18,4 +18,5 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Claimed for implementation after tickets 05 and 06 were integrated.
+- Deletion admission/progress/finalization/status/retries/signals use typed persistence interfaces; admission and finalization keep credential, retention, audit, and capacity writes atomic.
+- Eight focused deletion tests ran without skips. PostgreSQL 17/18 smoke qualification is tracked by ticket 11.

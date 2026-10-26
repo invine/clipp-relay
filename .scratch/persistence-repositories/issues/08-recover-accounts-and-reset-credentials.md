@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Delete Relay Accounts without losing retention guarantees.
 
-**Status:** ready-for-agent
+**Status:** claimed — persistence 08 (coordinator: root), 2026-10-26
 
 Parent: [approved specification](../spec.md). Decision source: [approved persistence choices](../decisions.md). Coverage: I1–I5, I8–I10; T2–T3, T6–T8.
 
@@ -18,4 +18,4 @@ Parent: [approved specification](../spec.md). Decision source: [approved persist
 
 ## Comments
 
-- Published on 2026-10-26 after the user approved the 11-ticket breakdown and its blocking edges. Publication only: no claim, implementation, commit, operator mutation or deployment is authorized by this publication.
+- Claimed for implementation after ticket 07 was integrated.
