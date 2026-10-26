@@ -205,8 +205,8 @@ func TestOwnerRevokeConcurrentInvalidationAndSQLFailureHaveDistinctRows(t *testi
 		var output bytes.Buffer
 		logger := diagnostic.New(&output)
 		s.SetDiagnostics(logger)
-		s.beforeOwnerRecheck = func(ctx context.Context, tx pgx.Tx) {
-			_, _ = tx.Exec(ctx, `SELECT 1/0`)
+		s.beforeOwnerAccessRecheck = func(ctx context.Context) error {
+			return errors.New("injected repository recheck failure")
 		}
 		form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
 		if out := internalRequest(s, http.MethodPost, "/auth/revoke", cookie, form, origin); out.Code != http.StatusUnauthorized {

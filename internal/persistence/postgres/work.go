@@ -48,6 +48,19 @@ func (o *operation) Begin(ctx context.Context) (persistence.Transaction, error) 
 	return &transaction{tx: tx, finish: finish}, nil
 }
 
+func (o *operation) BeginAccountAccess(ctx context.Context) (persistence.AccountAccessTransaction, error) {
+	tx, err := o.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	access, ok := tx.(persistence.AccountAccessTransaction)
+	if !ok {
+		_ = tx.Rollback(ctx)
+		return nil, persistence.ErrUnavailable
+	}
+	return access, nil
+}
+
 func operationContext(operation, caller context.Context) (context.Context, func()) {
 	var ctx context.Context
 	var cancel context.CancelFunc
