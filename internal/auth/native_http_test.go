@@ -14,7 +14,7 @@ import (
 )
 
 func TestProductionOAuthAndRelayBoundariesFailClosedWithoutNativeIssuer(t *testing.T) {
-	server := New(nil, config.Config{}, config.Material{}, Provider{})
+	server := New(Dependencies{}, config.Config{}, config.Material{}, Provider{})
 	handler := server.Handler()
 
 	query := url.Values{"response_type": {"code"}, "client_id": {"android"}, "redirect_uri": {"clipp-relay://oauth/callback"}, "code_challenge_method": {"S256"}, "code_challenge": {strings.Repeat("a", 43)}, "state": {"native-state-123456"}}
@@ -55,7 +55,7 @@ func TestNativeTokenHTTPRejectsClientAssertionsBeforeFosite(t *testing.T) {
 }
 
 func TestNativeOAuthRefusesToServeWithoutGrantInvalidationRecipient(t *testing.T) {
-	server := New(nil, config.Config{}, config.Material{}, Provider{})
+	server := New(Dependencies{}, config.Config{}, config.Material{}, Provider{})
 	if err := server.EnableNativeOAuth(bytes.Repeat([]byte{0x31}, 32)); err != nil {
 		t.Fatal(err)
 	}

@@ -13,8 +13,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
-	"clipp-relay/internal/quota"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
 )
 
 type deletionJournalFixture struct {
@@ -237,7 +236,7 @@ func TestAmbiguousDeletionAdmissionRollbackAllowsFreshLogin(t *testing.T) {
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
 	subject := "rollback-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	owner := loginAs(t, s, d, subject, "rollback@example.test", "")
-	s.SetAccountCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetDeletionAdmissionCommitHookForTest(func(ctx context.Context, tx persistence.DeletionTransaction) error {
 		if err := tx.Rollback(ctx); err != nil {
 			return err
 		}
@@ -247,7 +246,7 @@ func TestAmbiguousDeletionAdmissionRollbackAllowsFreshLogin(t *testing.T) {
 	if got := portalRequest(s, "POST", "/auth/delete", owner, url.Values{"csrf": {csrf}}, c.PortalOrigin); got.Code == http.StatusAccepted {
 		t.Fatal("rolled-back admission accepted")
 	}
-	s.SetAccountCommitHookForTest(nil)
+	s.SetDeletionAdmissionCommitHookForTest(nil)
 	if fresh := loginAs(t, s, d, subject, "rollback@example.test", ""); fresh == nil {
 		t.Fatal("rolled-back admission fenced fresh login")
 	}
@@ -308,7 +307,7 @@ func TestRecordedDeletionRecoversAfterHeadAdvancesAndValidatesCoverage(t *testin
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: zero, Sequence: 0, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, zero)
 	first := true
-	s.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx persistence.DeletionTransaction) error {
 		if first {
 			first = false
 			return errors.New("finalization interrupted")
@@ -418,7 +417,7 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "local-qualified-fixture", CoverageFloor: 0, CoverageHash: "0000000000000000000000000000000000000000000000000000000000000000", Sequence: 0, Hash: "0000000000000000000000000000000000000000000000000000000000000000", Format: 1}, etag: "initial", events: map[string][]byte{}, failHeadOnce: true}
 	s.SetDeletionJournal(j, "local-qualified-fixture", 0, j.head.CoverageHash)
-	s.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx persistence.DeletionTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -493,7 +492,7 @@ func TestOwnerDeletionJournalReconciliationAndFreshPendingAccount(t *testing.T) 
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE id=$1`, newID); err != nil {
 		t.Fatal(err)
 	}
-	accounting := quota.New(db.Pool)
+	accounting := newQuota(db.Pool)
 	defer accounting.Close()
 	result, err := accounting.Eligibility(context.Background(), newID)
 	if err != nil || result.RecordedBytes != 12345 {

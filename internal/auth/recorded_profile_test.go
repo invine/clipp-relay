@@ -32,7 +32,7 @@ func TestObservedOwnerAndAdminShowConfirmedUsageAndHistory(t *testing.T) {
 	if _, err = p.quota.Eligibility(ctx, p.account); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = p.auth.Pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=1000 WHERE id=$1`, p.account); err != nil {
+	if _, err = p.runtime.Pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=1000 WHERE id=$1`, p.account); err != nil {
 		t.Fatal(err)
 	}
 	if err = p.quota.Observe(p.account, 10000); err != nil {

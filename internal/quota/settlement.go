@@ -3,11 +3,10 @@ package quota
 import (
 	"context"
 	"errors"
-	"math"
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
 )
 
 // Settlement identifies one immutable batch of observed traffic. Sequence is
@@ -48,7 +47,7 @@ type settlementState struct {
 
 // SetSettlementHooksForTest controls persistence failures and acknowledgement
 // timing without replacing production composition or PostgreSQL.
-func (q *Quota) SetSettlementHooksForTest(before func(context.Context, pgx.Tx) error, after func(context.Context) error) {
+func (q *Quota) SetSettlementHooksForTest(before func(context.Context, persistence.AccountingTransaction) error, after func(context.Context) error) {
 	q.settlementMu.Lock()
 	q.settlementBefore = before
 	q.settlementAfter = after
@@ -88,7 +87,15 @@ func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUs
 		return result, ErrSettlementConflict
 	}
 	batch.WeekStart = batch.WeekStart.UTC()
-	err = q.runtime.WithUnit(ctx, func(unitCtx context.Context) error {
+	if q.accounting == nil {
+		return result, ErrTemporary
+	}
+	op, startErr := q.accounting.StartSettlement(ctx)
+	if startErr != nil {
+		return result, ErrTemporary
+	}
+	defer op.Close()
+	err = func(unitCtx context.Context) error {
 		key := settlementKey{batch.AccountID, batch.WeekStart}
 		s := q.acquireSettlement(key)
 		defer q.releaseSettlement(key, s)
@@ -104,7 +111,7 @@ func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUs
 			return ErrSettlementUnresolved
 		}
 		var workErr error
-		result, workErr = q.settle(unitCtx, batch)
+		result, workErr = q.settle(op, batch)
 		if errors.Is(workErr, ErrSettlementUncertain) {
 			copy := batch
 			s.unresolved = &copy
@@ -112,32 +119,32 @@ func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUs
 			s.unresolved = nil
 		}
 		return workErr
-	})
+	}(op.Context())
 	if err != nil && !errors.Is(err, ErrSettlementConflict) && !errors.Is(err, ErrSettlementUncertain) && !errors.Is(err, ErrSettlementUnresolved) && !errors.Is(err, ErrUsageRetired) {
 		err = ErrTemporary
 	}
 	return result, err
 }
 
-func (q *Quota) settle(ctx context.Context, b Settlement) (RecordedUsage, error) {
-	tx, err := q.runtime.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+func (q *Quota) settle(op persistence.AccountingOperation, b Settlement) (RecordedUsage, error) {
+	ctx := op.Context()
+	tx, err := op.BeginAccounting(ctx)
 	if err != nil {
 		return RecordedUsage{}, ErrTemporary
 	}
 	defer tx.Rollback(ctx)
-	var deleted *time.Time
 	if q.beforeLock != nil {
 		q.beforeLock()
 	}
-	err = tx.QueryRow(ctx, `SELECT deleted_at FROM public.accounts WHERE id=$1 FOR UPDATE`, b.AccountID).Scan(&deleted)
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && deleted != nil {
+	account, err := tx.LockSettlementAccount(ctx, b.AccountID)
+	if errors.Is(err, persistence.ErrUsageRetired) || err == nil && account.Deleted {
 		return RecordedUsage{}, ErrUsageRetired
 	}
 	if err != nil {
 		return RecordedUsage{}, ErrTemporary
 	}
-	var now time.Time
-	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+	now, err := tx.DatabaseTime(ctx)
+	if err != nil {
 		return RecordedUsage{}, ErrTemporary
 	}
 	now = q.dbTime(now)
@@ -148,26 +155,9 @@ func (q *Quota) settle(ctx context.Context, b Settlement) (RecordedUsage, error)
 	if b.WeekStart.Before(current.AddDate(0, 0, -84)) {
 		return RecordedUsage{}, ErrUsageRetired
 	}
-	result := RecordedUsage{WeekStart: b.WeekStart}
-	err = tx.QueryRow(ctx, `SELECT recorded_bytes,sequence,COALESCE(latest_operation_id::text,''),latest_delta_bytes FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=$2`, b.AccountID, b.WeekStart).Scan(&result.RecordedBytes, &result.Sequence, &result.OperationID, &result.DeltaBytes)
-	absent := errors.Is(err, pgx.ErrNoRows)
-	if err != nil && !absent {
-		return RecordedUsage{}, ErrTemporary
-	}
-	if result.OperationID == b.OperationID {
-		if result.Sequence != b.Sequence || result.DeltaBytes != b.DeltaBytes {
-			return result, ErrSettlementConflict
-		}
-		// The locked row confirms the prior commit; no fresh commit is needed.
-		return result, nil
-	}
-	if result.Sequence == math.MaxInt64 || b.Sequence != result.Sequence+1 || b.DeltaBytes > math.MaxInt64-result.RecordedBytes {
-		return result, ErrSettlementConflict
-	}
-	if absent {
-		_, err = tx.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) VALUES($1,$2,$3,$4,$5,$3)`, b.AccountID, b.WeekStart, b.DeltaBytes, b.Sequence, b.OperationID)
-	} else {
-		_, err = tx.Exec(ctx, `UPDATE public.weekly_relay_usage SET recorded_bytes=recorded_bytes+$3,sequence=$4,latest_operation_id=$5,latest_delta_bytes=$3 WHERE account_id=$1 AND week_start=$2`, b.AccountID, b.WeekStart, b.DeltaBytes, b.Sequence, b.OperationID)
+	result, err := tx.SettleUsage(ctx, persistence.UsageSettlement{AccountID: b.AccountID, WeekStart: b.WeekStart, OperationID: b.OperationID, DeltaBytes: b.DeltaBytes, Sequence: b.Sequence})
+	if errors.Is(err, persistence.ErrConflict) {
+		return resultFromPersistence(result), ErrSettlementConflict
 	}
 	if err != nil {
 		return RecordedUsage{}, ErrTemporary
@@ -186,10 +176,13 @@ func (q *Quota) settle(ctx context.Context, b Settlement) (RecordedUsage, error)
 		}
 	}
 	if err = tx.Commit(ctx); err != nil {
-		if errors.Is(err, pgx.ErrTxCommitRollback) {
+		if errors.Is(err, persistence.ErrKnownRollback) {
 			return RecordedUsage{}, ErrTemporary
 		}
-		return RecordedUsage{}, ErrSettlementUncertain
+		if errors.Is(err, persistence.ErrUncertainCommit) {
+			return RecordedUsage{}, ErrSettlementUncertain
+		}
+		return RecordedUsage{}, ErrTemporary
 	}
 	if after != nil {
 		if err = after(ctx); err != nil {
@@ -204,11 +197,7 @@ func (q *Quota) settle(ctx context.Context, b Settlement) (RecordedUsage, error)
 	if ctx.Err() != nil {
 		return RecordedUsage{}, ErrSettlementUncertain
 	}
-	result.RecordedBytes += b.DeltaBytes
-	result.Sequence = b.Sequence
-	result.OperationID = b.OperationID
-	result.DeltaBytes = b.DeltaBytes
-	return result, nil
+	return resultFromPersistence(result), nil
 }
 
 // RecordedUsage reads authoritative durable state without reconstructing lost
@@ -218,16 +207,18 @@ func (q *Quota) RecordedUsage(ctx context.Context, id string, week time.Time) (R
 	if !week.Equal(weekStart(week)) {
 		return result, ErrUsageRetired
 	}
-	var now time.Time
-	var deleted *time.Time
-	err := q.runtime.QueryRow(ctx, `SELECT a.deleted_at,clock_timestamp(),COALESCE(u.recorded_bytes,0),COALESCE(u.sequence,0),COALESCE(u.latest_operation_id::text,''),COALESCE(u.latest_delta_bytes,0) FROM public.accounts a LEFT JOIN public.weekly_relay_usage u ON u.account_id=a.id AND u.week_start=$2 WHERE a.id=$1`, id, week).Scan(&deleted, &now, &result.RecordedBytes, &result.Sequence, &result.OperationID, &result.DeltaBytes)
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && deleted != nil {
+	if q.accounting == nil {
+		return RecordedUsage{}, ErrTemporary
+	}
+	stored, err := q.accounting.ReadRecordedUsage(ctx, id, week)
+	if errors.Is(err, persistence.ErrUsageRetired) {
 		return RecordedUsage{}, ErrUsageRetired
 	}
 	if err != nil {
 		return RecordedUsage{}, ErrTemporary
 	}
-	current := weekStart(q.dbTime(now))
+	result = resultFromPersistence(stored)
+	current := weekStart(q.dbTime(stored.DatabaseNow))
 	if week.After(current) {
 		return RecordedUsage{}, ErrTemporary
 	}
@@ -235,4 +226,8 @@ func (q *Quota) RecordedUsage(ctx context.Context, id string, week time.Time) (R
 		return RecordedUsage{}, ErrUsageRetired
 	}
 	return result, nil
+}
+
+func resultFromPersistence(stored persistence.RecordedUsage) RecordedUsage {
+	return RecordedUsage{RecordedBytes: stored.RecordedBytes, Sequence: stored.Sequence, OperationID: stored.OperationID, DeltaBytes: stored.DeltaBytes, WeekStart: stored.WeekStart}
 }

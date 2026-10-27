@@ -15,9 +15,19 @@ import (
 	"time"
 
 	"clipp-relay/internal/config"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/portal"
-	"github.com/jackc/pgx/v5"
 )
+
+func beginAdminAccessTransaction(op persistence.Operation) (persistence.AccountAccessTransaction, error) {
+	access, ok := any(op).(interface {
+		BeginAccountAccess(context.Context) (persistence.AccountAccessTransaction, error)
+	})
+	if !ok {
+		return nil, persistence.ErrUnavailable
+	}
+	return access.BeginAccountAccess(op.Context())
+}
 
 var idPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -103,16 +113,23 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 	if s.beforeAdminDetailsRead != nil {
 		s.beforeAdminDetailsRead()
 	}
-	var email string
-	var verified bool
-	var hd *string
-	var authenticated time.Time
-	err = s.db.QueryRow(r.Context(), `SELECT a.email,a.email_verified,a.hosted_domain,ps.google_authenticated_at
-FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id
-WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation
-AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, id, s.sessionDigest(r, version), version).Scan(&email, &verified, &hd, &authenticated)
+	op, err := s.persistence.Start(r.Context())
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return actor, false
+	}
+	defer op.Close()
+	authTx, err := beginAdminAccessTransaction(op)
+	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return actor, false
+	}
+	adminSession, err := authTx.AdministratorSession(op.Context(), id, s.sessionDigest(r, version), version)
+	_ = authTx.Rollback(op.Context())
+	if err != nil {
+		if errors.Is(err, persistence.ErrInvalidCredential) {
 			markDiagnostic(r, "refused", "not_authorized")
 			fail(w, 401)
 		} else {
@@ -121,13 +138,13 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 		}
 		return actor, false
 	}
-	if !policy.Allows(email, verified, deref(hd)) {
+	if !policy.Allows(adminSession.Email, adminSession.Verified, deref(adminSession.HostedDomain)) {
 		markDiagnostic(r, "refused", "not_authorized")
 		fail(w, 403)
 		return actor, false
 	}
 	if mutation {
-		if time.Since(authenticated) > 10*time.Minute || authenticated.After(time.Now().Add(time.Minute)) {
+		if !adminSession.Recent {
 			markDiagnostic(r, "refused", "recent_auth_required")
 			fail(w, 401)
 			return actor, false
@@ -153,27 +170,18 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 			return actor, false
 		}
 	}
-	actor = adminIdentity{id: id, email: strings.ToLower(strings.TrimSpace(email)), csrf: csrf, revision: policy.Revision, version: version}
+	actor = adminIdentity{id: id, email: strings.ToLower(strings.TrimSpace(adminSession.Email)), csrf: csrf, revision: policy.Revision, version: version}
 	return actor, true
 }
 
 // Called after ordered account locks, so wall time and metadata cannot be
 // evaluated before a competing administrator or session operation completes.
-func (s *Server) recheckAdministrator(w http.ResponseWriter, tx pgx.Tx, r *http.Request, actor *adminIdentity) int {
+func (s *Server) recheckAdministrator(w http.ResponseWriter, tx persistence.AccountAccessTransaction, r *http.Request, actor *adminIdentity) int {
 	if s.beforeAdminRecheck != nil {
 		s.beforeAdminRecheck()
 	}
-	var email string
-	var verified, recent bool
-	var hd *string
-	err := tx.QueryRow(r.Context(), `SELECT a.email,a.email_verified,a.hosted_domain,
-ps.google_authenticated_at >= clock_timestamp()-interval '10 minutes'
-AND ps.google_authenticated_at <= clock_timestamp()+interval '1 minute'
-FROM public.accounts a JOIN public.portal_sessions ps ON ps.account_id=a.id
-WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3
-AND ps.credential_generation=a.credential_generation
-AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()`, actor.id, s.sessionDigest(r, actor.version), actor.version).Scan(&email, &verified, &hd, &recent)
-	if err == pgx.ErrNoRows {
+	session, err := tx.AdministratorSession(r.Context(), actor.id, s.sessionDigest(r, actor.version), actor.version)
+	if errors.Is(err, persistence.ErrInvalidCredential) {
 		markDiagnostic(r, "refused", "not_authorized")
 		return 401
 	}
@@ -181,7 +189,7 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 		markDiagnostic(r, "failed", "database_unavailable")
 		return 503
 	}
-	if !recent {
+	if !session.Recent {
 		markDiagnostic(r, "refused", "recent_auth_required")
 		return 401
 	}
@@ -192,19 +200,18 @@ AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timest
 		return 403
 	}
 	w.Header().Set("X-Admin-Policy-Revision", strconv.FormatUint(policy.Revision, 10))
-	if !policy.Allows(email, verified, deref(hd)) {
+	if !policy.Allows(session.Email, session.Verified, deref(session.HostedDomain)) {
 		markDiagnostic(r, "refused", "not_authorized")
 		return 403
 	}
-	actor.email = strings.ToLower(strings.TrimSpace(email))
+	actor.email = strings.ToLower(strings.TrimSpace(session.Email))
 	actor.revision = policy.Revision
 	return 0
 }
 
-func (s *Server) lockActor(w http.ResponseWriter, tx pgx.Tx, r *http.Request, actor *adminIdentity) int {
-	var id string
-	err := tx.QueryRow(r.Context(), `SELECT id FROM public.accounts WHERE id=$1 FOR UPDATE`, actor.id).Scan(&id)
-	if err == pgx.ErrNoRows {
+func (s *Server) lockActor(w http.ResponseWriter, tx persistence.AccountAccessTransaction, r *http.Request, actor *adminIdentity) int {
+	err := tx.LockAdministratorAccounts(r.Context(), actor.id, actor.id)
+	if errors.Is(err, persistence.ErrNotFound) {
 		markDiagnostic(r, "refused", "not_authorized")
 		return 401
 	}
@@ -284,10 +291,18 @@ func planRequestDigest(actorID, name, reason string, bytes, sessions int64) [32]
 }
 
 func (s *Server) planCreateCommitted(ctx context.Context, id string, digest [32]byte) bool {
-	var stored []byte
-	var audited bool
-	err := s.db.QueryRow(ctx, `SELECT p.create_request_digest, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.plan_id=p.id AND e.event='plan_created') FROM public.quota_plans p WHERE p.id=$1`, id).Scan(&stored, &audited)
-	return err == nil && audited && subtle.ConstantTimeCompare(stored, digest[:]) == 1
+	op, err := s.persistence.Start(ctx)
+	if err != nil {
+		return false
+	}
+	defer op.Close()
+	tx, err := beginAdminAccessTransaction(op)
+	if err != nil {
+		return false
+	}
+	defer tx.Rollback(op.Context())
+	committed, err := tx.PlanCreateStatus(op.Context(), id, digest[:])
+	return err == nil && committed
 }
 
 func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
@@ -317,64 +332,23 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	rows, err := s.db.Query(r.Context(), `SELECT status,count(*) FROM public.accounts WHERE deletion_started_at IS NULL GROUP BY status`)
+	views, err := s.readViews.AdminHome(r.Context(), accountAfter, planAfter, limit)
 	if err != nil {
 		fail(w, 503)
 		return
 	}
-	for rows.Next() {
-		var state string
-		var count int64
-		if rows.Scan(&state, &count) != nil {
-			rows.Close()
-			fail(w, 503)
-			return
-		}
-		switch state {
-		case "Pending":
-			data.Pending = count
-		case "Active":
-			data.Active = count
-		case "Suspended":
-			data.Suspended = count
-		case "Denied":
-			data.Denied = count
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	rows, err = s.db.Query(r.Context(), `SELECT id,email,status,COALESCE(plan_id::text,''),COALESCE(weekly_bytes_override::text,''),COALESCE(sessions_override::text,''),revision,recovery_review_hold FROM public.accounts WHERE deletion_started_at IS NULL AND id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, accountAfter, limit+1)
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	for rows.Next() {
-		var x adminAccountRow
-		if rows.Scan(&x.ID, &x.Email, &x.Status, &x.PlanID, &x.WeeklyOverride, &x.SessionOverride, &x.Revision, &x.RecoveryHeld) != nil {
-			rows.Close()
-			fail(w, 503)
-			return
-		}
+	data.Pending, data.Active, data.Suspended, data.Denied = views.Counts.Pending, views.Counts.Active, views.Counts.Suspended, views.Counts.Denied
+	for _, x := range views.Accounts {
 		if len(data.Accounts) == limit {
 			data.NextAccount = data.Accounts[len(data.Accounts)-1].ID
 			break
 		}
-		data.Accounts = append(data.Accounts, x)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		fail(w, 503)
-		return
+		data.Accounts = append(data.Accounts, adminAccountRow{ID: x.ID, Email: x.Email, Status: x.Status, PlanID: x.PlanID, WeeklyOverride: x.WeeklyOverride, SessionOverride: x.SessionOverride, Revision: x.Revision, RecoveryHeld: x.RecoveryHeld})
 	}
 	if data.Selected != "" {
 		selected, readErr := s.adminAccountUsage(r.Context(), data.Selected)
 		err = readErr
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, persistence.ErrNotFound) {
 			fail(w, 404)
 			return
 		}
@@ -384,29 +358,12 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		}
 		data.SelectedAccount = &selected
 	}
-	rows, err = s.db.Query(r.Context(), `SELECT id,name,weekly_bytes,sessions,revision,archived_at IS NOT NULL FROM public.quota_plans WHERE id > COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, planAfter, limit+1)
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	for rows.Next() {
-		var x adminPlanRow
-		if rows.Scan(&x.ID, &x.Name, &x.Bytes, &x.Sessions, &x.Revision, &x.Archived) != nil {
-			rows.Close()
-			fail(w, 503)
-			return
-		}
+	for _, x := range views.Plans {
 		if len(data.Plans) == limit {
 			data.NextPlan = data.Plans[len(data.Plans)-1].ID
 			break
 		}
-		data.Plans = append(data.Plans, x)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		fail(w, 503)
-		return
+		data.Plans = append(data.Plans, adminPlanRow{ID: x.ID, Name: x.Name, Bytes: x.Bytes, Sessions: x.Sessions, Revision: x.Revision, Archived: x.Archived})
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Values are bounded in the schema, and both lists are capped at 100 rows.
@@ -473,9 +430,24 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if spec.security {
-		var subject string
-		if e := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1 AND deletion_started_at IS NULL`, target).Scan(&subject); e != nil {
-			if errors.Is(e, pgx.ErrNoRows) {
+		preflight, e := s.persistence.Start(r.Context())
+		if e != nil {
+			markDiagnostic(r, "failed", "database_unavailable")
+			fail(w, 503)
+			return
+		}
+		preflightTx, e := beginAdminAccessTransaction(preflight)
+		if e != nil {
+			preflight.Close()
+			markDiagnostic(r, "failed", "database_unavailable")
+			fail(w, 503)
+			return
+		}
+		state, e := preflightTx.AccountAccessState(preflight.Context(), target, false)
+		_ = preflightTx.Rollback(preflight.Context())
+		preflight.Close()
+		if e != nil {
+			if errors.Is(e, persistence.ErrNotFound) {
 				markDiagnostic(r, "refused", "invalid_request")
 			} else {
 				markDiagnostic(r, "failed", "database_unavailable")
@@ -483,9 +455,14 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 			fail(w, 503)
 			return
 		}
-		securitySubject = subject
+		if state.Deleting {
+			markDiagnostic(r, "refused", "invalid_request")
+			fail(w, 503)
+			return
+		}
+		securitySubject = state.Subject
 		guardEntered := false
-		guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
+		guardErr := s.withIdentityGuard(r.Context(), securitySubject, func(unitCtx context.Context) error {
 			guardEntered = true
 			if accountGuardErr := s.withAccountGuards(unitCtx, []string{actor.id, target}, update); accountGuardErr != nil {
 				markGuardDiagnostic(r, accountGuardErr)
@@ -519,23 +496,24 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action string, spec accountActionSpec, plan, subject string, applied **AccountChange, uncertain *bool) {
 	ctx := r.Context()
-	tx, e := s.db.Begin(ctx)
-	if e != nil {
+	op, err := s.persistence.Start(ctx)
+	if err != nil {
 		fail(w, 503)
 		return
 	}
-	defer tx.Rollback(ctx)
-	// Lock actor and target in one stable order to avoid cross-admin deadlocks.
-	rows, e := tx.Query(ctx, `SELECT id FROM public.accounts WHERE id=$1 OR id=$2 ORDER BY id FOR UPDATE`, actor.id, target)
-	if e != nil {
+	defer op.Close()
+	tx, err := beginAdminAccessTransaction(op)
+	if err != nil {
 		fail(w, 503)
 		return
 	}
-	for rows.Next() {
+	defer tx.Rollback(op.Context())
+	err = tx.LockAdministratorAccounts(op.Context(), actor.id, target)
+	if errors.Is(err, persistence.ErrNotFound) {
+		fail(w, 404)
+		return
 	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
+	if err != nil {
 		fail(w, 503)
 		return
 	}
@@ -543,156 +521,76 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 		fail(w, status)
 		return
 	}
-	var status string
-	var deleting bool
-	var actual int64
-	var oldGeneration int64
-	e = tx.QueryRow(ctx, `SELECT status,revision,deletion_started_at IS NOT NULL,credential_generation FROM public.accounts WHERE id=$1`, target).Scan(&status, &actual, &deleting, &oldGeneration)
-	if e == pgx.ErrNoRows {
+	state, err := tx.AccountAccessState(op.Context(), target, false)
+	if errors.Is(err, persistence.ErrNotFound) {
 		fail(w, 404)
 		return
 	}
-	if e != nil {
+	if err != nil {
 		fail(w, 503)
 		return
 	}
-	if deleting || actual != expected {
+	if state.Deleting || state.Revision != expected || !spec.states[state.Status] {
 		markDiagnostic(r, "refused", "revision_conflict")
 		fail(w, 409)
 		return
 	}
-	if !spec.states[status] {
-		markDiagnostic(r, "refused", "revision_conflict")
-		fail(w, 409)
-		return
-	}
-	var oldPlan *string
-	var oldBytes *int64
-	var oldSessions *int
-	if e = tx.QueryRow(ctx, `SELECT plan_id::text,weekly_bytes_override,sessions_override FROM public.accounts WHERE id=$1`, target).Scan(&oldPlan, &oldBytes, &oldSessions); e != nil {
-		fail(w, 503)
-		return
-	}
-	var weeklyBytes int64
-	var sessionLimit int
-	if action == "approve" || action == "assign" {
-		var archived bool
-		e = tx.QueryRow(ctx, `SELECT archived_at IS NOT NULL,weekly_bytes,sessions FROM public.quota_plans WHERE id=$1 FOR UPDATE`, plan).Scan(&archived, &weeklyBytes, &sessionLimit)
-		if e == pgx.ErrNoRows || archived {
-			markDiagnostic(r, "refused", "revision_conflict")
-			fail(w, 409)
-			return
-		}
-		if e != nil {
-			fail(w, 503)
-			return
-		}
-	} else if oldPlan != nil {
-		e = tx.QueryRow(ctx, `SELECT weekly_bytes,sessions FROM public.quota_plans WHERE id=$1`, *oldPlan).Scan(&weeklyBytes, &sessionLimit)
-		if e != nil {
-			fail(w, 503)
-			return
-		}
-	}
-	if oldBytes != nil {
-		weeklyBytes = *oldBytes
-	}
-	if oldSessions != nil {
-		sessionLimit = *oldSessions
-	}
-	newStatus := status
-	if spec.nextStatus != "" {
-		newStatus = spec.nextStatus
-	}
-	event, security := spec.event, spec.security
+	weekly, sessions := state.WeeklyOverride, state.SessionOverride
 	if action == "override" {
-		if values, present := r.PostForm["weekly_bytes_override"]; present && len(values) == 1 && values[0] != "" {
-			var n int64
-			n, e = parseQuotaBytes(values[0], r.PostForm.Get("weekly_bytes_override_unit"))
-			if e != nil || n < 0 {
-				fail(w, 400)
-				return
+		if values, present := r.PostForm["weekly_bytes_override"]; present {
+			if len(values) == 1 && values[0] != "" {
+				n, e := parseQuotaBytes(values[0], r.PostForm.Get("weekly_bytes_override_unit"))
+				if e != nil || n < 0 {
+					fail(w, 400)
+					return
+				}
+				weekly = &n
+			} else {
+				weekly = nil
 			}
-			oldBytes, weeklyBytes = &n, n
-		} else if present {
-			oldBytes = nil
 		}
-		if values, present := r.PostForm["sessions_override"]; present && len(values) == 1 && values[0] != "" {
-			var n int64
-			n, e = strconv.ParseInt(values[0], 10, 32)
-			if e != nil || n < 0 {
-				fail(w, 400)
-				return
+		if values, present := r.PostForm["sessions_override"]; present {
+			if len(values) == 1 && values[0] != "" {
+				n, e := strconv.ParseInt(values[0], 10, 32)
+				if e != nil || n < 0 {
+					fail(w, 400)
+					return
+				}
+				v := int(n)
+				sessions = &v
+			} else {
+				sessions = nil
 			}
-			v := int(n)
-			oldSessions, sessionLimit = &v, v
-		} else if present {
-			oldSessions = nil
 		}
 	}
-	if action == "recovery-review" {
-		tag, err := tx.Exec(ctx, `UPDATE public.accounts SET recovery_review_hold=false,revision=revision+1 WHERE id=$1 AND recovery_review_hold`, target)
-		e = err
-		if e == nil && tag.RowsAffected() != 1 {
-			fail(w, 409)
-			return
-		}
-	} else if action == "approve" || action == "assign" {
-		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,plan_id=$3,revision=revision+1 WHERE id=$1`, target, newStatus, plan)
-		if e == nil {
-			_, e = tx.Exec(ctx, `UPDATE public.quota_plans SET first_assigned_at=COALESCE(first_assigned_at,clock_timestamp()) WHERE id=$1`, plan)
-		}
-	} else if action == "override" {
-		_, e = tx.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=$2,sessions_override=$3,revision=revision+1 WHERE id=$1`, target, oldBytes, oldSessions)
-		if e == nil && (oldBytes == nil || oldSessions == nil) {
-			e = tx.QueryRow(ctx, `SELECT COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1`, target).Scan(&weeklyBytes, &sessionLimit)
-		}
-	} else if security {
-		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,revision=revision+1 WHERE id=$1`, target, newStatus)
-		if e == nil {
-			e = revokeAccountCredentials(ctx, tx, target)
-		}
-	} else {
-		_, e = tx.Exec(ctx, `UPDATE public.accounts SET status=$2,revision=revision+1 WHERE id=$1`, target, newStatus)
-	}
-	if e != nil {
+	auditID, err := uuid()
+	if err != nil {
 		fail(w, 503)
 		return
 	}
-	auditID, e := uuid()
-	if e != nil {
+	result, err := tx.ApplyAdminAccountMutation(op.Context(), persistence.AdminAccountMutation{AccountID: target, PlanID: plan, Action: action, NextStatus: spec.nextStatus, Event: spec.event, Reason: r.PostForm.Get("reason"), ActorEmail: actor.email, ExpectedRevision: expected, Security: spec.security, WeeklyOverride: weekly, SessionOverride: sessions, AuditID: auditID})
+	if errors.Is(err, persistence.ErrConflict) {
+		markDiagnostic(r, "refused", "revision_conflict")
+		fail(w, 409)
+		return
+	}
+	if err != nil {
 		fail(w, 503)
 		return
 	}
-	var auditPlan any
-	if action == "approve" || action == "assign" {
-		auditPlan = plan
-	}
-	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id,plan_id,reason,actor_email) VALUES($1,clock_timestamp(),$2,$3,$4,$5,$6)`, auditID, event, target, auditPlan, r.PostForm.Get("reason"), actor.email)
-	if e != nil {
-		fail(w, 503)
-		return
-	}
-	var commitErr error
-	if s.commitAccount != nil {
-		commitErr = s.commitAccount(ctx, tx)
-	} else {
-		commitErr = tx.Commit(ctx)
-	}
-	if security {
+	if spec.security {
 		s.installIdentityFence(subject)
 	}
-	if commitErr != nil {
-		newGeneration := oldGeneration
-		if security {
-			newGeneration++
-		}
-		s.uncertainAccounts.Store(target, uncertainMutation{revision: actual + 1, generation: newGeneration, status: newStatus})
+	var commitErr error
+	if s.commitAccountAccess != nil {
+		commitErr = s.commitAccountAccess(op.Context(), tx)
+	} else {
+		commitErr = tx.Commit(op.Context())
 	}
-	// Auth invalidates under account protection after SQL completion, then runs
-	// the returned connection-close I/O after releasing the logical guards.
-	closeAll := security || commitErr != nil
-	*applied = &AccountChange{AccountID: target, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: closeAll}
+	if commitErr != nil {
+		s.uncertainAccounts.Store(target, uncertainMutation{revision: result.NewRevision, generation: result.NewGeneration, status: result.NewStatus})
+	}
+	*applied = &AccountChange{AccountID: target, WeeklyBytes: result.WeeklyBytes, SessionLimit: result.Sessions, CloseAll: spec.security || commitErr != nil}
 	*uncertain = commitErr != nil
 }
 
@@ -717,55 +615,50 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, e := s.db.Begin(ctx)
+	op, e := s.persistence.Start(ctx)
 	if e != nil {
 		fail(w, 503)
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer op.Close()
+	tx, e := beginAdminAccessTransaction(op)
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	defer tx.Rollback(op.Context())
 	if status := s.lockActor(w, tx, r, &actor); status != 0 {
 		fail(w, status)
 		return
 	}
 	digest := planRequestDigest(actor.id, name, r.PostForm.Get("reason"), bytes, sessions)
-	tag, e := tx.Exec(ctx, `INSERT INTO public.quota_plans(id,name,weekly_bytes,sessions,create_request_digest) VALUES($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`, id, name, bytes, sessions, digest[:])
+	auditID, e := uuid()
 	if e != nil {
 		fail(w, 503)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		var stored []byte
-		var audited bool
-		if e = tx.QueryRow(ctx, `SELECT p.create_request_digest, EXISTS(SELECT 1 FROM public.audit_events e WHERE e.plan_id=p.id AND e.event='plan_created') FROM public.quota_plans p WHERE p.id=$1`, id).Scan(&stored, &audited); e != nil {
-			fail(w, 503)
-			return
-		}
-		if subtle.ConstantTimeCompare(stored, digest[:]) != 1 {
+	created, e := tx.CreateQuotaPlan(op.Context(), persistence.PlanCreate{ID: id, Name: name, WeeklyBytes: bytes, Sessions: int(sessions), Digest: digest[:], AuditID: auditID, ActorEmail: actor.email, Reason: r.PostForm.Get("reason")})
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	if !created.Created {
+		if !created.Matching {
 			markDiagnostic(r, "refused", "revision_conflict")
 			fail(w, 409)
 			return
 		}
-		if !audited {
+		if !created.Audited {
 			fail(w, 503)
 			return
 		}
 		http.Redirect(w, r, "/admin", http.StatusSeeOther)
 		return
 	}
-	auditID, e := uuid()
-	if e != nil {
-		fail(w, 503)
-		return
-	}
-	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,plan_id,reason,actor_email) VALUES($1,clock_timestamp(),'plan_created',$2,$3,$4)`, auditID, id, r.PostForm.Get("reason"), actor.email)
-	if e != nil {
-		fail(w, 503)
-		return
-	}
-	if s.commitPlan != nil {
-		e = s.commitPlan(ctx, tx)
+	if s.commitPlanAccess != nil {
+		e = s.commitPlanAccess(op.Context(), tx)
 	} else {
-		e = tx.Commit(ctx)
+		e = tx.Commit(op.Context())
 	}
 	if e != nil {
 		// The request may have timed out after PostgreSQL committed. A separate,
@@ -797,35 +690,20 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, e := s.db.Begin(ctx)
+	op, e := s.persistence.Start(ctx)
 	if e != nil {
 		fail(w, 503)
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer op.Close()
+	tx, e := beginAdminAccessTransaction(op)
+	if e != nil {
+		fail(w, 503)
+		return
+	}
+	defer tx.Rollback(op.Context())
 	if status := s.lockActor(w, tx, r, &actor); status != 0 {
 		fail(w, status)
-		return
-	}
-	var actual int64
-	var archived bool
-	e = tx.QueryRow(ctx, `SELECT revision,archived_at IS NOT NULL FROM public.quota_plans WHERE id=$1 FOR UPDATE`, id).Scan(&actual, &archived)
-	if e == pgx.ErrNoRows {
-		fail(w, 404)
-		return
-	}
-	if e != nil {
-		fail(w, 503)
-		return
-	}
-	if actual != expected || archived {
-		markDiagnostic(r, "refused", "revision_conflict")
-		fail(w, 409)
-		return
-	}
-	_, e = tx.Exec(ctx, `UPDATE public.quota_plans SET archived_at=clock_timestamp(),revision=revision+1 WHERE id=$1`, id)
-	if e != nil {
-		fail(w, 503)
 		return
 	}
 	auditID, e := uuid()
@@ -833,12 +711,21 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,plan_id,reason,actor_email) VALUES($1,clock_timestamp(),'plan_archived',$2,$3,$4)`, auditID, id, r.PostForm.Get("reason"), actor.email)
+	e = tx.ArchiveQuotaPlan(op.Context(), persistence.PlanArchive{ID: id, ExpectedRevision: expected, AuditID: auditID, ActorEmail: actor.email, Reason: r.PostForm.Get("reason")})
+	if errors.Is(e, persistence.ErrConflict) {
+		markDiagnostic(r, "refused", "revision_conflict")
+		fail(w, 409)
+		return
+	}
+	if errors.Is(e, persistence.ErrNotFound) {
+		fail(w, 404)
+		return
+	}
 	if e != nil {
 		fail(w, 503)
 		return
 	}
-	if tx.Commit(ctx) != nil {
+	if tx.Commit(op.Context()) != nil {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return

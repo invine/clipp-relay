@@ -18,7 +18,7 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/diagnostic"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
 )
 
 func TestCredentialRefusalsHaveIndependentSafeRequestDiagnostics(t *testing.T) {
@@ -373,7 +373,7 @@ func TestCodeExchangeLostCommitAcknowledgmentIsUncertain(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := authorizeClient(t, s, session, "android", c.PublicClients.AndroidRedirect)
-	s.SetCredentialCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetCredentialCommitHookForTest(func(ctx context.Context, tx persistence.Transaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -422,7 +422,7 @@ func TestPortalSessionLostCommitAcknowledgmentIsUncertain(t *testing.T) {
 	provider.mu.Lock()
 	provider.nonce = strings.Split(state, "|")[1]
 	provider.mu.Unlock()
-	s.SetPortalCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetPortalCommitHookForTest(func(ctx context.Context, tx persistence.Transaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}

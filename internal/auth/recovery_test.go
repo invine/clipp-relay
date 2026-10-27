@@ -3,6 +3,7 @@ package auth_test
 import (
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -10,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5"
 	"net/http"
 	"net/url"
 	"os"
@@ -57,7 +57,7 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	}
 	access, refresh := redeemClient(t, s, "android", c.PublicClients.AndroidRedirect, authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect))
 	oldCode := authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect)
-	q := quota.New(db.Pool)
+	q := newQuota(db.Pool)
 	defer q.Close()
 	op, _ := quota.NewOperationID()
 	if _, err := db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,12345,1,$2,12345)`, id, op); err != nil {
@@ -68,7 +68,7 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	s.SetDeletionJournal(j, "recovery-fixture", 0, zero)
 	run, _ := quota.NewOperationID()
 	request := auth.RecoveryRequest{RunID: run, Source: "isolated-backup", Target: c.Database.Name}
-	s.SetRecoveryCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetRecoveryCommitHookForTest(func(ctx context.Context, tx persistence.RecoveryTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}

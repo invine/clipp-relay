@@ -19,12 +19,10 @@ import (
 
 	"clipp-relay/internal/auth/issuer"
 	"clipp-relay/internal/config"
-	"clipp-relay/internal/database"
 	"clipp-relay/internal/diagnostic"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/portal"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/oauth2"
 )
 
@@ -41,8 +39,8 @@ type Provider struct {
 // SetAccountCommitHookForTest injects an account-mutation commit result so
 // integration tests can exercise a lost acknowledgment after PostgreSQL commits.
 // Serving code leaves this unset.
-func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
-	s.commitAccount = commit
+func (s *Server) SetAccountCommitHookForTest(commit func(context.Context, persistence.AccountAccessTransaction) error) {
+	s.commitAccountAccess = commit
 }
 
 // SetRelayCredentialHookForTest controls the gap after a credential observation
@@ -51,13 +49,20 @@ func (s *Server) SetRelayCredentialHookForTest(hook func()) { s.relayCredentialH
 
 // SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
 // Production leaves this unset.
-func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
-	s.commitCredential = commit
+func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
+	s.commitRefresh = commit
+	s.commitAuthorization = commit
+}
+
+// SetAuthorizationCommitHookForTest injects storage-neutral commit outcomes for
+// native authorization tests. Production leaves this unset.
+func (s *Server) SetAuthorizationCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
+	s.commitAuthorization = commit
 }
 
 // SetPortalCommitHookForTest injects a lost portal-session commit acknowledgment.
 // Production leaves this unset.
-func (s *Server) SetPortalCommitHookForTest(commit func(context.Context, pgx.Tx) error) {
+func (s *Server) SetPortalCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
 	s.commitPortal = commit
 }
 
@@ -68,8 +73,11 @@ func Google() Provider {
 type Server struct {
 	diagnostics                        *diagnostic.Logger
 	transitions                        *diagnostic.Transitions
-	Pool                               *pgxpool.Pool
-	db                                 *database.Runtime
+	persistence                        persistence.Work
+	deletions                          persistence.DeletionRepository
+	recovery                           persistence.RecoveryRepository
+	readViews                          persistence.ReadViews
+	maintenance                        persistence.Maintenance
 	Origin, ClientID, ClientSecret     string
 	AndroidRedirect, ExtensionRedirect string
 	AdminAllowlistFile                 string
@@ -97,15 +105,18 @@ type Server struct {
 	beforeAdminRecheck                 func()
 	beforeOwnerSubjectRead             func()
 	beforeAccountActionGuard           func()
-	beforeOwnerRecheck                 func(context.Context, pgx.Tx)
-	commitPlan                         func(context.Context, pgx.Tx) error
-	commitAccount                      func(context.Context, pgx.Tx) error
+	beforeOwnerDeletionRecheck         func(context.Context) error
+	beforeOwnerAccessRecheck           func(context.Context) error
+	commitPlanAccess                   func(context.Context, persistence.AccountAccessTransaction) error
+	commitAccountAccess                func(context.Context, persistence.AccountAccessTransaction) error
 	relayCredentialHook                func()
-	commitCredential                   func(context.Context, pgx.Tx) error
+	commitAuthorization                func(context.Context, persistence.Transaction) error
+	commitRefresh                      func(context.Context, persistence.Transaction) error
 	nativeIssuer                       *issuer.Issuer
-	commitPortal                       func(context.Context, pgx.Tx) error
-	commitDeletion                     func(context.Context, pgx.Tx) error
-	commitRecovery                     func(context.Context, pgx.Tx) error
+	commitPortal                       func(context.Context, persistence.Transaction) error
+	commitDeletionAdmission            func(context.Context, persistence.DeletionTransaction) error
+	commitDeletionRepository           func(context.Context, persistence.DeletionTransaction) error
+	commitRecovery                     func(context.Context, persistence.RecoveryTransaction) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
 	accountChanged                     func(AccountChange) func()
 	accountInvalidated                 func(string) error
@@ -132,7 +143,14 @@ func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(
 		return errors.New("relay account protection not configured")
 	}
 	executed := false
-	err := s.db.WithUnit(ctx, func(unitCtx context.Context) error {
+	var workErr error
+	op, err := s.persistence.Start(ctx)
+	if err != nil {
+		return err
+	}
+	defer op.Close()
+	unitCtx := op.Context()
+	{
 		ordered := append([]string(nil), ids...)
 		sort.Strings(ordered)
 		guards := make([]chan struct{}, 0, len(ordered))
@@ -161,10 +179,10 @@ func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(
 		}
 		executed = true
 		work(unitCtx)
-		return nil
-	})
-	if err != nil {
-		return err
+		workErr = unitCtx.Err()
+	}
+	if workErr != nil {
+		return workErr
 	}
 	if !executed {
 		return errors.New("account guard work did not execute")
@@ -296,8 +314,7 @@ func (s *Server) deliverAccountInvalidation(accountID string) error {
 func (s *Server) SampleActiveGrants(parent context.Context, accountID string) (CapacitySample, error) {
 	ctx, cancel := context.WithTimeout(parent, 500*time.Millisecond)
 	defer cancel()
-	var count int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants g JOIN public.accounts a ON a.id=g.account_id WHERE g.account_id=$1 AND g.credential_generation=a.credential_generation AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp() AND g.absolute_expires_at>clock_timestamp()`, accountID).Scan(&count)
+	count, err := s.readViews.ActiveLoginGrantCount(ctx, accountID)
 	if err != nil {
 		return CapacitySample{}, err
 	}
@@ -348,14 +365,17 @@ type uncertainMutation struct {
 	status               string
 }
 
-func New(pool *pgxpool.Pool, c config.Config, m config.Material, provider Provider) *Server {
-	return NewWithRuntime(database.NewRuntime(pool), c, m, provider)
+// Dependencies are selected by startup composition. Functional Auth has no
+// PostgreSQL constructor or driver handle.
+type Dependencies struct {
+	Work        persistence.Work
+	Deletions   persistence.DeletionRepository
+	Recovery    persistence.RecoveryRepository
+	ReadViews   persistence.ReadViews
+	Maintenance persistence.Maintenance
 }
 
-// NewWithRuntime joins the Account module to the serving process's shared DB
-// admission budget. The runtime must be the same one passed to Quota.
-func NewWithRuntime(runtime *database.Runtime, c config.Config, m config.Material, provider Provider) *Server {
-	pool := runtime.Pool
+func New(deps Dependencies, c config.Config, m config.Material, provider Provider) *Server {
 	httpSlots := make(chan struct{}, 8)
 	client := newProviderHTTPClient(provider.Client, httpSlots)
 	googleOAuth := &oauth2.Config{
@@ -371,7 +391,7 @@ func NewWithRuntime(runtime *database.Runtime, c config.Config, m config.Materia
 	}
 	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), provider.KeysURL)
 	googleVerifier := oidc.NewVerifier(googleIssuer, keySet, &oidc.Config{ClientID: m.GoogleClientID, SupportedSigningAlgs: []string{"RS256"}})
-	s := &Server{Pool: pool, db: runtime, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: map[[32]byte]identityFence{}, accountRates: map[string]rate{}, cleanupAccountCursors: make([]string, len(cleanupQueries))}
+	s := &Server{persistence: deps.Work, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
@@ -414,11 +434,12 @@ func (s *Server) WithIdentityFence(subject string, work func() error) error {
 }
 
 func (s *Server) withIdentityGuard(ctx context.Context, subject string, work func(context.Context) error) error {
-	unitCtx, releaseUnit, err := s.db.StartUnit(ctx)
+	op, err := s.persistence.Start(ctx)
 	if err != nil {
 		return err
 	}
-	defer releaseUnit()
+	defer op.Close()
+	unitCtx := op.Context()
 	key := s.identityKey(subject)
 	guard := s.identityGuard(key)
 	if !lockIdentity(unitCtx, guard) {
@@ -700,17 +721,13 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := s.identityKey(claims.Subject)
-	ctx, releaseUnit, e := s.db.StartUnit(ctx)
+	op, e := s.persistence.Start(ctx)
 	if e != nil {
 		fail(w, 503)
 		return
 	}
-	unitHeld := true
-	defer func() {
-		if unitHeld {
-			releaseUnit()
-		}
-	}()
+	defer op.Close()
+	ctx = op.Context()
 	guard := s.identityGuard(key)
 	if !lockIdentity(ctx, guard) {
 		fail(w, 503)
@@ -749,32 +766,39 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	tx, e := s.db.Begin(ctx)
+	tx, accountTx, e := beginAccountTransaction(op)
 	if e != nil {
 		fail(w, 503)
 		return
 	}
 	defer tx.Rollback(ctx)
-	var accountID string
-	var generation int64
-	e = tx.QueryRow(ctx, `INSERT INTO public.accounts (id,issuer,subject,email,email_verified,hosted_domain,validated_at,created_at,last_portal_login_at) VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),clock_timestamp(),clock_timestamp()) ON CONFLICT (issuer,subject) DO UPDATE SET email=EXCLUDED.email,email_verified=EXCLUDED.email_verified,hosted_domain=EXCLUDED.hosted_domain,validated_at=clock_timestamp(),last_portal_login_at=clock_timestamp() WHERE accounts.deletion_started_at IS NULL AND (accounts.status<>'Pending' OR accounts.last_portal_login_at>=clock_timestamp()-interval '90 days') RETURNING id,credential_generation`, account, googleIssuer, claims.Subject, claims.Email, claims.EmailVerified, claims.HostedDomain).Scan(&accountID, &generation)
+	registered, e := accountTx.UpsertRelayAccount(ctx, persistence.AccountRegistration{
+		ID: account, Issuer: googleIssuer, Subject: claims.Subject, Email: claims.Email,
+		EmailVerified: claims.EmailVerified, HostedDomain: claims.HostedDomain,
+	})
 	if e != nil {
 		fail(w, 503)
 		return
 	}
+	accountID, generation := registered.ID, registered.Generation
 	if pending, uncertain := s.uncertainAccounts.Load(accountID); uncertain {
+		var deletionOperationID string
+		if expected, ok := pending.(uncertainDeletion); ok {
+			deletionOperationID = expected.operationID
+		}
+		state, stateErr := accountTx.AccountStateAfterUncertain(ctx, accountID, deletionOperationID)
+		if stateErr != nil {
+			fail(w, 503)
+			return
+		}
 		switch expected := pending.(type) {
 		case uncertainMutation:
-			var actualRevision, actualGeneration int64
-			var actualStatus string
-			if tx.QueryRow(ctx, `SELECT revision,credential_generation,status FROM public.accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&actualRevision, &actualGeneration, &actualStatus) != nil || actualRevision != expected.revision || actualGeneration != expected.generation || actualStatus != expected.status {
+			if state.Revision != expected.revision || state.Generation != expected.generation || state.Status != expected.status {
 				fail(w, 503)
 				return
 			}
 		case uncertainDeletion:
-			var started *time.Time
-			var operationCount int
-			if tx.QueryRow(ctx, `SELECT deletion_started_at FROM public.accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&started) != nil || started != nil || tx.QueryRow(ctx, `SELECT count(*) FROM public.deletion_operations WHERE id=$1 AND account_id=$2`, expected.operationID, accountID).Scan(&operationCount) != nil || operationCount != 0 {
+			if state.DeletionStarted || state.DeletionOperationPresent {
 				fail(w, 503)
 				return
 			}
@@ -785,29 +809,22 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		// The account row lock resolves any in-flight admission or mutation.
 		s.uncertainAccounts.Delete(accountID)
 	}
-	if accountID == account {
-		if e = s.importRetainedUsage(ctx, tx, accountID, claims.Subject); e != nil {
+	if registered.Created {
+		if e = s.importRetainedUsage(ctx, accountTx, accountID, claims.Subject); e != nil {
 			fail(w, 503)
 			return
 		}
-		_, e = tx.Exec(ctx, `INSERT INTO public.audit_events (id,occurred_at,event,account_id) VALUES ($1,clock_timestamp(),'account_created',$2)`, auditID, accountID)
-		if e != nil {
+		if e = accountTx.RecordAccountCreated(ctx, auditID, accountID); e != nil {
 			fail(w, 503)
 			return
 		}
 	}
 	csrf := s.csrf(s.CurrentPepper, credential)
-	_, e = tx.Exec(ctx, `INSERT INTO public.portal_sessions (credential_digest,pepper_version,account_id,credential_generation,csrf_digest,google_authenticated_at,created_at,last_used_at,idle_expires_at,absolute_expires_at) VALUES ($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '30 minutes',clock_timestamp()+interval '12 hours')`, s.digest(s.CurrentPepper, "portal-session", credential), s.CurrentPepper, accountID, generation, s.digest(s.CurrentPepper, "csrf-store", csrf))
-	if e != nil {
+	if e = accountTx.CreatePortalSession(ctx, digest32(s.digest(s.CurrentPepper, "portal-session", credential)), s.CurrentPepper, accountID, generation, digest32(s.digest(s.CurrentPepper, "csrf-store", csrf))); e != nil {
 		fail(w, 503)
 		return
 	}
-	if s.commitPortal != nil {
-		e = s.commitPortal(ctx, tx)
-	} else {
-		e = tx.Commit(ctx)
-	}
-	if e != nil {
+	if e = s.commitPortalTransaction(ctx, tx); e != nil {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
@@ -817,8 +834,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	if f.intent != nil {
 		guard.Unlock()
 		guardHeld = false
-		releaseUnit()
-		unitHeld = false
+		op.Close()
 		s.presentConsent(w, r, accountID, credential, s.CurrentPepper, claims.Subject, *f.intent)
 		return
 	}
@@ -928,38 +944,59 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 	if e != nil || len(c.Value) != 43 {
 		return "", 0, "", "", "", errInvalidSession
 	}
-	for version := range s.Peppers {
-		digest := s.digest(version, "portal-session", c.Value)
-		var id, status, email, subject string
-		var generation int64
-		var storedVersion uint64
-		var storedCSRF []byte
-		e = s.db.QueryRow(r.Context(), `SELECT a.id,a.status,a.email,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, digest, version).Scan(&id, &status, &email, &subject, &generation, &storedVersion, &storedCSRF)
-		if e == nil {
-			if _, uncertain := s.uncertainAccounts.Load(id); uncertain {
-				return "", 0, "", "", "", errInvalidSession
-			}
-			if !s.allowAccount(subject) {
-				return "", 0, "", "", "", errRateLimit
-			}
-			token := s.csrf(storedVersion, c.Value)
-			if subtle.ConstantTimeCompare(storedCSRF, s.digest(storedVersion, "csrf-store", token)) != 1 {
-				return "", 0, "", "", "", errors.New("csrf")
-			}
-			var extended bool
-			e = s.db.QueryRow(r.Context(), `UPDATE public.portal_sessions ps SET last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 minutes') WHERE ps.credential_digest=$1 AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp() AND EXISTS (SELECT 1 FROM public.accounts a WHERE a.id=ps.account_id AND a.credential_generation=ps.credential_generation AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')) RETURNING true`, digest).Scan(&extended)
-			if e == pgx.ErrNoRows {
-				return "", 0, "", "", "", errInvalidSession
-			}
-			if e != nil {
-				return "", 0, "", "", "", e
-			}
-			return id, version, status, email, token, nil
-		}
-		if e != pgx.ErrNoRows {
-			return "", 0, "", "", "", e
-		}
+	op, e := s.persistence.Start(r.Context())
+	if e != nil {
+		return "", 0, "", "", "", e
 	}
+	defer op.Close()
+	tx, accountTx, e := beginAccountTransaction(op)
+	if e != nil {
+		return "", 0, "", "", "", e
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = tx.Rollback(op.Context())
+		}
+	}()
+	for version := range s.Peppers {
+		digest := digest32(s.digest(version, "portal-session", c.Value))
+		stored, err := accountTx.PortalSessionForOwner(op.Context(), digest, version)
+		if errors.Is(err, persistence.ErrInvalidCredential) {
+			continue
+		}
+		if err != nil {
+			return "", 0, "", "", "", err
+		}
+		if _, uncertain := s.uncertainAccounts.Load(stored.AccountID); uncertain {
+			return "", 0, "", "", "", errInvalidSession
+		}
+		if !s.allowAccount(stored.Subject) {
+			return "", 0, "", "", "", errRateLimit
+		}
+		token := s.csrf(stored.PepperVersion, c.Value)
+		if subtle.ConstantTimeCompare(stored.CSRFHash, s.digest(stored.PepperVersion, "csrf-store", token)) != 1 {
+			return "", 0, "", "", "", errors.New("csrf")
+		}
+		touched, err := accountTx.TouchPortalSession(op.Context(), digest, version, stored.AccountID, stored.Generation)
+		if err != nil {
+			return "", 0, "", "", "", err
+		}
+		if !touched {
+			return "", 0, "", "", "", errInvalidSession
+		}
+		if err = tx.Commit(op.Context()); err != nil {
+			finished = true
+			return "", 0, "", "", "", err
+		}
+		finished = true
+		return stored.AccountID, version, stored.Status, stored.Email, token, nil
+	}
+	if e = tx.Rollback(op.Context()); e != nil {
+		finished = true
+		return "", 0, "", "", "", e
+	}
+	finished = true
 	return "", 0, "", "", "", errInvalidSession
 }
 
@@ -995,7 +1032,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
 		recoveryHeld = profile.RecoveryHeld
 		weeklyBytes, sessions, recorded, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, persistence.ErrNotFound) {
 			e = errInvalidSession
 		} else if err != nil {
 			fail(w, 503)
@@ -1102,10 +1139,27 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, _ := r.Cookie(sessionCookie)
-	digest := s.digest(version, "portal-session", c.Value)
-	_, e = s.db.Exec(r.Context(), `DELETE FROM public.portal_sessions WHERE credential_digest=$1`, digest)
+	op, e := s.persistence.Start(r.Context())
 	if e != nil {
 		// The single-statement commit acknowledgement does not prove rollback.
+		markDiagnostic(r, "uncertain", "commit_unconfirmed")
+		fail(w, 503)
+		return
+	}
+	defer op.Close()
+	tx, accountTx, e := beginAccountTransaction(op)
+	if e != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return
+	}
+	defer tx.Rollback(op.Context())
+	if _, e = accountTx.DeletePortalSession(op.Context(), digest32(s.digest(version, "portal-session", c.Value)), version); e != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return
+	}
+	if e = s.commitPortalTransaction(op.Context(), tx); e != nil {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		fail(w, 503)
 		return
@@ -1144,12 +1198,27 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403)
 		return
 	}
-	var subject string
 	if s.beforeOwnerSubjectRead != nil {
 		s.beforeOwnerSubjectRead()
 	}
-	if err := s.db.QueryRow(r.Context(), `SELECT subject FROM public.accounts WHERE id=$1`, id).Scan(&subject); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	readOp, err := s.persistence.Start(r.Context())
+	if err != nil {
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return
+	}
+	readTx, err := beginAdminAccessTransaction(readOp)
+	if err != nil {
+		readOp.Close()
+		markDiagnostic(r, "failed", "database_unavailable")
+		fail(w, 503)
+		return
+	}
+	ownerState, err := readTx.AccountAccessState(readOp.Context(), id, false)
+	_ = readTx.Rollback(readOp.Context())
+	readOp.Close()
+	if err != nil {
+		if errors.Is(err, persistence.ErrNotFound) {
 			markDiagnostic(r, "refused", "invalid_credentials")
 		} else {
 			markDiagnostic(r, "failed", "database_unavailable")
@@ -1157,6 +1226,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
+	subject := ownerState.Subject
 	var applied, uncertain bool
 	var invalidationFailed bool
 	var closeConnections func()
@@ -1167,57 +1237,50 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
 		guardEntered = true
 		if guardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
-			tx, e := s.db.Begin(ctx)
+			op, e := s.persistence.Start(ctx)
 			if e != nil {
 				fail(w, 503)
 				return
 			}
-			defer tx.Rollback(ctx)
-			var locked, status string
-			var accountRevision, oldGeneration, weeklyBytes int64
-			var sessionLimit int
-			e = tx.QueryRow(ctx, `SELECT a.id,a.status,a.revision,a.credential_generation,COALESCE(a.weekly_bytes_override,p.weekly_bytes,0),COALESCE(a.sessions_override,p.sessions,0) FROM public.accounts a LEFT JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 FOR UPDATE OF a`, id).Scan(&locked, &status, &accountRevision, &oldGeneration, &weeklyBytes, &sessionLimit)
+			defer op.Close()
+			tx, e := beginAdminAccessTransaction(op)
 			if e != nil {
 				fail(w, 503)
 				return
 			}
-			var live bool
-			if s.beforeOwnerRecheck != nil {
-				s.beforeOwnerRecheck(ctx, tx)
+			defer tx.Rollback(op.Context())
+			if s.beforeOwnerAccessRecheck != nil {
+				if e = s.beforeOwnerAccessRecheck(ctx); e != nil {
+					markDiagnostic(r, "failed", "database_unavailable")
+					fail(w, 401)
+					return
+				}
 			}
-			e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id WHERE ps.account_id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp())`, id, s.sessionDigest(r, version), version).Scan(&live)
+			auditID, e := uuid()
 			if e != nil {
-				markDiagnostic(r, "failed", "database_unavailable")
-				fail(w, 401)
+				fail(w, 503)
 				return
 			}
-			if !live {
+			state, e := tx.RevokeAccountAccess(op.Context(), id, s.sessionDigest(r, version), version, auditID)
+			if errors.Is(e, persistence.ErrInvalidCredential) {
 				markDiagnostic(r, "refused", "invalid_credentials")
 				fail(w, 401)
 				return
 			}
-			e = revokeAccountCredentials(ctx, tx, id)
-			if e == nil {
-				var auditID string
-				auditID, e = uuid()
-				if e == nil {
-					_, e = tx.Exec(ctx, `INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES($1,clock_timestamp(),'owner_credentials_revoked',$2)`, auditID, id)
-				}
-			}
 			if e != nil {
 				fail(w, 503)
 				return
 			}
-			if s.commitAccount != nil {
-				e = s.commitAccount(ctx, tx)
+			if s.commitAccountAccess != nil {
+				e = s.commitAccountAccess(op.Context(), tx)
 			} else {
-				e = tx.Commit(ctx)
+				e = tx.Commit(op.Context())
 			}
 			s.installIdentityFence(subject)
 			if e != nil {
-				s.uncertainAccounts.Store(id, uncertainMutation{revision: accountRevision, generation: oldGeneration + 1, status: status})
+				s.uncertainAccounts.Store(id, uncertainMutation{revision: state.Revision, generation: state.Generation + 1, status: state.Status})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: weeklyBytes, SessionLimit: sessionLimit, CloseAll: true})
+			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: state.WeeklyBytes, SessionLimit: state.Sessions, CloseAll: true})
 			invalidationFailed = s.deliverAccountInvalidation(id) != nil
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {

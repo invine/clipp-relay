@@ -25,6 +25,8 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence/postgres"
+	"clipp-relay/internal/quota"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -32,7 +34,11 @@ import (
 // Auth tests. Composed HTTP/libp2p acceptance uses relay.NewProtected instead.
 func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.Material, provider auth.Provider) *auth.Server {
 	t.Helper()
-	s := auth.New(pool, c, m, provider)
+	deps := auth.Dependencies{}
+	if pool != nil {
+		deps = authDependencies(database.NewRuntime(pool))
+	}
+	s := auth.New(deps, c, m, provider)
 	if len(m.NativeSigningKey) == 32 {
 		if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 			t.Fatal(err)
@@ -41,6 +47,18 @@ func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.M
 	s.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
 	s.SetGrantRevokedForTest(func(string) error { return nil })
 	return s
+}
+
+func authDependencies(runtime *database.Runtime) auth.Dependencies {
+	return auth.Dependencies{Work: postgres.New(runtime), Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}
+}
+
+func newAuthWithRuntime(runtime *database.Runtime, c config.Config, m config.Material, provider auth.Provider) *auth.Server {
+	return auth.New(authDependencies(runtime), c, m, provider)
+}
+
+func newQuota(pool *pgxpool.Pool) *quota.Quota {
+	return quota.New(postgres.New(database.NewRuntime(pool)))
 }
 
 func fixture(t *testing.T) (config.Config, config.Material, *database.Runtime) {

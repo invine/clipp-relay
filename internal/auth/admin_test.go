@@ -21,9 +21,10 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 	"clipp-relay/internal/relay"
-	"github.com/jackc/pgx/v5"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -227,11 +228,11 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 		t.Fatal(err)
 	}
 	d := newProvider(t)
-	s := auth.NewWithRuntime(db, c, m, d.endpoints())
+	s := newAuthWithRuntime(db, c, m, d.endpoints())
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
-	accounting := quota.NewWithRuntime(db)
+	accounting := quota.New(postgres.New(db))
 	defer accounting.Close()
 	dataPlane, err := relay.NewProtected(s, accounting, relay.Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
@@ -289,7 +290,7 @@ func TestAmbiguousAdminRevocationClosesRealRelaySessionAndReconciles(t *testing.
 	}
 	form.Set("action", "revoke")
 	form.Set("revision", "2")
-	s.SetAccountCommitHookForTest(func(ctx context.Context, tx pgx.Tx) error {
+	s.SetAccountCommitHookForTest(func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -630,7 +631,7 @@ func TestPlanMutationRechecksGoogleAgeAfterActorLockWait(t *testing.T) {
 	waiting := false
 	for deadline := time.Now().Add(180 * time.Millisecond); time.Now().Before(deadline); {
 		var count int
-		if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity WHERE usename=current_user AND wait_event_type='Lock' AND query LIKE '%public.accounts WHERE id=$1 FOR UPDATE%'`).Scan(&count); e != nil {
+		if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity WHERE usename=current_user AND wait_event_type='Lock' AND query LIKE '%public.accounts WHERE id=$1 OR id=$2 ORDER BY id FOR UPDATE%'`).Scan(&count); e != nil {
 			t.Fatal(e)
 		}
 		if count > 0 {

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"clipp-relay/internal/auth"
-	"clipp-relay/internal/quota"
 )
 
 func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
@@ -21,7 +20,7 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE id=$1`, id); err != nil {
 		t.Fatal(err)
 	}
-	q := quota.New(db.Pool)
+	q := newQuota(db.Pool)
 	t.Cleanup(q.Close)
 	if _, err := q.Eligibility(context.Background(), id); err != nil {
 		t.Fatal(err)

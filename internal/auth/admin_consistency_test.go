@@ -18,7 +18,8 @@ import (
 
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/persistence/postgres"
 )
 
 func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, string) {
@@ -47,7 +48,8 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	s := New(pool, c, m, Provider{})
+	runtime := database.NewRuntime(pool)
+	s := New(Dependencies{Work: postgres.New(runtime), Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}, c, m, Provider{})
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +170,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 	})
 	var changed AccountChange
 	s.SetAccountChangedForTest(func(change AccountChange) func() { changed = change; return nil })
-	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitAccountAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -206,7 +208,7 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 		changed = change
 		return func() { closed = true }
 	})
-	s.commitAccount = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitAccountAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
@@ -360,7 +362,7 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 	})
 	lost := true
 	requestContext, cancelRequest := context.WithCancel(context.Background())
-	s.commitPlan = func(ctx context.Context, tx pgx.Tx) error {
+	s.commitPlanAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		err := tx.Commit(ctx)
 		if err != nil {
 			return err
@@ -414,12 +416,14 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE plan_id=$1; DELETE FROM public.quota_plans WHERE id=$1`, retryForm.Get("operation_id"))
 	})
-	s.commitPlan = func(context.Context, pgx.Tx) error { return errors.New("injected unresolved commit") }
+	s.commitPlanAccess = func(context.Context, persistence.AccountAccessTransaction) error {
+		return errors.New("injected unresolved commit")
+	}
 	unresolved := internalRequest(s, "POST", "/admin/plans", cookie, retryForm, origin)
 	if unresolved.Code != 503 || !strings.Contains(unresolved.Body.String(), retryForm.Get("operation_id")) || !strings.Contains(unresolved.Body.String(), retryForm.Get("operation_proof")) || !strings.Contains(unresolved.Body.String(), retryForm.Get("name")) {
 		t.Fatalf("retry form lost operation: %d %s", unresolved.Code, unresolved.Body.String())
 	}
-	s.commitPlan = nil
+	s.commitPlanAccess = nil
 	if retried := internalRequest(s, "POST", "/admin/plans", cookie, retryForm, origin); retried.Code != 303 {
 		t.Fatalf("safe retry = %d", retried.Code)
 	}

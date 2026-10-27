@@ -14,8 +14,9 @@ import (
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/config"
 	"clipp-relay/internal/database"
+	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/relay"
-	"github.com/jackc/pgx/v5"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -38,6 +39,8 @@ func TestZZNativeOAuthResetIsIdempotentAndPreservesAccountState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer migrationPool.Close()
+	issuerStore := postgres.NewIssuerMaintenance(migrationPool)
+	servingIssuerStore := postgres.NewIssuerMaintenance(runtime.Pool)
 	ctx := context.Background()
 	account := "9e4120b7-1662-4b95-92c9-978c503d3501"
 	grant := "e05b0e50-df52-4b63-b77b-b49f1d53b145"
@@ -82,7 +85,7 @@ VALUES(decode(repeat('dd',32),'hex'),$1,$2,1,clock_timestamp())`, serving.Curren
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
 	}
-	if err := auth.VerifyNativeOAuthKey(ctx, runtime.Pool, key); !errors.Is(err, auth.ErrNativeIssuerResetRequired) {
+	if err := auth.VerifyNativeOAuthKey(ctx, servingIssuerStore, key); !errors.Is(err, auth.ErrNativeIssuerResetRequired) {
 		t.Fatalf("startup accepted key without a completed reset: %v", err)
 	}
 	var auditBaseline int
@@ -90,16 +93,16 @@ VALUES(decode(repeat('dd',32),'hex'),$1,$2,1,clock_timestamp())`, serving.Curren
 		t.Fatal(err)
 	}
 	commitAckLost := errors.New("simulated lost reset commit acknowledgement")
-	reset, err := auth.ResetNativeOAuthCredentialsWithCommitHookForTest(ctx, migrationPool, key, func(ctx context.Context, tx pgx.Tx) error {
+	reset, err := auth.ResetNativeOAuthCredentialsWithCommitHookForTest(ctx, issuerStore, key, func(ctx context.Context, tx persistence.IssuerResetTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
 		return commitAckLost
 	})
-	if reset || !errors.Is(err, commitAckLost) {
+	if !reset || err != nil {
 		t.Fatalf("uncertain reset result=%v err=%v", reset, err)
 	}
-	if err := auth.VerifyNativeOAuthKey(ctx, runtime.Pool, key); err != nil {
+	if err := auth.VerifyNativeOAuthKey(ctx, servingIssuerStore, key); err != nil {
 		t.Fatalf("serving rejected confirmed key: %v", err)
 	}
 	var auditCount int
@@ -120,7 +123,7 @@ AND NOT EXISTS(SELECT 1 FROM public.refresh_generations)`, account).Scan(&preser
 VALUES('2496a9b9-6948-4c07-bc58-c2e14c2fd16b',$1,0,'electron',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '1 day',clock_timestamp()+interval '2 days')`, account); err != nil {
 		t.Fatal(err)
 	}
-	reset, err = auth.ResetNativeOAuthCredentials(ctx, migrationPool, key)
+	reset, err = auth.ResetNativeOAuthCredentials(ctx, issuerStore, key)
 	if err != nil || reset {
 		t.Fatalf("same-key recovery reset=%v err=%v", reset, err)
 	}
@@ -135,34 +138,34 @@ VALUES('2496a9b9-6948-4c07-bc58-c2e14c2fd16b',$1,0,'electron',clock_timestamp(),
 	if _, err := rand.Read(otherKey); err != nil {
 		t.Fatal(err)
 	}
-	reset, err = auth.ResetNativeOAuthCredentials(ctx, migrationPool, otherKey)
+	reset, err = auth.ResetNativeOAuthCredentials(ctx, issuerStore, otherKey)
 	if err != nil || !reset {
 		t.Fatalf("key replacement reset=%v err=%v", reset, err)
 	}
 	if err := runtime.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE event='credential_reset'`).Scan(&auditCount); err != nil || auditCount != auditBaseline+2 {
 		t.Fatalf("replacement reset audit rows=%d want=%d err=%v", auditCount, auditBaseline+2, err)
 	}
-	if err := auth.VerifyNativeOAuthKey(ctx, runtime.Pool, key); !errors.Is(err, auth.ErrNativeIssuerResetRequired) {
+	if err := auth.VerifyNativeOAuthKey(ctx, servingIssuerStore, key); !errors.Is(err, auth.ErrNativeIssuerResetRequired) {
 		t.Fatalf("old key identity accepted after replacement: %v", err)
 	}
-	if err := auth.VerifyNativeOAuthKey(ctx, runtime.Pool, otherKey); err != nil {
+	if err := auth.VerifyNativeOAuthKey(ctx, servingIssuerStore, otherKey); err != nil {
 		t.Fatalf("new key identity rejected: %v", err)
 	}
 	if _, err := migrationPool.Exec(ctx, `INSERT INTO public.native_login_grants(id,account_id,credential_generation,client_type,created_at,last_used_at,idle_expires_at,absolute_expires_at)
 VALUES('8670c193-8f45-49f3-a1d9-6e5dbe4ea82e',$1,0,'android',clock_timestamp(),clock_timestamp(),clock_timestamp()+interval '1 day',clock_timestamp()+interval '2 days')`, account); err != nil {
 		t.Fatal(err)
 	}
-	if err := auth.VerifyNativeOAuthKey(ctx, runtime.Pool, key); !errors.Is(err, auth.ErrNativeIssuerResetRequired) {
+	if err := auth.VerifyNativeOAuthKey(ctx, servingIssuerStore, key); !errors.Is(err, auth.ErrNativeIssuerResetRequired) {
 		t.Fatalf("old key was accepted after replacement: %v", err)
 	}
 	if err := migrationPool.QueryRow(ctx, `SELECT count(*) FROM public.native_login_grants WHERE id='8670c193-8f45-49f3-a1d9-6e5dbe4ea82e'`).Scan(&grants); err != nil || grants != 1 {
 		t.Fatalf("old-key startup check changed new-key credential: %d %v", grants, err)
 	}
-	reset, err = auth.ResetNativeOAuthCredentials(ctx, migrationPool, key)
+	reset, err = auth.ResetNativeOAuthCredentials(ctx, issuerStore, key)
 	if err != nil || !reset {
 		t.Fatalf("restored old-key reset=%v err=%v", reset, err)
 	}
-	if err := auth.VerifyNativeOAuthKey(ctx, runtime.Pool, key); err != nil {
+	if err := auth.VerifyNativeOAuthKey(ctx, servingIssuerStore, key); err != nil {
 		t.Fatalf("restored key was not durably selected: %v", err)
 	}
 	if err := runtime.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE event='credential_reset'`).Scan(&auditCount); err != nil || auditCount != auditBaseline+3 {
@@ -207,7 +210,7 @@ func TestZZZNativeResetPreservesPortalSessionForReauthorization(t *testing.T) {
 	if _, err := rand.Read(newKey); err != nil {
 		t.Fatal(err)
 	}
-	if reset, err := auth.ResetNativeOAuthCredentials(context.Background(), migrationPool, newKey); err != nil || !reset {
+	if reset, err := auth.ResetNativeOAuthCredentials(context.Background(), postgres.NewIssuerMaintenance(migrationPool), newKey); err != nil || !reset {
 		t.Fatalf("deliberate signing-key reset=%v err=%v", reset, err)
 	}
 

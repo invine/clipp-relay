@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth/issuer"
-	"github.com/jackc/pgx/v5"
+	"clipp-relay/internal/persistence"
 	"github.com/ory/fosite"
 )
 
@@ -43,21 +43,21 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 	if len(raw) != 94 {
 		return RelayCredential{}, ErrInvalidAccess
 	}
-	unitCtx, release, err := s.db.StartUnit(ctx)
+	op, err := s.persistence.Start(ctx)
 	if err != nil {
 		return RelayCredential{}, err
 	}
-	defer release()
-	tx, err := s.db.Begin(unitCtx)
+	defer op.Close()
+	tx, err := op.Begin(op.Context())
 	if err != nil {
 		return RelayCredential{}, err
 	}
-	defer tx.Rollback(unitCtx)
-	txCtx := issuer.InTransaction(unitCtx, tx, "", raw)
+	defer tx.Rollback(op.Context())
+	txCtx := issuer.InPersistenceTransaction(op.Context(), tx, "", raw)
 	principal, _, err := s.nativeIssuer.AuthenticateAccess(txCtx, raw)
 	if err != nil {
 		var protocolErr *fosite.RFC6749Error
-		if errors.As(err, &protocolErr) {
+		if errors.As(err, &protocolErr) || errors.Is(err, persistence.ErrInvalidCredential) || errors.Is(err, fosite.ErrNotFound) {
 			return RelayCredential{}, ErrInvalidAccess
 		}
 		return RelayCredential{}, err
@@ -66,35 +66,21 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 	if err != nil {
 		return RelayCredential{}, ErrInvalidAccess
 	}
-	var result RelayCredential
-	var status string
-	var accountGeneration, grantGeneration int64
-	var dbNow time.Time
 	before := time.Now()
-	err = tx.QueryRow(unitCtx, `SELECT g.account_id::text,g.id::text,g.credential_generation,a.credential_generation,a.status,
-		COALESCE(a.sessions_override,p.sessions),t.expires_at,clock_timestamp()
-		FROM public.native_access_tokens t
-		JOIN public.native_login_grants g ON g.id=t.grant_id
-		JOIN public.accounts a ON a.id=g.account_id
-		JOIN public.quota_plans p ON p.id=a.plan_id
-		WHERE t.credential_digest=$1 AND g.id=$2 AND g.account_id=$3
-		AND NOT a.recovery_review_hold AND a.status='Active'
-		AND g.terminated_at IS NULL AND g.idle_expires_at>clock_timestamp()
-		AND g.absolute_expires_at>clock_timestamp() AND t.expires_at>clock_timestamp()
-		AND g.credential_generation=a.credential_generation`, digest[:], principal.GrantID, principal.AccountID).
-		Scan(&result.AccountID, &result.GrantID, &grantGeneration, &accountGeneration, &status, &result.SessionLimit, &result.ExpiresAt, &dbNow)
-	if errors.Is(err, pgx.ErrNoRows) {
+	stored, err := tx.RelayCredential(op.Context(), digest, principal.GrantID, principal.AccountID)
+	if errors.Is(err, persistence.ErrInvalidCredential) {
 		return RelayCredential{}, ErrInvalidAccess
 	}
 	if err != nil {
 		return RelayCredential{}, err
 	}
-	result.Generation = accountGeneration
-	if status != "Active" || grantGeneration != accountGeneration {
+	var result RelayCredential
+	result = RelayCredential{AccountID: stored.AccountID, GrantID: stored.GrantID, Generation: stored.Generation, SessionLimit: stored.SessionLimit, ExpiresAt: stored.ExpiresAt}
+	if stored.AccountStatus != "Active" || stored.ReviewHold || stored.Generation != principal.Generation {
 		return RelayCredential{}, ErrInvalidAccess
 	}
 	after := time.Now()
-	if err = tx.Commit(unitCtx); err != nil {
+	if err = tx.Commit(op.Context()); err != nil {
 		return RelayCredential{}, err
 	}
 	observationWaited := false
@@ -106,8 +92,7 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 	if _, uncertain := s.uncertainAccounts.Load(result.AccountID); uncertain {
 		// Wait for any ambiguous account mutation to finish before accepting its
 		// credential snapshot, then perform a fresh token and authority lookup.
-		var resolved string
-		if err := s.db.QueryRow(ctx, `SELECT id FROM public.accounts WHERE id=$1 FOR SHARE`, result.AccountID).Scan(&resolved); err != nil {
+		if err := s.confirmUncertainAccount(ctx, result.AccountID); err != nil {
 			return RelayCredential{}, err
 		}
 		s.uncertainAccounts.Delete(result.AccountID)
@@ -119,10 +104,31 @@ func (s *Server) authenticateNativeRelayPass(ctx context.Context, raw string, ru
 		// decided from the authority that exists when the wait is over.
 		return s.authenticateNativeRelayPass(ctx, raw, false)
 	}
-	remaining := result.ExpiresAt.Sub(dbNow) - after.Sub(before) - time.Second
+	remaining := result.ExpiresAt.Sub(stored.DatabaseNow) - after.Sub(before) - time.Second
 	if remaining <= 0 {
 		return RelayCredential{}, ErrInvalidAccess
 	}
 	result.ExpiresAt = after.Add(remaining)
 	return result, nil
+}
+
+func (s *Server) confirmUncertainAccount(ctx context.Context, accountID string) error {
+	op, err := s.persistence.Start(ctx)
+	if err != nil {
+		return err
+	}
+	defer op.Close()
+	tx, err := op.Begin(op.Context())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(op.Context())
+	account, ok := tx.(persistence.AccountTransaction)
+	if !ok {
+		return persistence.ErrUnavailable
+	}
+	if _, err = account.AccountStateAfterUncertain(op.Context(), accountID, ""); err != nil {
+		return err
+	}
+	return tx.Commit(op.Context())
 }

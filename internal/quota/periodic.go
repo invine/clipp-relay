@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"clipp-relay/internal/persistence"
 )
 
 const AccountingCadence = time.Second
@@ -28,6 +30,7 @@ type observedWeek struct {
 	flight      *Settlement
 	recorded    RecordedUsage
 	initialized bool
+	uncertain   bool
 }
 type observedAccount struct {
 	sessions           int
@@ -105,15 +108,29 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 			return result, err
 		}
 	}
-	var now time.Time
-	err = q.runtime.QueryRow(ctx, `SELECT clock_timestamp(),COALESCE(a.weekly_bytes_override,p.weekly_bytes),COALESCE(a.sessions_override,p.sessions) FROM public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, id).Scan(&now, &result.CapBytes, &result.SessionLimit)
+	if q.accounting == nil {
+		return result, ErrTemporary
+	}
+	policy, err := q.accounting.ReadAccountingEligibility(ctx, id)
 	if err != nil {
 		return result, ErrTemporary
 	}
-	result.WeekStart = weekStart(q.dbTime(now))
-	durable, err := q.RecordedUsage(ctx, id, result.WeekStart)
-	if err != nil {
-		return result, err
+	result.CapBytes, result.SessionLimit = policy.CapBytes, policy.SessionLimit
+	result.WeekStart = weekStart(q.dbTime(policy.DatabaseNow))
+	durable := resultFromPersistence(persistence.RecordedUsage{RecordedBytes: policy.RecordedBytes, Sequence: policy.Sequence, OperationID: policy.OperationID, DeltaBytes: policy.DeltaBytes, WeekStart: result.WeekStart, DatabaseNow: policy.DatabaseNow})
+	// If a test clock remaps the repository's database time across a week
+	// boundary, the policy query's usage row still reflects the unshifted SQL
+	// clock. Read the selected week explicitly so its receipt cannot seed a
+	// sequence from a different week.
+	if result.WeekStart != weekStart(policy.DatabaseNow) {
+		stored, err := q.accounting.ReadRecordedUsage(ctx, id, result.WeekStart)
+		if errors.Is(err, persistence.ErrUsageRetired) {
+			return result, ErrTemporary
+		}
+		if err != nil {
+			return result, ErrTemporary
+		}
+		durable = resultFromPersistence(stored)
 	}
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
@@ -377,35 +394,68 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 			w.initialized = true
 			q.periodic.mu.Unlock()
 		}
-		q.periodic.mu.Lock()
-		if w.flight == nil {
-			op, err := NewOperationID()
-			if err != nil {
-				q.periodic.mu.Unlock()
-				return ErrTemporary
-			}
-			if w.recorded.Sequence == math.MaxInt64 {
-				q.periodic.mu.Unlock()
-				return ErrSettlementConflict
-			}
-			w.flight = &Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: w.pending, Sequence: w.recorded.Sequence + 1}
-			w.pending = 0
-		}
-		batch := *w.flight
-		q.periodic.mu.Unlock()
-		usage, err := q.Settle(ctx, batch)
-		if errors.Is(err, ErrUsageRetired) {
+		var usage RecordedUsage
+		var settlementErr error
+		retired := false
+		for retry := 0; ; retry++ {
 			q.periodic.mu.Lock()
-			delete(a.weeks, week)
+			if w.flight == nil {
+				op, err := NewOperationID()
+				if err != nil {
+					q.periodic.mu.Unlock()
+					return ErrTemporary
+				}
+				if w.recorded.Sequence == math.MaxInt64 {
+					q.periodic.mu.Unlock()
+					return ErrSettlementConflict
+				}
+				w.flight = &Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: w.pending, Sequence: w.recorded.Sequence + 1}
+				w.pending = 0
+			}
+			batch := *w.flight
 			q.periodic.mu.Unlock()
+			usage, settlementErr = q.Settle(ctx, batch)
+			if errors.Is(settlementErr, ErrUsageRetired) {
+				q.periodic.mu.Lock()
+				delete(a.weeks, week)
+				q.periodic.mu.Unlock()
+				retired = true
+				break
+			}
+			if errors.Is(settlementErr, ErrSettlementConflict) && retry < 4 {
+				q.periodic.mu.Lock()
+				uncertain := w.uncertain
+				q.periodic.mu.Unlock()
+				if uncertain {
+					return settlementErr
+				}
+				if rebaseErr := q.rebaseSettlementConflict(ctx, id, week, batch); rebaseErr == nil {
+					continue
+				} else {
+					return rebaseErr
+				}
+			}
+			if settlementErr != nil {
+				if errors.Is(settlementErr, ErrSettlementUncertain) {
+					q.periodic.mu.Lock()
+					if w.flight != nil && *w.flight == batch {
+						w.uncertain = true
+					}
+					q.periodic.mu.Unlock()
+				}
+				return settlementErr
+			}
+			q.periodic.mu.Lock()
+			w.recorded = usage
+			w.flight = nil
+			w.uncertain = false
+			q.periodic.mu.Unlock()
+			break
+		}
+		if retired {
 			continue
 		}
-		if err != nil {
-			return err
-		}
 		q.periodic.mu.Lock()
-		w.recorded = usage
-		w.flight = nil
 		// Progress in a newer week cannot hide older unresolved work.
 		older := false
 		for other, v := range a.weeks {
@@ -424,6 +474,33 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 		}
 		q.periodic.mu.Unlock()
 	}
+	return nil
+}
+
+// A confirmed sequence conflict means this batch rolled back before commit.
+// Refresh the durable receipt and preserve its observations in a new batch.
+func (q *Quota) rebaseSettlementConflict(ctx context.Context, id string, week time.Time, batch Settlement) error {
+	latest, err := q.RecordedUsage(ctx, id, week)
+	if err != nil {
+		return err
+	}
+	if latest.Sequence < batch.Sequence || latest.OperationID == batch.OperationID {
+		return ErrSettlementConflict
+	}
+	q.periodic.mu.Lock()
+	defer q.periodic.mu.Unlock()
+	a := q.periodic.accounts[id]
+	if a == nil || a.weeks[week] == nil || a.weeks[week].flight == nil || *a.weeks[week].flight != batch || a.weeks[week].uncertain {
+		return ErrTemporary
+	}
+	w := a.weeks[week]
+	if batch.DeltaBytes > math.MaxInt64-w.pending {
+		return ErrTemporary
+	}
+	w.recorded = latest
+	w.pending += batch.DeltaBytes
+	w.flight = nil
+	w.uncertain = false
 	return nil
 }
 
@@ -459,18 +536,15 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 				case id := <-jobs:
 					_ = q.FlushAccounting(ctx, id)
 					// Background reads and decisions share Quota's account state.
-					q.runtime.WithUnit(ctx, func(unit context.Context) error {
-						_, err := q.Eligibility(unit, id)
-						if errors.Is(err, ErrExhausted) {
-							q.cutoff(id, "quota_exhausted")
-						}
-						q.periodic.mu.Lock()
-						if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
-							delete(q.periodic.accounts, id)
-						}
-						q.periodic.mu.Unlock()
-						return nil
-					})
+					_, err := q.Eligibility(ctx, id)
+					if errors.Is(err, ErrExhausted) {
+						q.cutoff(id, "quota_exhausted")
+					}
+					q.periodic.mu.Lock()
+					if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
+						delete(q.periodic.accounts, id)
+					}
+					q.periodic.mu.Unlock()
 				}
 			}
 		}()
