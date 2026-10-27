@@ -82,41 +82,41 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 	if s.beforeAccountActionGuard != nil {
 		s.beforeAccountActionGuard()
 	}
-	guardEntered := false
 	committed := false
 	uncertain := false
 	invalidationFailed := false
 	outcome := failedAccountRevocation(http.StatusServiceUnavailable, "database_unavailable")
-	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
-		guardEntered = true
-		accountGuardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
+	progress, guardErr := s.completeAccountMutation(r.Context(), accountMutation{
+		subject:  subject,
+		accounts: []string{id},
+		work: func(ctx context.Context) bool {
 			op, operationErr := s.persistence.Start(ctx)
 			if operationErr != nil {
-				return
+				return false
 			}
 			defer op.Close()
 			tx, operationErr := beginAdminAccessTransaction(op)
 			if operationErr != nil {
-				return
+				return false
 			}
 			defer tx.Rollback(op.Context())
 			if s.beforeOwnerAccessRecheck != nil {
 				if operationErr = s.beforeOwnerAccessRecheck(ctx); operationErr != nil {
 					outcome = failedAccountRevocation(http.StatusUnauthorized, "database_unavailable")
-					return
+					return false
 				}
 			}
 			auditID, operationErr := uuid()
 			if operationErr != nil {
-				return
+				return false
 			}
 			state, operationErr := tx.RevokeAccountAccess(op.Context(), id, s.sessionDigest(r, version), version, auditID)
 			if errors.Is(operationErr, persistence.ErrInvalidCredential) {
 				outcome = refusedAccountRevocation(http.StatusUnauthorized, "invalid_credentials")
-				return
+				return false
 			}
 			if operationErr != nil {
-				return
+				return false
 			}
 			if s.commitAccountAccess != nil {
 				operationErr = s.commitAccountAccess(op.Context(), tx)
@@ -134,15 +134,15 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 			invalidationFailed = s.deliverAccountInvalidation(id, reason) != nil
 			committed = true
 			uncertain = operationErr != nil
-		})
-		if accountGuardErr != nil {
-			outcome = accountRevocationGuardOutcome(accountGuardErr)
-			return accountGuardErr
-		}
-		return nil
+			return committed
+		},
+		complete: func() error { return s.accountInvalidationComplete(id) },
 	})
-	if guardErr != nil && !guardEntered {
+	if guardErr != nil && !progress.identityEntered {
 		return accountRevocationGuardOutcome(guardErr)
+	}
+	if guardErr != nil && progress.identityEntered {
+		outcome = accountRevocationGuardOutcome(guardErr)
 	}
 	if !committed {
 		if outcome.result == accountRevocationRefused || outcome.status == http.StatusUnauthorized {
@@ -154,7 +154,7 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 	// Completion is request-independent and happens after both Auth guards and
 	// their operation resources have been released, even if the request context
 	// was canceled after the database commit.
-	if s.accountInvalidationComplete(id) != nil {
+	if progress.completionErr != nil {
 		invalidationFailed = true
 	}
 	if uncertain {
@@ -167,13 +167,14 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 }
 
 func accountRevocationGuardOutcome(err error) accountRevocationOutcome {
-	if errors.Is(err, persistence.ErrWorkUnavailable) {
-		return accountRevocationOutcome{result: accountRevocationRefused, status: http.StatusServiceUnavailable, diagnosticOutcome: "refused", reason: "overloaded", event: "http.request_refused", handled: true}
+	failure := classifyAccountMutationGuardFailure(err)
+	if failure.refused {
+		return accountRevocationOutcome{result: accountRevocationRefused, status: failure.status, diagnosticOutcome: "refused", reason: failure.reason, event: failure.event, handled: failure.handled}
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return accountRevocationOutcome{result: accountRevocationFailed, status: http.StatusServiceUnavailable, handled: true}
+	if failure.canceled {
+		return accountRevocationOutcome{result: accountRevocationFailed, status: failure.status, handled: failure.handled}
 	}
-	return failedAccountRevocation(http.StatusServiceUnavailable, "database_unavailable")
+	return failedAccountRevocation(failure.status, failure.reason)
 }
 
 func (s *Server) renderAccountRevocation(w http.ResponseWriter, r *http.Request, outcome accountRevocationOutcome) {

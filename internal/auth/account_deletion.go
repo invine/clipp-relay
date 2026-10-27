@@ -87,19 +87,19 @@ func (s *Server) admitAccountDeletion(r *http.Request) accountDeletionOutcome {
 
 	subject := owner.Subject
 	var admitted, uncertain, invalidationFailed bool
-	guardEntered := false
 	outcome := failedAccountDeletion(http.StatusServiceUnavailable, "database_unavailable")
-	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
-		guardEntered = true
-		accountGuardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
+	progress, guardErr := s.completeAccountMutation(r.Context(), accountMutation{
+		subject:  subject,
+		accounts: []string{id},
+		work: func(ctx context.Context) bool {
 			tx, operationErr := s.deletions.BeginDeletion(ctx)
 			if operationErr != nil {
-				return
+				return false
 			}
 			defer tx.Rollback(ctx)
 			if s.beforeOwnerDeletionRecheck != nil {
 				if operationErr = s.beforeOwnerDeletionRecheck(ctx); operationErr != nil {
-					return
+					return false
 				}
 			}
 			admission, operationErr := tx.AdmitDeletion(ctx, persistence.DeletionAdmissionRequest{
@@ -108,18 +108,18 @@ func (s *Server) admitAccountDeletion(r *http.Request) accountDeletionOutcome {
 			})
 			if errors.Is(operationErr, persistence.ErrInvalidCredential) {
 				outcome = refusedAccountDeletion(http.StatusUnauthorized, "invalid_credentials")
-				return
+				return false
 			}
 			if errors.Is(operationErr, persistence.ErrRecentAuthentication) {
 				outcome = refusedAccountDeletion(http.StatusForbidden, "recent_auth_required")
-				return
+				return false
 			}
 			if errors.Is(operationErr, persistence.ErrCapacityExceeded) {
 				outcome = refusedAccountDeletion(http.StatusServiceUnavailable, "deletion_capacity")
-				return
+				return false
 			}
 			if operationErr != nil {
-				return
+				return false
 			}
 			if s.commitDeletionAdmission != nil {
 				operationErr = s.commitDeletionAdmission(ctx, tx)
@@ -139,26 +139,28 @@ func (s *Server) admitAccountDeletion(r *http.Request) accountDeletionOutcome {
 			}
 			invalidationFailed = s.deliverAccountInvalidation(id, reason) != nil
 			admitted, uncertain = true, operationErr != nil
-		})
-		if accountGuardErr != nil {
-			outcome = accountDeletionGuardOutcome(accountGuardErr)
-			return accountGuardErr
-		}
-		return nil
+			return admitted
+		},
+		complete: func() error {
+			if s.deletionAccounting != nil {
+				s.deletionAccounting.BeginAccountingDeletion(id)
+			}
+			return s.accountInvalidationComplete(id)
+		},
 	})
-	if guardErr != nil && !guardEntered {
+	if guardErr != nil && !progress.identityEntered {
 		return accountDeletionGuardOutcome(guardErr)
+	}
+	if guardErr != nil && progress.identityEntered && !admitted {
+		outcome = accountDeletionGuardOutcome(guardErr)
 	}
 	if !admitted {
 		return outcome
 	}
 
-	// Logical deletion accounting is independent of HTTP lifetime. Physical
-	// Relay cleanup is released below, after Auth protection has ended.
-	if s.deletionAccounting != nil {
-		s.deletionAccounting.BeginAccountingDeletion(id)
-	}
-	if s.accountInvalidationComplete(id) != nil {
+	// Logical deletion accounting and physical Relay cleanup are independent of
+	// HTTP lifetime and run after all Auth protection has ended.
+	if progress.completionErr != nil {
 		invalidationFailed = true
 	}
 	if uncertain {
@@ -177,16 +179,17 @@ func (s *Server) admitAccountDeletion(r *http.Request) accountDeletionOutcome {
 }
 
 func accountDeletionGuardOutcome(err error) accountDeletionOutcome {
-	if errors.Is(err, persistence.ErrWorkUnavailable) {
+	failure := classifyAccountMutationGuardFailure(err)
+	if failure.refused {
 		return accountDeletionOutcome{
-			result: accountDeletionRefused, status: http.StatusServiceUnavailable,
-			diagnosticOutcome: "refused", reason: "overloaded", event: "http.request_refused", handled: true,
+			result: accountDeletionRefused, status: failure.status,
+			diagnosticOutcome: "refused", reason: failure.reason, event: failure.event, handled: failure.handled,
 		}
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return accountDeletionOutcome{result: accountDeletionFailed, status: http.StatusServiceUnavailable, handled: true}
+	if failure.canceled {
+		return accountDeletionOutcome{result: accountDeletionFailed, status: failure.status, handled: failure.handled}
 	}
-	return failedAccountDeletion(http.StatusServiceUnavailable, "database_unavailable")
+	return failedAccountDeletion(failure.status, failure.reason)
 }
 
 func (s *Server) renderAccountDeletion(w http.ResponseWriter, r *http.Request, outcome accountDeletionOutcome) {

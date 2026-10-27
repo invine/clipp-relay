@@ -77,37 +77,33 @@ func (s *Server) changeAdminAccount(r *http.Request, actor adminIdentity, target
 	}
 
 	var outcome adminAccountOutcome
-	applyUnderAccountProtection := func(ctx context.Context) {
-		outcome = s.applyAdminAccountMutation(ctx, r, actor, target, expected, action, spec, plan)
-		if outcome.change == nil {
-			return
-		}
-		reason := s.accountChanged(*outcome.change)
-		if reason == "" && outcome.change.CloseAll {
-			reason = "account_access_changed"
-		}
-		if reason != "" {
-			outcome.invalidationRequired = true
-			if s.deliverAccountInvalidation(outcome.change.AccountID, reason) != nil {
-				outcome.invalidationFailed = true
+	progress, guardErr := s.completeAccountMutation(r.Context(), accountMutation{
+		subject:  securitySubject,
+		accounts: []string{actor.id, target},
+		work: func(ctx context.Context) bool {
+			outcome = s.applyAdminAccountMutation(ctx, r, actor, target, expected, action, spec, plan)
+			if outcome.change == nil {
+				return false
 			}
-			if reason == "account_access_changed" {
-				outcome.change.CloseAll = true
+			reason := s.accountChanged(*outcome.change)
+			if reason == "" && outcome.change.CloseAll {
+				reason = "account_access_changed"
 			}
-		}
-	}
-	var guardErr error
-	if spec.security {
-		identityEntered := false
-		guardErr = s.withIdentityGuard(r.Context(), securitySubject, func(ctx context.Context) error {
-			identityEntered = true
-			return s.withAccountGuards(ctx, []string{actor.id, target}, applyUnderAccountProtection)
-		})
-		if guardErr != nil && !identityEntered && outcome.status == 0 {
-			return adminGuardFailure(guardErr)
-		}
-	} else {
-		guardErr = s.withAccountGuards(r.Context(), []string{actor.id, target}, applyUnderAccountProtection)
+			if reason != "" {
+				outcome.invalidationRequired = true
+				if s.deliverAccountInvalidation(outcome.change.AccountID, reason) != nil {
+					outcome.invalidationFailed = true
+				}
+				if reason == "account_access_changed" {
+					outcome.change.CloseAll = true
+				}
+			}
+			return outcome.invalidationRequired
+		},
+		complete: func() error { return s.accountInvalidationComplete(outcome.change.AccountID) },
+	})
+	if guardErr != nil && !progress.identityEntered && outcome.status == 0 {
+		return adminGuardFailure(guardErr)
 	}
 	if outcome.change == nil {
 		if guardErr != nil && outcome.status == 0 {
@@ -121,10 +117,8 @@ func (s *Server) changeAdminAccount(r *http.Request, actor adminIdentity, target
 
 	// The request context may be canceled after commit; cleanup still runs once
 	// the guarded logical effects have completed.
-	if outcome.invalidationRequired {
-		if s.accountInvalidationComplete(outcome.change.AccountID) != nil {
-			outcome.invalidationFailed = true
-		}
+	if progress.completionErr != nil {
+		outcome.invalidationFailed = true
 	}
 	if outcome.invalidationFailed && outcome.result != adminAccountUncertain {
 		outcome.result = adminAccountInvalidationIncomplete
@@ -135,16 +129,17 @@ func (s *Server) changeAdminAccount(r *http.Request, actor adminIdentity, target
 }
 
 func adminGuardFailure(err error) adminAccountOutcome {
-	if errors.Is(err, persistence.ErrWorkUnavailable) {
-		outcome := refusedAdminAccount(http.StatusServiceUnavailable, "overloaded")
-		outcome.actionHandled = true
-		outcome.event = "http.request_refused"
+	failure := classifyAccountMutationGuardFailure(err)
+	if failure.refused {
+		outcome := refusedAdminAccount(failure.status, failure.reason)
+		outcome.actionHandled = failure.handled
+		outcome.event = failure.event
 		return outcome
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return adminAccountOutcome{result: adminAccountFailed, status: http.StatusServiceUnavailable, actionHandled: true}
+	if failure.canceled {
+		return adminAccountOutcome{result: adminAccountFailed, status: failure.status, actionHandled: failure.handled}
 	}
-	return failedAdminAccount(http.StatusServiceUnavailable, "database_unavailable")
+	return failedAdminAccount(failure.status, failure.reason)
 }
 
 func (s *Server) applyAdminAccountMutation(ctx context.Context, r *http.Request, actor adminIdentity, target string, expected int64, action string, spec accountActionSpec, plan string) (outcome adminAccountOutcome) {
