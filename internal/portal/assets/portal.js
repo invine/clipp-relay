@@ -8,10 +8,6 @@ document.querySelectorAll(".workspace-menu").forEach((menu) => {
       summary?.focus();
     }
   });
-  menu.querySelector("[data-close-menu]")?.addEventListener("click", () => {
-    menu.open = false;
-    summary?.focus();
-  });
 });
 
 document.querySelectorAll("[data-copy]").forEach((button) => {

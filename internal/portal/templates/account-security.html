@@ -15,10 +15,10 @@
   <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
   <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> Access &amp; security</span>
   <span class="bar-account">{{.Email}}</span>
-  <details class="workspace-menu"><summary aria-label="Open or close portal navigation">Menu</summary><nav aria-label="Portal navigation">
+  <details class="workspace-menu"><summary aria-label="Open or close portal navigation"><span class="menu-icon" aria-hidden="true"></span><span>Menu</span></summary><nav aria-label="Portal navigation">
     <a href="/">Your account</a><a href="/account/security" aria-current="page">Access &amp; security</a>
     {{if .Admin}}<a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
-    <button class="menu-close" data-close-menu type="button">Close menu</button>
+    <form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form>
   </nav></details>
 </header>
 <main class="page">

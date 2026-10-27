@@ -16,11 +16,11 @@
   <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
   <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> {{if .SignedIn}}Your account{{else}}Welcome{{end}}</span>
   {{if .SignedIn}}<span class="bar-account">{{.Email}}</span>{{end}}
-  <details class="workspace-menu"><summary aria-label="Open or close portal navigation">Menu</summary><nav aria-label="Portal navigation">
+  <details class="workspace-menu"><summary aria-label="Open or close portal navigation"><span class="menu-icon" aria-hidden="true"></span><span>Menu</span></summary><nav aria-label="Portal navigation">
     <a href="/" aria-current="page">Your account</a>
     {{if .SignedIn}}<a href="/account/security">Access &amp; security</a>{{end}}
     {{if .Admin}}<a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
-    <button class="menu-close" data-close-menu type="button">Close menu</button>
+    {{if .SignedIn}}<form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form>{{end}}
   </nav></details>
 </header>
 <main class="page">
@@ -29,16 +29,13 @@
 {{if .SignedIn}}
   <div class="page-heading">
 <div>
-<h1>Your relay account</h1>
+<div class="account-title"><h1>Your relay account</h1><span class="badge status-{{.Status}}">{{if .RecoveryHeld}}Recovery Review Hold{{else}}{{.Status}}{{end}}</span></div>
 <p class="muted account-email">{{.Email}}
 </p>
 </div>
 <div class="heading-actions"><a class="button connect-clipp" href="#connection-setup">Connect Clipp</a>{{if .Admin}}
 <a class="button secondary" href="/admin">Administration <span aria-hidden="true">↗</span>
 </a>{{end}}
-<a class="button secondary" href="/" aria-label="Refresh account state">Refresh account state</a>
-<span class="badge status-{{.Status}}">{{if .RecoveryHeld}}Recovery Review Hold{{else}}{{.Status}}{{end}}
-</span>
 </div>
 </div>
   {{if not .Active}}
