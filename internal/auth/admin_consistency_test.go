@@ -53,7 +53,7 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
-	s.SetAccountChangedForTest(func(AccountChange) func() { return nil })
+	s.SetAccountChangedForTest(func(AccountChange) string { return "" })
 	s.SetGrantRevokedForTest(func(string) error { return nil })
 	id, err := uuid()
 	if err != nil {
@@ -169,7 +169,7 @@ func TestAmbiguousAccountCommitInvalidatesBeforeResponse(t *testing.T) {
 		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.audit_events WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, target)
 	})
 	var changed AccountChange
-	s.SetAccountChangedForTest(func(change AccountChange) func() { changed = change; return nil })
+	s.SetAccountChangedForTest(func(change AccountChange) string { changed = change; return "" })
 	s.commitAccountAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
@@ -204,10 +204,11 @@ func TestAmbiguousSuspensionFencesAndReportsUncertainty(t *testing.T) {
 	})
 	var changed AccountChange
 	closed := false
-	s.SetAccountChangedForTest(func(change AccountChange) func() {
+	s.SetAccountChangedForTest(func(change AccountChange) string {
 		changed = change
-		return func() { closed = true }
+		return "account_access_changed"
 	})
+	s.SetAccountInvalidationCompleteForTest(func(string) error { closed = true; return nil })
 	s.commitAccountAccess = func(ctx context.Context, tx persistence.AccountAccessTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
 			return err
