@@ -169,7 +169,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	}
 	var admitted, uncertain bool
 	var invalidationFailed bool
-	var closeConnections func()
+	var completeInvalidation bool
 	if s.beforeAccountActionGuard != nil {
 		s.beforeAccountActionGuard()
 	}
@@ -219,8 +219,13 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.uncertainAccounts.Store(id, uncertainDeletion{operationID: operation})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: admission.WeeklyBytes, SessionLimit: admission.Sessions, CloseAll: true})
-			invalidationFailed = s.deliverAccountInvalidation(id) != nil
+			change := AccountChange{AccountID: id, WeeklyBytes: admission.WeeklyBytes, SessionLimit: admission.Sessions, CloseAll: true}
+			reason := s.accountChanged(change)
+			if reason == "" {
+				reason = "account_access_changed"
+			}
+			invalidationFailed = s.deliverAccountInvalidation(id, reason) != nil
+			completeInvalidation = true
 			admitted, uncertain = true, err != nil
 		}); accountGuardErr != nil {
 			markGuardDiagnostic(r, accountGuardErr)
@@ -238,8 +243,8 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	if s.deletionAccounting != nil {
 		s.deletionAccounting.BeginAccountingDeletion(id)
 	}
-	if closeConnections != nil {
-		closeConnections()
+	if completeInvalidation && s.accountInvalidationComplete(id) != nil {
+		invalidationFailed = true
 	}
 	cookie(w, sessionCookie, "", -1)
 	if uncertain {

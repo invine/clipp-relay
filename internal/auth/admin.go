@@ -676,17 +676,21 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	var applied *AccountChange
 	var uncertain bool
 	var invalidationFailed bool
+	var completeInvalidation bool
 	var securitySubject string
-	var closeConnections func()
 	if s.beforeAccountActionGuard != nil {
 		s.beforeAccountActionGuard()
 	}
 	update := func(unitCtx context.Context) {
 		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
 		if applied != nil {
-			closeConnections = s.accountChanged(*applied)
-			if applied.CloseAll {
-				invalidationFailed = s.deliverAccountInvalidation(applied.AccountID) != nil
+			reason := s.accountChanged(*applied)
+			if reason == "" && applied.CloseAll {
+				reason = "account_access_changed"
+			}
+			if reason != "" {
+				invalidationFailed = s.deliverAccountInvalidation(applied.AccountID, reason) != nil
+				completeInvalidation = true
 			}
 		}
 	}
@@ -740,8 +744,8 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 	}
 	if applied != nil {
-		if closeConnections != nil {
-			closeConnections()
+		if completeInvalidation && s.accountInvalidationComplete(applied.AccountID) != nil {
+			invalidationFailed = true
 		}
 		if uncertain {
 			markDiagnostic(r, "uncertain", "commit_unconfirmed")

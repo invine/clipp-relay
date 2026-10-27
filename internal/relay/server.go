@@ -101,15 +101,16 @@ const (
 )
 
 type sessionManager struct {
-	server              *Server
-	physicalClose       func(network.Conn)
-	closePending        map[network.Conn]struct{}
-	closeInFlight       map[network.Conn]struct{}
-	closeWake           chan struct{}
-	closeStop           chan struct{}
-	closeDone           chan struct{}
-	deferredGrantCloses map[string]map[network.Conn]struct{}
-	lifecycle           map[network.Conn]connectionLifecycle
+	server                *Server
+	physicalClose         func(network.Conn)
+	closePending          map[network.Conn]struct{}
+	closeInFlight         map[network.Conn]struct{}
+	closeWake             chan struct{}
+	closeStop             chan struct{}
+	closeDone             chan struct{}
+	deferredGrantCloses   map[string]map[network.Conn]struct{}
+	deferredAccountCloses map[string]map[network.Conn]struct{}
+	lifecycle             map[network.Conn]connectionLifecycle
 
 	mu             sync.Mutex
 	connectionInfo map[network.Conn]connectionDiagnostic
@@ -135,10 +136,6 @@ type Server struct {
 	diagnostics DiagnosticSink
 	*sessionManager
 	accounting        Accounting
-	accountingCloses  chan struct{}
-	accountingPending map[network.Conn]struct{}
-	accountingStop    chan struct{}
-	accountingDone    chan struct{}
 	maxSessions       int
 	tcpEnabled        bool
 	wsEnabled         bool
@@ -257,39 +254,9 @@ func NewProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server, error)
 			return err
 		}
 		s.accounting = q
-		s.accountingCloses = make(chan struct{}, 1)
-		s.accountingPending = make(map[network.Conn]struct{})
-		s.accountingStop = make(chan struct{})
-		s.accountingDone = make(chan struct{})
 		if err := q.StartAccounting(s.accountingClosure); err != nil {
 			return err
 		}
-		go func() {
-			defer close(s.accountingDone)
-			for {
-				select {
-				case <-s.accountingStop:
-					return
-				case <-s.accountingCloses:
-					for {
-						s.mu.Lock()
-						var conn network.Conn
-						for c := range s.accountingPending {
-							conn = c
-							break
-						}
-						s.mu.Unlock()
-						if conn == nil {
-							break
-						}
-						_ = conn.Close()
-						s.mu.Lock()
-						delete(s.accountingPending, conn)
-						s.mu.Unlock()
-					}
-				}
-			}
-		}()
 		return nil
 	})
 }
@@ -301,13 +268,7 @@ func (s *Server) accountingClosure(out quota.ClosureOutcome) {
 	}
 	for v := range s.byAccount[out.AccountID] {
 		s.endSessionLocked(v, out.Reason)
-		// Physical connections remain bounded by libp2p's resource manager.
-		// Keep every detached connection until the fixed close worker finishes.
-		s.accountingPending[v.conn] = struct{}{}
-		select {
-		case s.accountingCloses <- struct{}{}:
-		default:
-		}
+		s.sessionManager.queueCloseLocked(v.conn)
 	}
 }
 
@@ -342,7 +303,7 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 		return nil, err
 	}
 	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, accounting: accounting, diagnostics: opts.Diagnostics, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname}
-	s.sessionManager = &sessionManager{server: s, physicalClose: func(c network.Conn) { _ = c.Close() }, closePending: map[network.Conn]struct{}{}, closeInFlight: map[network.Conn]struct{}{}, closeWake: make(chan struct{}, 1), closeStop: make(chan struct{}), closeDone: make(chan struct{}), deferredGrantCloses: map[string]map[network.Conn]struct{}{}, lifecycle: map[network.Conn]connectionLifecycle{}, connectionInfo: map[network.Conn]connectionDiagnostic{}, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, authAttempts: map[network.Conn]*authAttempt{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s.sessionManager = &sessionManager{server: s, physicalClose: func(c network.Conn) { _ = c.Close() }, closePending: map[network.Conn]struct{}{}, closeInFlight: map[network.Conn]struct{}{}, closeWake: make(chan struct{}, 1), closeStop: make(chan struct{}), closeDone: make(chan struct{}), deferredGrantCloses: map[string]map[network.Conn]struct{}{}, deferredAccountCloses: map[string]map[network.Conn]struct{}{}, lifecycle: map[network.Conn]connectionLifecycle{}, connectionInfo: map[network.Conn]connectionDiagnostic{}, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, authAttempts: map[network.Conn]*authAttempt{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{server: s}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -417,9 +378,12 @@ func (s *Server) Close() error {
 			}
 		}
 		clear(s.sessionManager.deferredGrantCloses)
-		for c := range s.accountingPending {
-			pending = append(pending, c)
+		for _, deferred := range s.sessionManager.deferredAccountCloses {
+			for c := range deferred {
+				s.sessionManager.queueCloseLocked(c)
+			}
 		}
+		clear(s.sessionManager.deferredAccountCloses)
 		s.mu.Unlock()
 		// Host.Close is the force-close backstop for real transports. The worker
 		// retains ownership of queued and already-detached connections until it
@@ -431,13 +395,6 @@ func (s *Server) Close() error {
 		}
 		close(s.sessionManager.closeStop)
 		<-s.sessionManager.closeDone
-		if s.accountingDone != nil {
-			close(s.accountingStop)
-			<-s.accountingDone
-		}
-		s.mu.Lock()
-		clear(s.accountingPending)
-		s.mu.Unlock()
 		result = s.manager.Close()
 	})
 	return result
@@ -868,7 +825,7 @@ func (s *Server) RetireGrant(grantID string) error {
 	if grantID == "" {
 		return errors.New("grant ID is required")
 	}
-	return s.sessionManager.invalidateSessions("grant_revoked", func(session *session) bool { return session.grantID == grantID }, grantID)
+	return s.sessionManager.invalidateSessions("grant_revoked", func(session *session) bool { return session.grantID == grantID }, grantID, "", true)
 }
 
 // CompleteGrantInvalidation releases deferred physical cleanup after Auth has
@@ -903,26 +860,60 @@ func (s *Server) InvalidateAccount(accountID string) error {
 	if accountID == "" {
 		return errors.New("account ID is required")
 	}
-	return s.sessionManager.invalidateSessions("account_access_changed", func(session *session) bool { return session.account == accountID }, "")
+	if err := s.RetireAccount(accountID, "account_access_changed"); err != nil {
+		return err
+	}
+	return s.CompleteAccountInvalidation(accountID)
+}
+
+// RetireAccount removes account sessions from authorization and defers their
+// physical close until the owner releases its logical protection.
+func (s *Server) RetireAccount(accountID, reason string) error {
+	if accountID == "" {
+		return errors.New("account ID is required")
+	}
+	if reason == "" {
+		reason = "account_access_changed"
+	}
+	return s.sessionManager.invalidateSessions(reason, func(session *session) bool { return session.account == accountID }, "", accountID, reason == "account_access_changed")
+}
+
+// CompleteAccountInvalidation releases manager-owned closes after Auth has
+// released identity and account protection. No connection handle crosses the
+// Auth boundary.
+func (s *Server) CompleteAccountInvalidation(accountID string) error {
+	if accountID == "" {
+		return errors.New("account ID is required")
+	}
+	m := s.sessionManager
+	m.mu.Lock()
+	for conn := range m.deferredAccountCloses[accountID] {
+		m.queueCloseLocked(conn)
+	}
+	delete(m.deferredAccountCloses, accountID)
+	m.mu.Unlock()
+	return nil
 }
 
 // invalidateSessions retires pending attempts whose authorization scope may
 // not yet be known, then removes only matching established sessions. The same
 // lock serializes invalidation with successful authentication application.
-func (m *sessionManager) invalidateSessions(reason string, matches func(*session) bool, deferredGrant string) error {
+func (m *sessionManager) invalidateSessions(reason string, matches func(*session) bool, deferredGrant, deferredAccount string, cancelPending bool) error {
 	s := m.server
 	s.mu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(s.authAttempts))
-	for conn, attempt := range s.authAttempts {
-		delete(s.authAttempts, conn)
-		if attempt.cancel != nil {
-			cancels = append(cancels, attempt.cancel)
-		}
-		// A pending unauthenticated connection has no known grant association.
-		// Preserve conservative cancellation by making it terminal too, while
-		// leaving an established unrelated session usable during renewal.
-		if s.byConn[conn] == nil {
-			m.markClosingLocked(conn)
+	if cancelPending {
+		for conn, attempt := range s.authAttempts {
+			delete(s.authAttempts, conn)
+			if attempt.cancel != nil {
+				cancels = append(cancels, attempt.cancel)
+			}
+			// A pending unauthenticated connection has no known grant association.
+			// Preserve conservative cancellation by making it terminal too, while
+			// leaving an established unrelated session usable during renewal.
+			if s.byConn[conn] == nil {
+				m.markClosingLocked(conn)
+			}
 		}
 	}
 	for _, session := range s.byConn {
@@ -933,6 +924,11 @@ func (m *sessionManager) invalidateSessions(reason string, matches func(*session
 					m.deferredGrantCloses[deferredGrant] = map[network.Conn]struct{}{}
 				}
 				m.deferredGrantCloses[deferredGrant][session.conn] = struct{}{}
+			} else if deferredAccount != "" {
+				if m.deferredAccountCloses[deferredAccount] == nil {
+					m.deferredAccountCloses[deferredAccount] = map[network.Conn]struct{}{}
+				}
+				m.deferredAccountCloses[deferredAccount][session.conn] = struct{}{}
 			} else {
 				m.queueCloseLocked(session.conn)
 			}

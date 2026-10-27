@@ -740,3 +740,55 @@ func TestGrantRevocationKeepsDelayedClosingConnectionTerminal(t *testing.T) {
 	}
 	release()
 }
+
+func TestAccountRetirementDefersPhysicalCloseUntilCompletion(t *testing.T) {
+	s, err := New(&grantAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "grant-a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("initial auth: %s", response)
+	}
+
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	s.sessionManager.physicalClose = func(c network.Conn) {
+		close(closeStarted)
+		<-releaseClose
+		_ = c.Close()
+	}
+	defer release()
+	if err := s.RetireAccount("a", "policy_changed"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+		t.Fatal("physical close started before account protection was released")
+	default:
+	}
+	if got := s.ActiveSessions(); got != 0 {
+		t.Fatalf("account retirement left %d authorized sessions", got)
+	}
+	if err := s.CompleteAccountInvalidation("a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+	case <-ctx.Done():
+		t.Fatal("account completion did not start manager-owned physical close")
+	}
+	release()
+}
