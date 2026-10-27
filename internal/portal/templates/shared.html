@@ -9,7 +9,8 @@
 </title>
   <link rel="stylesheet" href="/assets/portal.css">
 </head>
-<body>
+<body{{if or (eq . "Clipp Relay — Your account") (eq . "Clipp Relay — Access & security") (eq . "Clipp Relay — Administration") (eq . "Clipp Relay — Quota plans")}} class="workspace-page"{{end}}>
+{{if and (ne . "Clipp Relay — Your account") (ne . "Clipp Relay — Access & security") (ne . "Clipp Relay — Administration") (ne . "Clipp Relay — Quota plans")}}
 <header class="site-header">
 <a class="brand" href="/">
 <span class="brand-mark" aria-hidden="true">
@@ -18,9 +19,9 @@
 <span class="header-note">A connection for your devices</span>
 </header>
 {{end}}
+{{end}}
 
 {{define "foot"}}
-<footer class="site-footer">Clipp Relay · Your clipboard, connected.</footer>
 </body>
 </html>{{end}}
 

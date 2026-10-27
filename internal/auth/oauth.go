@@ -105,7 +105,11 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie, _ := r.Cookie(sessionCookie)
-	s.presentConsent(w, r, portalSession.account, cookie.Value, portalSession.version, portalSession.subject, oauthIntent{client, redirect, state, challenge})
+	if !portalSession.emailVerified || portalSession.email == "" {
+		s.oauthError(w, http.StatusUnauthorized)
+		return
+	}
+	s.presentConsent(w, r, portalSession.account, cookie.Value, portalSession.version, portalSession.subject, portalSession.email, oauthIntent{client, redirect, state, challenge})
 }
 
 func (s *Server) nativeAuthorizeRequest(ctx context.Context, intent oauthIntent) (fosite.AuthorizeRequester, error) {
@@ -116,16 +120,7 @@ func (s *Server) nativeAuthorizeRequest(ctx context.Context, intent oauthIntent)
 	r := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil).WithContext(ctx)
 	return s.nativeIssuer.NewAuthorizeRequest(ctx, r)
 }
-func denyAuthorization(w http.ResponseWriter, r *http.Request, intent oauthIntent) {
-	target, _ := url.Parse(intent.redirect)
-	params := target.Query()
-	params.Set("error", "access_denied")
-	params.Set("state", intent.state)
-	target.RawQuery = params.Encode()
-	http.Redirect(w, r, target.String(), http.StatusFound)
-}
-
-func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, version uint64, subject string, intent oauthIntent) {
+func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account, credential string, version uint64, subject, email string, intent oauthIntent) {
 	if s.nativeIssuer == nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
@@ -210,7 +205,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
 			markDiagnostic(r, "refused", "account_blocked")
 		}
-		denyAuthorization(w, r, intent)
+		s.writeAuthorizationError(w, r, authorizeRequest)
 		return
 	}
 	if tx.Commit(op.Context()) != nil {
@@ -257,8 +252,77 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		callbackSource = callback.Scheme + ":"
 	}
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self' "+callbackSource+"; base-uri 'none'")
-	portal.Render(w, http.StatusOK, "consent", struct{ Client, Flow, CSRF string }{intent.client, id, s.csrf(version, credential)})
+	portalOrigin, err := url.Parse(s.Origin)
+	if err != nil || portalOrigin.Host == "" {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return
+	}
+	portal.Render(w, http.StatusOK, "consent", struct{ Client, Email, RelayHost, Flow, CSRF string }{
+		Client: intent.client, Email: email, RelayHost: portalOrigin.Host, Flow: id, CSRF: s.csrf(version, credential),
+	})
 }
+
+func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request, request fosite.AuthorizeRequester) {
+	if s.nativeIssuer == nil || request == nil {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return
+	}
+	s.nativeIssuer.WriteAuthorizeError(r.Context(), w, request, fosite.ErrAccessDenied)
+}
+
+// validateConsentSession checks the live Portal Session and current account
+// generation before cancellation consumes the in-memory one-use continuation.
+// The caller holds the per-identity guard, so authorize and cancel serialize.
+func (s *Server) validateConsentSession(w http.ResponseWriter, op persistence.Operation, consent oauthConsent, credential string) bool {
+	ctx := op.Context()
+	tx, authorizationTx, err := beginAuthorizationTransaction(op)
+	if err != nil {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return false
+	}
+	defer tx.Rollback(op.Context())
+	accountState, err := authorizationTx.LockAccountAuthorization(ctx, consent.account)
+	if errors.Is(err, persistence.ErrInvalidCredential) {
+		s.oauthError(w, http.StatusUnauthorized)
+		return false
+	}
+	if err != nil {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return false
+	}
+	if accountState.Generation != consent.generation {
+		s.oauthError(w, http.StatusUnauthorized)
+		return false
+	}
+	portalSession, err := authorizationTx.LockPortalSessionForConsent(ctx, digest32(s.digest(consent.version, "portal-session", credential)), consent.version, consent.account, accountState.Generation)
+	if errors.Is(err, persistence.ErrInvalidCredential) {
+		s.oauthError(w, http.StatusUnauthorized)
+		return false
+	}
+	if err != nil {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return false
+	}
+	if portalSession.Generation != accountState.Generation || subtle.ConstantTimeCompare(portalSession.CSRFHash, s.digest(consent.version, "csrf-store", s.csrf(consent.version, credential))) != 1 {
+		s.oauthError(w, http.StatusUnauthorized)
+		return false
+	}
+	touched, err := authorizationTx.TouchPortalSession(ctx, digest32(s.digest(consent.version, "portal-session", credential)), consent.version, consent.account, accountState.Generation)
+	if err != nil || !touched {
+		if err != nil {
+			s.oauthError(w, http.StatusServiceUnavailable)
+		} else {
+			s.oauthError(w, http.StatusUnauthorized)
+		}
+		return false
+	}
+	if err = tx.Commit(ctx); err != nil {
+		s.oauthError(w, http.StatusServiceUnavailable)
+		return false
+	}
+	return true
+}
+
 func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 	if s.nativeIssuer == nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
@@ -269,7 +333,15 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-	if r.ParseForm() != nil || len(r.PostForm) != 2 || len(r.PostForm["flow"]) != 1 || len(r.PostForm["csrf"]) != 1 {
+	if r.ParseForm() != nil || len(r.PostForm) < 2 || len(r.PostForm) > 3 || len(r.PostForm["flow"]) != 1 || len(r.PostForm["csrf"]) != 1 || len(r.PostForm["decision"]) > 1 || len(r.PostForm) == 3 && len(r.PostForm["decision"]) != 1 {
+		s.oauthError(w, 400)
+		return
+	}
+	decision := "authorize"
+	if values := r.PostForm["decision"]; len(values) == 1 {
+		decision = values[0]
+	}
+	if decision != "authorize" && decision != "cancel" {
 		s.oauthError(w, 400)
 		return
 	}
@@ -308,9 +380,6 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 	id := r.PostForm.Get("flow")
 	s.mu.Lock()
 	consent, ok := s.consents[id]
-	if ok {
-		delete(s.consents, id)
-	}
 	epoch := s.flowEpoch
 	s.mu.Unlock()
 	if ok {
@@ -325,6 +394,25 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 	}
 	if consent.authorizeRequest == nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
+		return
+	}
+	if !s.validateConsentSession(w, op, consent, cookie.Value) {
+		return
+	}
+	s.mu.Lock()
+	current, stillCurrent := s.consents[id]
+	if stillCurrent && current.epoch == consent.epoch && current.account == consent.account && current.version == consent.version {
+		delete(s.consents, id)
+	} else {
+		stillCurrent = false
+	}
+	s.mu.Unlock()
+	if !stillCurrent {
+		s.oauthError(w, 401)
+		return
+	}
+	if decision == "cancel" {
+		s.writeAuthorizationError(w, r, consent.authorizeRequest)
 		return
 	}
 	s.issueNativeCode(w, r, op, cookie.Value, version, consent.authorizeRequest, account, consent.generation, consent.intent)
@@ -363,7 +451,7 @@ func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, op pers
 			s.oauthError(w, 503)
 			return
 		}
-		denyAuthorization(w, r, intent)
+		s.writeAuthorizationError(w, r, authorize)
 		return
 	}
 	ctx := issuer.InAuthorizationTransaction(op.Context(), authorizationTx, issuer.ClientType(intent.client), "")

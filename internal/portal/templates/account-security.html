@@ -1,0 +1,62 @@
+{{define "account-security"}}
+{{template "head" "Clipp Relay — Access & security"}}
+<div class="portal-workspace">
+<aside class="workspace-sidebar" aria-label="Portal navigation">
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <div class="relay-scope"><strong>{{.RelayHost}}</strong><span>Account portal</span></div>
+  <nav class="workspace-nav" aria-label="Portal navigation">
+    <a href="/">Your account</a><a href="/account/security" aria-current="page">Access &amp; security</a>
+    {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
+  </nav>
+  <div class="sidebar-footer"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div>
+</aside>
+<div class="workspace-main">
+<header class="workspace-bar">
+  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> Access &amp; security</span>
+  <span class="bar-account">{{.Email}}</span>
+  <details class="workspace-menu"><summary aria-label="Open or close portal navigation">Menu</summary><nav aria-label="Portal navigation">
+    <a href="/">Your account</a><a href="/account/security" aria-current="page">Access &amp; security</a>
+    {{if .Admin}}<a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
+    <button class="menu-close" data-close-menu type="button">Close menu</button>
+  </nav></details>
+</header>
+<main class="page">
+<div class="page-heading"><div><h1>Access &amp; security</h1><p class="muted account-email">{{.Email}}</p></div><a class="button secondary" href="/">Your account</a></div>
+<section class="card" aria-labelledby="access-state-title">
+<h2 id="access-state-title">Relay account access</h2>
+<p><strong>{{if .RecoveryHeld}}Recovery Review Hold{{else}}{{.Status}}{{end}}</strong></p>
+<p class="muted">{{if .Active}}Your account is approved to use relay capacity.{{else}}{{.Description}}{{end}}</p>
+<p class="muted">Active Login Grants: {{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}. Login Grants authorize Clipp apps; this portal does not maintain a device list.</p>
+</section>
+<section class="card" aria-labelledby="portal-session-title">
+<h2 id="portal-session-title">This portal</h2>
+<p>Log out of this portal to end this browser session. Your Clipp Login Grants, Relay Access Tokens and live Relay Sessions remain active.</p>
+<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary">Log out of this portal</button></form>
+</section>
+<section class="card" aria-labelledby="revoke-title">
+<h2 id="revoke-title">Sign out everywhere</h2>
+<p>This will revoke every Login Grant and Relay Access Token for <strong>{{.Email}}</strong>, end all portal sessions, and invalidate its live Relay Sessions. Clipp apps will need to sign in again. Physical connection closure may take a short time after access is invalidated.</p>
+<form method="post" action="/auth/revoke" class="reviewed-action">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label><input type="checkbox" name="confirm" value="yes" required> I understand this signs {{.Email}} out everywhere.</label>
+<button class="secondary">Confirm sign out everywhere</button>
+</form>
+</section>
+<details class="danger-details">
+<summary>Delete relay account</summary>
+<p>Deleting your account closes relay access, ends your Portal Sessions and Clipp app authorizations, and permanently removes this Relay Account. The deletion may take time to finish; closing this page will not cancel it.</p>
+<form class="deletion-confirmation" method="post" action="/auth/delete">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="delete-account-email">To confirm, type <strong>{{.Email}}</strong>.</label>
+<input id="delete-account-email" name="confirm_email" type="email" autocomplete="off" required pattern="{{emailPattern .Email}}" title="Enter the email address shown above exactly.">
+<p class="muted fine-print">Deletion requires a recent Google sign-in. If prompted, sign in and return here to review and submit this action again.</p>
+<button class="danger">Permanently delete relay account</button>
+</form>
+</details>
+</main>
+</div>
+</div>
+<script src="/assets/portal.js" defer></script>
+{{template "foot"}}
+{{end}}

@@ -1,18 +1,43 @@
 {{define "account"}}
 {{template "head" "Clipp Relay — Your account"}}
+<div class="portal-workspace">
+<aside class="workspace-sidebar" aria-label="Portal navigation">
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <div class="relay-scope"><strong>{{.RelayHost}}</strong><span>Account portal</span></div>
+  <nav class="workspace-nav" aria-label="Portal navigation">
+    <a href="/" aria-current="page">Your account</a>
+    {{if .SignedIn}}<a href="/account/security">Access &amp; security</a>{{end}}
+    {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
+  </nav>
+  {{if .SignedIn}}<div class="sidebar-footer"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div>{{end}}
+</aside>
+<div class="workspace-main">
+<header class="workspace-bar">
+  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> {{if .SignedIn}}Your account{{else}}Welcome{{end}}</span>
+  {{if .SignedIn}}<span class="bar-account">{{.Email}}</span>{{end}}
+  <details class="workspace-menu"><summary aria-label="Open or close portal navigation">Menu</summary><nav aria-label="Portal navigation">
+    <a href="/" aria-current="page">Your account</a>
+    {{if .SignedIn}}<a href="/account/security">Access &amp; security</a>{{end}}
+    {{if .Admin}}<a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
+    <button class="menu-close" data-close-menu type="button">Close menu</button>
+  </nav></details>
+</header>
 <main class="page">
+{{if eq .Notice "portal-logout"}}<p class="notice" role="status">You have signed out of this portal. Clipp Login Grants and relay access remain active.</p>{{end}}
+{{if eq .Notice "revoked"}}<p class="notice" role="status">Account-wide revocation completed. Clipp Login Grants and Relay Access Tokens were revoked, and Relay Sessions were invalidated. Physical connection closure may still be completing.</p>{{end}}
 {{if .SignedIn}}
   <div class="page-heading">
 <div>
-<p class="eyebrow">YOUR CONNECTION HUB</p>
 <h1>Your relay account</h1>
 <p class="muted account-email">{{.Email}}
 </p>
 </div>
-<div class="heading-actions">{{if .Admin}}
+<div class="heading-actions"><a class="button connect-clipp" href="#connection-setup">Connect Clipp</a>{{if .Admin}}
 <a class="button secondary" href="/admin">Administration <span aria-hidden="true">↗</span>
 </a>{{end}}
-<span class="badge status-{{.Status}}">{{.Status}}
+<a class="button secondary" href="/" aria-label="Refresh account state">Refresh account state</a>
+<span class="badge status-{{.Status}}">{{if .RecoveryHeld}}Recovery Review Hold{{else}}{{.Status}}{{end}}
 </span>
 </div>
 </div>
@@ -22,7 +47,8 @@
 </span>
 <div>
 <h2>{{.Description}}
-</h2>{{if eq .Status "Pending"}}
+</h2>{{if .RecoveryHeld}}
+<p>Relay use remains unavailable until an administrator reviews your status and quota assignments.</p>{{else if eq .Status "Pending"}}
 <p>An administrator needs to approve your account before Clipp can use this relay. You can prepare the setup below while you wait.</p>{{else if eq .Status "Suspended"}}
 <p>Relay access is paused. Contact the relay administrator for help restoring access.</p>{{else}}
 <p>Contact the relay administrator if you believe your account should have access.</p>{{end}}
@@ -30,64 +56,22 @@
 </section>{{end}}
 {{else}}
   <section class="card welcome">
-<p class="eyebrow">CLIPP RELAY</p>
-<h1>Keep your devices<br>within reach.</h1>
-<p class="lede">Use this relay to help your Clipp devices connect when a direct connection is unavailable.</p>
+<p class="eyebrow">Clipp Relay</p>
+<h1>Connect Clipp to this relay.</h1>
+<p class="lede">Use this relay when a direct connection between your Clipp devices is unavailable.</p>
 <a class="button" href="/auth/login">Sign in with Google <span aria-hidden="true">→</span>
 </a>
-<p class="muted fine-print">Sign in to view your account status and allowance. New accounts need administrator approval.</p>
+<p class="muted fine-print">Sign in to view your relay account. New accounts need administrator approval before they can use relay capacity.</p>
 </section>
 {{end}}
 
-  <section class="card setup-card" aria-labelledby="setup-title">
-    <div class="section-heading">
-<div>
-<p class="eyebrow">GET CONNECTED</p>
-<h2 id="setup-title">Add this relay to Clipp</h2>
-</div>
-<span class="step-tag">3 simple steps</span>
-</div>
-    <p class="muted">Use this discovery URL in each Clipp installation you want to connect.</p>
-    <div class="endpoint">
-<label class="sr-only" for="discovery-url">HTTPS discovery URL</label>
-<input id="discovery-url" type="url" value="{{.DiscoveryURL}}" readonly spellcheck="false">
-<button type="button" class="secondary" data-copy="discovery-url">Copy URL</button>
-</div>
-    <div class="endpoint-meta">
-<a class="fine-print" href="{{.DiscoveryURL}}" target="_blank" rel="noopener">Open discovery endpoint ↗</a>
-<p class="copy-status muted" data-copy-status role="status" aria-live="polite">
-</p>
-</div>
-    <ol class="setup-steps">
-<li>
-<span class="step-number" aria-hidden="true">1</span>
-<div>
-<strong>Open relay settings</strong>
-<p>In Clipp, open the Peers sidebar, find Relays, and choose Add relay. On a narrow screen, use the menu button to open the sidebar.</p>
-</div>
-</li>
-<li>
-<span class="step-number" aria-hidden="true">2</span>
-<div>
-<strong>Paste the discovery URL</strong>
-<p>Choose Authenticated discovery, paste the URL into HTTPS discovery URL, and save.</p>
-</div>
-</li>
-<li>
-<span class="step-number" aria-hidden="true">3</span>
-<div>
-<strong>Sign in from Clipp</strong>
-<p>Choose Log in for the saved relay, then authorize Clipp using your approved Google account.</p>
-</div>
-</li>
-</ol>
-    <div class="note">{{if .Active}}Already signed in on this website? Clipp still needs its own authorization.{{else}}Relay use becomes available after your account is approved.{{end}} Opening the discovery URL in a browser may show an authentication error; Clipp requests it with a relay credential.</div>
-  </section>
+{{if not .SignedIn}}
+  {{template "connection-setup" .}}
+{{end}}
 
 {{if .Active}}
   <div class="account-grid">
     <section class="card quota-card" aria-labelledby="quota-title">
-<p class="eyebrow">THIS WEEK</p>
 <h2 id="quota-title">Your allowance</h2>
       <div class="quota-summary">
 <svg class="quota-ring" viewBox="0 0 120 120" role="img" aria-label="Recorded Relay Usage {{bytes .Recorded}} of {{bytes .WeeklyBytes}}">
@@ -97,17 +81,18 @@
 <text class="ring-label" x="60" y="78">recorded</text>
 </svg>
 <div>
-<p class="metric-value" title="{{.Recorded}} bytes">{{bytes .Recorded}}
+<p class="metric-caption">Remaining this week</p>
+<p class="metric-value" title="{{.Remaining}} bytes">{{bytes .Remaining}}
 </p>
-<p class="muted">of <strong title="{{.WeeklyBytes}} bytes">{{bytes .WeeklyBytes}}
-</strong> per week</p>
+<p class="muted">of <strong title="{{.WeeklyBytes}} bytes">{{bytes .WeeklyBytes}}</strong> allowance</p>
 </div>
 </div>
       <p class="quota-total">Recorded Relay Usage: {{bytes .Recorded}}
 </p>
 <p class="usage-state">{{.UsageState}}
 </p>
-<p class="muted fine-print">Resets Monday at 00:00 UTC. Unused allowance does not roll over.</p>
+<p class="window-label">Weekly Quota Window</p>
+<p class="muted fine-print">Starts {{.WeekStart.Format "2 January 2006"}} 00:00 UTC. Resets next Monday at 00:00 UTC. Unused allowance does not roll over.</p>
 <details class="explanation">
 <summary>What does Recorded Relay Usage mean?</summary>
 <p>Confirmed durable usage has a periodic confirmation lag; recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for the same account; control traffic can count too. This conservative measure is not exact application payload traffic. History retains the current week + twelve preceding weeks as absolute totals, independent of today’s allowance.</p>
@@ -115,7 +100,6 @@
 </details>
     </section>
     <section class="card capacity-card">
-<p class="eyebrow">ACCOUNT CAPACITY</p>
 <h2>Connections &amp; sign-ins</h2>
 <div class="table-scroll">
 <table>
@@ -147,79 +131,74 @@
   <section class="card">
 <div class="section-heading">
 <div>
-<p class="eyebrow">QUOTA HISTORY</p>
 <h2 id="history-title">Weekly history</h2>
 </div>
-<span class="muted fine-print">Current week + 12 completed weeks</span>
+<span class="muted fine-print">Current week is incomplete</span>
 </div>
 {{if .History}}
 {{with histogram .History}}
 {{$chart := .}}
-<figure class="history-chart" aria-labelledby="history-title">
+<nav class="history-range" aria-label="Weekly history range">
+  {{if $.ShowAllHistory}}<a href="/">Latest four weeks</a><span aria-current="page">All thirteen weeks</span>{{else}}<span aria-current="page">Latest four weeks</span><a href="/?history=all">All thirteen weeks</a>{{end}}
+</nav>
+<figure class="history-chart {{if $.ShowAllHistory}}range-all{{else}}range-recent{{end}}" aria-labelledby="history-title">
   <div class="history-chart-heading">
     <p class="muted fine-print">Recorded Relay Usage · week starting UTC</p>
-    <span class="history-legend"><span aria-hidden="true"></span>Current week</span>
+    <span class="history-legend"><span aria-hidden="true"></span>Current week · incomplete</span>
   </div>
-  <p class="history-scroll-hint muted fine-print">Scroll horizontally to view all weeks.</p>
-  <div class="history-chart-scroll" tabindex="0" role="region" aria-label="Weekly quota histogram, oldest to newest">
-    <svg class="history-histogram" width="{{.Width}}" height="280" viewBox="0 0 {{.Width}} 280" style="min-width:{{.Width}}px" role="group" aria-label="Recorded Relay Usage by week">
+  <div class="history-chart-scroll" role="region" aria-label="Weekly quota histogram, oldest to newest">
+    <svg class="history-histogram" width="{{.Width}}" height="280" viewBox="0 0 {{.Width}} 280" role="group" aria-label="Recorded Relay Usage by week">
       {{range .Ticks}}
       <line class="history-gridline" x1="64" x2="{{$chart.Right}}" y1="{{.Y}}" y2="{{.Y}}"/>
       <text class="history-axis" x="54" y="{{.Y}}" dy="4" text-anchor="end">{{.Label}}</text>
       {{end}}
       {{range .Bars}}
-      <g class="history-column{{if .Current}} current{{end}}" tabindex="0" role="img" aria-label="Week starting {{.Week}} UTC: {{.Value}}{{if .Current}}, current week{{end}}">
-        <title>Week starting {{.Week}} UTC: {{.Value}} ({{.Recorded}} bytes){{if .Current}} · current week{{end}}</title>
-        <rect class="history-bar" x="{{.X}}" y="{{.Y}}" width="36" height="{{.Height}}" rx="4"/>
-        <text class="history-value" x="{{.CenterX}}" y="{{.ValueY}}" text-anchor="middle">{{.Value}}</text>
+      <g class="history-column{{if .Current}} current{{end}}{{if not .Observed}} missing{{end}}" tabindex="0" role="img" aria-label="Week starting {{.Week}} UTC: {{if .Observed}}{{.Value}}{{else}}no recorded observation{{end}}{{if .Current}}, current week, incomplete{{end}}">
+        <title>Week starting {{.Week}} UTC: {{if .Observed}}{{.Value}} ({{.Recorded}} bytes){{else}}no recorded observation{{end}}{{if .Current}} · current week, incomplete{{end}}</title>
+        {{if .Observed}}{{if eq .Recorded 0}}<circle class="history-zero-mark{{if .Current}} current{{end}}" cx="{{.CenterX}}" cy="218" r="4"/>{{else}}<rect class="history-bar" x="{{.X}}" y="{{.Y}}" width="36" height="{{.Height}}" rx="4"/>{{end}}{{else}}<circle class="history-missing-mark" cx="{{.CenterX}}" cy="218" r="4"/>{{end}}
+        {{if .Observed}}<text class="history-value" x="{{.CenterX}}" y="{{.ValueY}}" text-anchor="middle">{{.Value}}</text>{{end}}
         <text class="history-date" x="{{.CenterX}}" y="242" text-anchor="middle">{{.Label}}</text>
         {{if .Current}}<text class="history-current-label" x="{{.CenterX}}" y="263" text-anchor="middle">This week</text>{{end}}
       </g>
       {{end}}
     </svg>
   </div>
-  {{if .AllZero}}<figcaption class="muted fine-print">No recorded usage in these weeks.</figcaption>{{end}}
+  {{if .AllZero}}<figcaption class="muted fine-print">Recorded usage was zero in every observed week.</figcaption>{{end}}
 </figure>
 {{end}}
 {{else}}<p class="muted">No quota history available.</p>{{end}}
+{{if .History}}
+<div class="history-table-wrap">
+<table class="history-table">
+<caption class="sr-only">Weekly Recorded Relay Usage with complete UTC week dates and exact byte totals</caption>
+<thead><tr><th scope="col">Week starting UTC</th><th scope="col">Recorded Relay Usage</th><th scope="col">Observation</th></tr></thead>
+<tbody>{{range .History}}<tr><th scope="row"><time datetime="{{.Week}}">{{.Week}}</time></th><td>{{if .Observed}}{{bytes .Recorded}} <span class="exact-bytes">({{.Recorded}} bytes)</span>{{else}}—{{end}}</td><td>{{if .Observed}}{{if eq .Recorded 0}}Recorded zero{{else}}Recorded{{end}}{{else}}No observation{{end}}{{if .Current}} · current week, incomplete{{end}}</td></tr>{{end}}</tbody>
+</table>
+</div>
+{{end}}
 </section>
 {{end}}
 {{if .SignedIn}}
-  <section class="card">
-<p class="eyebrow">ACCOUNT CONTROLS</p>
-<h2>Manage your access</h2>
-<div class="action-row">
-<div>
-<h3>Log out of this portal</h3>
-<p class="muted">Your Clipp apps keep their relay access.</p>
-</div>
-<form method="post" action="/auth/logout">
-<input type="hidden" name="csrf" value="{{.CSRF}}">
-<button class="secondary">Log out</button>
-</form>
-</div>
-<div class="action-row">
-<div>
-<h3>Sign out everywhere</h3>
-<p class="muted">End all portal sign-ins and revoke relay access for your Clipp apps.</p>
-</div>
-<form method="post" action="/auth/revoke">
-<input type="hidden" name="csrf" value="{{.CSRF}}">
-<button class="secondary">Sign out everywhere</button>
-</form>
-</div>
-<details class="danger-details">
-<summary>Delete relay account</summary>
-<p>Deletion is permanent. Sign in with Google again if your last authentication was more than ten minutes ago.</p>
-<form method="post" action="/auth/delete">
-<input type="hidden" name="csrf" value="{{.CSRF}}">
-<button class="danger">Delete relay account</button>
-</form>
-</details>
-</section>
+  {{template "connection-setup" .}}
+{{end}}
+{{if .SignedIn}}
 {{end}}
 </main>
+</div>
+</div>
 <script src="/assets/portal.js" defer>
 </script>
 {{template "foot"}}
+{{end}}
+
+{{define "connection-setup"}}
+<section class="card setup-card" id="connection-setup" aria-labelledby="setup-title">
+  <div class="section-heading"><div><h2 id="setup-title">Add this relay to Clipp</h2><p class="muted fine-print">Copy the canonical HTTPS discovery URL into each Clipp installation.</p></div></div>
+  <div class="endpoint"><label class="sr-only" for="discovery-url">HTTPS discovery URL</label><input id="discovery-url" type="url" value="{{.DiscoveryURL}}" readonly spellcheck="false"><button type="button" class="secondary" data-copy="discovery-url">Copy URL</button></div>
+  <div class="endpoint-meta"><a class="fine-print" href="{{.DiscoveryURL}}" target="_blank" rel="noopener">Open discovery endpoint ↗</a><p class="copy-status muted" data-copy-status role="status" aria-live="polite"></p></div>
+  <div class="note">A Portal Session signs you into this website; each Clipp app needs its own authorization. Copying the URL only adds the relay address; it does not connect or authorize an app.{{if not .Active}} Relay use becomes available after your account is approved or restored.{{end}} Opening this URL in an ordinary browser may show an authentication error; that does not mean setup failed.</div>
+  <details class="setup-instructions"><summary>View setup instructions for Clipp desktop, Android, and Chrome extension</summary>
+    <ol class="setup-steps"><li><span class="step-number" aria-hidden="true">1</span><div><strong>Open relay settings</strong><p>In Clipp, open the Peers sidebar and choose Relays, then Add relay. This setup is available in Clipp desktop, Android, and the Chrome extension.</p></div></li><li><span class="step-number" aria-hidden="true">2</span><div><strong>Save the discovery address</strong><p>Choose Authenticated discovery, paste this address into HTTPS discovery URL, and save.</p></div></li><li><span class="step-number" aria-hidden="true">3</span><div><strong>Authorize each app</strong><p>In each Clipp installation, choose Log in for the saved relay and sign in with the approved Google account.</p></div></li></ol>
+  </details>
+</section>
 {{end}}

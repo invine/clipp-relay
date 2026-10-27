@@ -116,6 +116,10 @@ func (i *Issuer) NewAuthorizeResponse(ctx context.Context, req fosite.AuthorizeR
 	return i.provider.NewAuthorizeResponse(ctx, req, session)
 }
 
+func (i *Issuer) WriteAuthorizeError(ctx context.Context, w http.ResponseWriter, req fosite.AuthorizeRequester, err error) {
+	i.provider.WriteAuthorizeError(ctx, w, req, err)
+}
+
 func (i *Issuer) NewAccessRequest(ctx context.Context, r *http.Request, session fosite.Session) (fosite.AccessRequester, error) {
 	return i.provider.NewAccessRequest(ctx, r, session)
 }

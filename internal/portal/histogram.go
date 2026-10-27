@@ -11,6 +11,8 @@ import (
 type QuotaHistoryEntry struct {
 	Week     string `json:"week"`
 	Recorded int64  `json:"recorded"`
+	Observed bool   `json:"observed"`
+	Current  bool   `json:"-"`
 }
 
 type historyBar struct {
@@ -18,7 +20,7 @@ type historyBar struct {
 	Recorded           int64
 	X, CenterX, Y      float64
 	Height, ValueY     float64
-	Current            bool
+	Current, Observed  bool
 }
 
 type historyTick struct {
@@ -33,16 +35,31 @@ type historyHistogram struct {
 	AllZero      bool
 }
 
+func QuotaHistoryRange(history []QuotaHistoryEntry, all bool) []QuotaHistoryEntry {
+	weeks := slices.Clone(history)
+	slices.SortFunc(weeks, func(a, b QuotaHistoryEntry) int { return strings.Compare(a.Week, b.Week) })
+	if !all && len(weeks) > 4 {
+		weeks = weeks[len(weeks)-4:]
+	}
+	if len(weeks) > 0 {
+		weeks[len(weeks)-1].Current = true
+	}
+	return weeks
+}
+
 func quotaHistogram(history []QuotaHistoryEntry) historyHistogram {
 	// The account query returns newest first. Copy before sorting so drawing the
 	// chronological chart never changes the original profile observation.
-	weeks := slices.Clone(history)
-	slices.SortFunc(weeks, func(a, b QuotaHistoryEntry) int { return strings.Compare(a.Week, b.Week) })
-	chart := historyHistogram{Width: max(640, 80+64*len(weeks)), AllZero: true}
+	weeks := QuotaHistoryRange(history, true)
+	chart := historyHistogram{Width: max(640, 80+64*len(weeks)), AllZero: len(weeks) > 0}
 	chart.Right = chart.Width - 16
 	var peak int64
 	for _, week := range weeks {
-		peak = max(peak, week.Recorded)
+		if week.Observed {
+			peak = max(peak, week.Recorded)
+		} else {
+			chart.AllZero = false
+		}
 	}
 	// Binary tick spacing keeps labels in the same units as quota displays.
 	// Saturate before doubling to preserve very large integer-byte allowances.
@@ -63,11 +80,14 @@ func quotaHistogram(history []QuotaHistoryEntry) historyHistogram {
 			label = date.Format("Jan 2")
 		}
 		height := float64(week.Recorded) / float64(scale) * 190
+		if !week.Observed {
+			height = 0
+		}
 		center := 64 + slot*(float64(index)+0.5)
 		chart.Bars = append(chart.Bars, historyBar{
 			Week: week.Week, Label: label, Value: FormatBytes(week.Recorded), Recorded: week.Recorded,
 			X: center - 18, CenterX: center, Y: 218 - height, Height: height, ValueY: 210 - height,
-			Current: index == len(weeks)-1,
+			Current: week.Current, Observed: week.Observed,
 		})
 	}
 	return chart

@@ -67,12 +67,12 @@ func (t *transaction) LockPortalSessionForConsent(ctx context.Context, digest [3
 
 func (t *transaction) PortalSessionForAuthorization(ctx context.Context, digest [32]byte, pepperVersion uint64) (persistence.PortalAuthorizationSession, error) {
 	var session persistence.PortalAuthorizationSession
-	err := t.tx.QueryRow(ctx, `SELECT a.id::text,a.subject,a.credential_generation,ps.pepper_version,ps.csrf_digest
+	err := t.tx.QueryRow(ctx, `SELECT a.id::text,a.subject,a.email,a.email_verified,a.credential_generation,ps.pepper_version,ps.csrf_digest
 		FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id
 		WHERE ps.credential_digest=$1 AND ps.pepper_version=$2 AND ps.idle_expires_at>clock_timestamp()
 		AND ps.absolute_expires_at>clock_timestamp() AND ps.credential_generation=a.credential_generation
 		AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, digest[:], pepperVersion).
-		Scan(&session.AccountID, &session.Subject, &session.Generation, &session.PepperVersion, &session.CSRFHash)
+		Scan(&session.AccountID, &session.Subject, &session.Email, &session.EmailVerified, &session.Generation, &session.PepperVersion, &session.CSRFHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return persistence.PortalAuthorizationSession{}, persistence.ErrInvalidCredential
 	}

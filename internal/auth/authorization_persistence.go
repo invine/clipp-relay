@@ -16,6 +16,8 @@ func digest32(value []byte) [32]byte {
 
 type authorizationPortalSession struct {
 	account, subject, csrf string
+	email                  string
+	emailVerified          bool
 	version                uint64
 }
 
@@ -88,6 +90,7 @@ func (s *Server) authorizationPortalSession(r *http.Request) (authorizationPorta
 		return authorizationPortalSession{
 			account: stored.AccountID,
 			subject: stored.Subject, csrf: csrf, version: stored.PepperVersion,
+			email: stored.Email, emailVerified: stored.EmailVerified,
 		}, nil
 	}
 	return authorizationPortalSession{}, errInvalidSession

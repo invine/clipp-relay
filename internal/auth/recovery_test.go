@@ -117,6 +117,10 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	}
 	admin := loginAs(t, s, d, "recovery-admin-"+subject, "recovery-admin@gmail.com", "")
 	adminCSRF := csrfFrom(t, s, admin)
+	heldReview := portalRequest(s, "GET", "/admin?selected="+id+"&view=detail", admin, nil, "")
+	if heldReview.Code != http.StatusOK || !strings.Contains(heldReview.Body.String(), `class="badge status-Active">Active`) || !strings.Contains(heldReview.Body.String(), "Recovery Review Hold") || !strings.Contains(heldReview.Body.String(), `id="review-recovery-hold"`) || strings.Contains(heldReview.Body.String(), `select name="action"`) {
+		t.Fatalf("recovery hold must remain distinct from canonical status with an explicit review action: %d %s", heldReview.Code, heldReview.Body.String())
+	}
 	review := url.Values{"csrf": {adminCSRF}, "reason": {"security_response"}, "action": {"recovery-review"}, "revision": {"2"}}
 	// A current admin must review this separate hold explicitly. Generic status
 	// and quota commands never clear it.

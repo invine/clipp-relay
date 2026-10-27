@@ -506,6 +506,12 @@ func TestConsentSubmissionIsAtomicOneUse(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("consent page: %d %s", response.Code, response.Body.String())
 	}
+	portalOrigin, _ := url.Parse(s.Origin)
+	for _, expected := range []string{"Clipp for Android", "consent@example.test", portalOrigin.Host} {
+		if !strings.Contains(response.Body.String(), expected) {
+			t.Errorf("consent page does not identify trusted client/account/relay fact %q", expected)
+		}
+	}
 	flow := regexp.MustCompile(`name="flow" value="([^"]+)"`).FindStringSubmatch(response.Body.String())
 	csrf := regexp.MustCompile(`name="csrf" value="([^"]+)"`).FindStringSubmatch(response.Body.String())
 	if len(flow) != 2 || len(csrf) != 2 {
@@ -535,6 +541,116 @@ func TestConsentSubmissionIsAtomicOneUse(t *testing.T) {
 	}
 	if codes != 1 {
 		t.Fatalf("one consent submission issued %d codes", codes)
+	}
+}
+
+func TestCancelConsentUsesValidatedIssuerErrorForEveryRegisteredClient(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	clients := []struct{ id, redirect string }{
+		{"electron", "http://127.0.0.1:34567/oauth/callback"},
+		{"android", c.PublicClients.AndroidRedirect},
+		{"extension", c.PublicClients.ExtensionRedirect},
+	}
+	for i, client := range clients {
+		state := fmt.Sprintf("cancel-state-original-%02d", i)
+		flow, csrf := beginNativeConsent(t, handler, cookie, client.id, client.redirect, strings.Repeat("a", 43), state)
+		if rejected := submitNativeConsent(t, handler, s.Origin, cookie, flow, csrf+"bad", "cancel"); rejected.Code != http.StatusForbidden {
+			t.Fatalf("%s cancel accepted wrong CSRF: %d", client.id, rejected.Code)
+		}
+		response := submitNativeConsent(t, handler, s.Origin, cookie, flow, csrf, "cancel")
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("%s cancel response status=%d body=%s", client.id, response.Code, response.Body.String())
+		}
+		callback, err := url.Parse(response.Header().Get("Location"))
+		if err != nil || callback.Scheme+"://"+callback.Host+callback.Path != client.redirect {
+			t.Fatalf("%s cancellation used invalid callback %q (%v)", client.id, response.Header().Get("Location"), err)
+		}
+		if callback.Query().Get("error") != "access_denied" || callback.Query().Get("state") != state || callback.Query().Get("code") != "" {
+			t.Fatalf("%s cancellation response parameters=%v", client.id, callback.Query())
+		}
+		replay := submitNativeConsent(t, handler, s.Origin, cookie, flow, csrf, "cancel")
+		if replay.Code != http.StatusUnauthorized {
+			t.Fatalf("%s cancel replay status=%d body=%s", client.id, replay.Code, replay.Body.String())
+		}
+	}
+	for _, table := range []string{"native_authorization_codes", "native_login_grants", "native_access_tokens"} {
+		queries := map[string]string{
+			"native_authorization_codes": `SELECT count(*) FROM public.native_authorization_codes records JOIN public.accounts owner ON owner.id=records.account_id WHERE owner.subject=$1`,
+			"native_login_grants":        `SELECT count(*) FROM public.native_login_grants records JOIN public.accounts owner ON owner.id=records.account_id WHERE owner.subject=$1`,
+			"native_access_tokens":       `SELECT count(*) FROM public.native_access_tokens token JOIN public.native_login_grants grant_row ON grant_row.id=token.grant_id JOIN public.accounts owner ON owner.id=grant_row.account_id WHERE owner.subject=$1`,
+		}
+		var count int
+		if err := db.Pool.QueryRow(context.Background(), queries[table], d.subject).Scan(&count); err != nil {
+			t.Fatalf("count %s after cancel: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("cancel issued %d rows in %s", count, table)
+		}
+	}
+}
+
+func TestCancelConsentRejectsChangedAccountGeneration(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	flow, csrf := beginNativeConsent(t, handler, cookie, "android", c.PublicClients.AndroidRedirect, strings.Repeat("a", 43), "cancel-generation-state")
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET credential_generation=credential_generation+1 WHERE subject=$1`, d.subject); err != nil {
+		t.Fatal(err)
+	}
+	response := submitNativeConsent(t, handler, s.Origin, cookie, flow, csrf, "cancel")
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("cancel accepted changed credential generation: %d %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Location"); got != "" {
+		t.Fatalf("invalid cancel redirected to %q", got)
+	}
+}
+
+func TestAuthorizeAndCancelRaceConsumesOneConsentOnce(t *testing.T) {
+	c, db, s, d, cookie, handler := activeNativeFixture(t)
+	state := "cancel-authorize-race-state"
+	flow, csrf := beginNativeConsent(t, handler, cookie, "android", c.PublicClients.AndroidRedirect, strings.Repeat("a", 43), state)
+	type result struct {
+		decision string
+		response *httptest.ResponseRecorder
+	}
+	results := make(chan result, 2)
+	var start sync.WaitGroup
+	start.Add(1)
+	for _, decision := range []string{"authorize", "cancel"} {
+		decision := decision
+		go func() {
+			start.Wait()
+			results <- result{decision: decision, response: submitNativeConsent(t, handler, s.Origin, cookie, flow, csrf, decision)}
+		}()
+	}
+	start.Done()
+	first, second := <-results, <-results
+	winners := 0
+	for _, got := range []result{first, second} {
+		if got.response.Code == http.StatusSeeOther {
+			winners++
+			callback, err := url.Parse(got.response.Header().Get("Location"))
+			if err != nil || callback.Query().Get("state") != state {
+				t.Fatalf("%s winner did not preserve callback state: %q (%v)", got.decision, got.response.Header().Get("Location"), err)
+			}
+			if got.decision == "cancel" && (callback.Query().Get("error") != "access_denied" || callback.Query().Get("code") != "") {
+				t.Fatalf("cancel race issued a credential: %v", callback.Query())
+			}
+			if got.decision == "authorize" && (callback.Query().Get("code") == "" || callback.Query().Get("error") != "") {
+				t.Fatalf("authorize race did not issue the code result: %v", callback.Query())
+			}
+		} else if got.response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s race loser status=%d body=%s", got.decision, got.response.Code, got.response.Body.String())
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("authorize/cancel race had %d successful consumers", winners)
+	}
+	var codes int
+	if err := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM public.native_authorization_codes records JOIN public.accounts owner ON owner.id=records.account_id WHERE owner.subject=$1`, d.subject).Scan(&codes); err != nil {
+		t.Fatal(err)
+	}
+	if codes < 0 || codes > 1 {
+		t.Fatalf("race persisted %d authorization codes", codes)
 	}
 }
 
@@ -1602,7 +1718,12 @@ func beginNativeConsent(t *testing.T, handler http.Handler, cookie *http.Cookie,
 
 func confirmNativeConsent(t *testing.T, handler http.Handler, origin string, cookie *http.Cookie, flow, csrf string) *httptest.ResponseRecorder {
 	t.Helper()
-	confirm := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(url.Values{"flow": {flow}, "csrf": {csrf}}.Encode()))
+	return submitNativeConsent(t, handler, origin, cookie, flow, csrf, "authorize")
+}
+
+func submitNativeConsent(t *testing.T, handler http.Handler, origin string, cookie *http.Cookie, flow, csrf, decision string) *httptest.ResponseRecorder {
+	t.Helper()
+	confirm := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(url.Values{"flow": {flow}, "csrf": {csrf}, "decision": {decision}}.Encode()))
 	confirm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	confirm.Header.Set("Origin", origin)
 	confirm.AddCookie(cookie)

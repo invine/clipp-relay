@@ -198,7 +198,7 @@ func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 			}
 			if errors.Is(err, persistence.ErrRecentAuthentication) {
 				markDiagnostic(r, "refused", "recent_auth_required")
-				fail(w, 403)
+				portal.RecentAuthenticationRequired(w)
 				return
 			}
 			if errors.Is(err, persistence.ErrCapacityExceeded) {

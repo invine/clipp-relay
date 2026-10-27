@@ -253,6 +253,10 @@
         ],
         [
           "refused",
+          "confirmation_required"
+        ],
+        [
+          "refused",
           "origin_rejected"
         ],
         [
