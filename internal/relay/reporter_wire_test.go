@@ -19,7 +19,7 @@ func TestReporterChargesCurrentPeerAssociationAndRecordsUnattributedTail(t *test
 		t.Fatal(err)
 	}
 	defer s.Close()
-	reporter := &endpointReporter{server: s}
+	reporter := &endpointReporter{sessions: s.sessionManager}
 	key, _, err := crypto.GenerateEd25519Key(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
