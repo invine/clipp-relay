@@ -54,26 +54,15 @@ func (r *endpointReporter) GetBandwidthByProtocol() map[protocol.ID]metrics.Stat
 func (r *endpointReporter) Reset()             { r.sent.Store(0); r.received.Store(0); r.unattributed.Store(0) }
 func (r *endpointReporter) TrimIdle(time.Time) {}
 
-// DetachAccount removes every session while the caller still holds its account
-// guard. The returned connection closes perform I/O after that guard is released.
-func (s *Server) DetachAccount(account string) func() {
-	return s.detachAccount(account, "policy_changed")
-}
-
-func (s *Server) detachAccount(account, reason string) func() {
-	s.mu.Lock()
-	connections := make([]*session, 0, len(s.byAccount[account]))
-	for v := range s.byAccount[account] {
-		connections = append(connections, v)
-		s.endSessionLocked(v, reason)
+// CloseAccountWithReason retires an account's sessions through the shared
+// manager-owned close queue. It is used for asynchronous policy and quota
+// cutoffs that do not hold Auth's account protection.
+func (s *Server) CloseAccountWithReason(account, reason string) {
+	if err := s.RetireAccount(account, reason); err != nil {
+		return
 	}
-	s.mu.Unlock()
-	return func() {
-		for _, v := range connections {
-			_ = v.conn.Close()
-		}
-	}
+	_ = s.CompleteAccountInvalidation(account)
 }
 
 // CloseAccount invalidates all live sessions after an account policy change.
-func (s *Server) CloseAccount(account string) { s.DetachAccount(account)() }
+func (s *Server) CloseAccount(account string) { s.CloseAccountWithReason(account, "policy_changed") }

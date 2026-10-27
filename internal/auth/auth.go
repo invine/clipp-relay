@@ -119,9 +119,10 @@ type Server struct {
 	commitDeletionRepository           func(context.Context, persistence.DeletionTransaction) error
 	commitRecovery                     func(context.Context, persistence.RecoveryTransaction) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
-	accountChanged                     func(AccountChange) func()
-	accountInvalidated                 func(string) error
-	accountInvalidationFallback        func(string) error
+	accountChanged                     func(AccountChange) string
+	accountInvalidated                 func(string, string) error
+	accountInvalidationFallback        func(string, string) error
+	accountInvalidationComplete        func(string) error
 	grantRevoked                       func(string) error
 	grantRevocationFallback            func(string) error
 	grantRevocationComplete            func(string) error
@@ -212,33 +213,41 @@ type AccountChange struct {
 
 // SetAccountChangedForTest installs a controlled invalidation adapter. Production
 // must use ConfigureRelayProtection, which owns the complete policy operation.
-func (s *Server) SetAccountChangedForTest(changed func(AccountChange) func()) {
+func (s *Server) SetAccountChangedForTest(changed func(AccountChange) string) {
 	s.accountChanged = changed
 	if s.accountInvalidated == nil {
-		s.accountInvalidated = func(string) error { return nil }
+		s.accountInvalidated = func(string, string) error { return nil }
 	}
 	if s.accountInvalidationFallback == nil {
-		s.accountInvalidationFallback = func(string) error { return nil }
+		s.accountInvalidationFallback = func(string, string) error { return nil }
+	}
+	if s.accountInvalidationComplete == nil {
+		s.accountInvalidationComplete = func(string) error { return nil }
 	}
 }
 
 // SetAccountInvalidatedForTest wraps the primary account notification while
 // retaining the configured manager as its fail-closed fallback.
 func (s *Server) SetAccountInvalidatedForTest(invalidated func(string) error) {
-	s.accountInvalidated = invalidated
+	s.accountInvalidated = func(id, _ string) error { return invalidated(id) }
 	if s.accountInvalidationFallback == nil {
-		s.accountInvalidationFallback = invalidated
+		s.accountInvalidationFallback = func(id, _ string) error { return invalidated(id) }
 	}
 }
 
 func (s *Server) SetAccountInvalidationFallbackForTest(invalidated func(string) error) {
-	s.accountInvalidationFallback = invalidated
+	s.accountInvalidationFallback = func(id, _ string) error { return invalidated(id) }
+}
+
+func (s *Server) SetAccountInvalidationCompleteForTest(complete func(string) error) {
+	s.accountInvalidationComplete = complete
 }
 
 // RelaySessions exposes physical operations, not account policy decisions.
 type RelaySessions interface {
 	AccountSessions(string) int
-	DetachAccount(string) func()
+	RetireAccount(string, string) error
+	CompleteAccountInvalidation(string) error
 	RetireGrant(string) error
 	CompleteGrantInvalidation(string) error
 	InvalidateAccount(string) error
@@ -278,14 +287,21 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	// separately released by Auth after its identity protection is unlocked.
 	s.grantRevocationFallback = func(grantID string) error { return sessions.RetireGrant(grantID) }
 	s.grantRevocationComplete = sessions.CompleteGrantInvalidation
-	s.accountInvalidated = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
-	s.accountInvalidationFallback = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
-	s.accountChanged = func(change AccountChange) func() {
+	s.accountInvalidated = sessions.RetireAccount
+	s.accountInvalidationFallback = sessions.RetireAccount
+	s.accountInvalidationComplete = sessions.CompleteAccountInvalidation
+	s.accountChanged = func(change AccountChange) string {
 		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes)
-		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
-			return sessions.DetachAccount(change.AccountID)
+		if change.CloseAll {
+			return "account_access_changed"
 		}
-		return nil
+		if exhausted {
+			return "quota_exhausted"
+		}
+		if sessions.AccountSessions(change.AccountID) > change.SessionLimit {
+			return "policy_changed"
+		}
+		return ""
 	}
 	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
 		sample, err := s.SampleActiveGrants(ctx, account)
@@ -302,17 +318,17 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 // deliverAccountInvalidation synchronously applies a confirmed account access
 // change to Session Manager. Cancellation of pending validation is independent
 // of the initiating HTTP request, and duplicate delivery is safe.
-func (s *Server) deliverAccountInvalidation(accountID string) error {
+func (s *Server) deliverAccountInvalidation(accountID, reason string) error {
 	if accountID == "" || s.accountInvalidated == nil || s.accountInvalidationFallback == nil {
 		return errors.New("account invalidation is not configured")
 	}
-	if s.nativeIssuer != nil {
+	if reason == "account_access_changed" && s.nativeIssuer != nil {
 		s.nativeIssuer.CancelPendingValidations()
 	}
-	if err := s.accountInvalidated(accountID); err == nil {
+	if err := s.accountInvalidated(accountID, reason); err == nil {
 		return nil
 	}
-	return s.accountInvalidationFallback(accountID)
+	return s.accountInvalidationFallback(accountID, reason)
 }
 
 // SampleActiveGrants reads only an aggregate live count, separately from the
@@ -568,7 +584,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, http.StatusServiceUnavailable)
 			return
 		}
-		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && (s.accountChanged == nil || s.accountInvalidated == nil || s.accountInvalidationFallback == nil) {
+		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && (s.accountChanged == nil || s.accountInvalidated == nil || s.accountInvalidationFallback == nil || s.accountInvalidationComplete == nil) {
 			fail(w, http.StatusServiceUnavailable)
 			return
 		}
@@ -599,10 +615,13 @@ func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
 		s.grantRevocationComplete = func(string) error { return nil }
 	}
 	if s.accountInvalidated == nil {
-		s.accountInvalidated = func(string) error { return nil }
+		s.accountInvalidated = func(string, string) error { return nil }
 	}
 	if s.accountInvalidationFallback == nil {
-		s.accountInvalidationFallback = func(string) error { return nil }
+		s.accountInvalidationFallback = func(string, string) error { return nil }
+	}
+	if s.accountInvalidationComplete == nil {
+		s.accountInvalidationComplete = func(string) error { return nil }
 	}
 	base := s.Handler()
 	return base
@@ -1266,7 +1285,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	subject := ownerState.Subject
 	var applied, uncertain bool
 	var invalidationFailed bool
-	var closeConnections func()
+	var completeInvalidation bool
 	if s.beforeAccountActionGuard != nil {
 		s.beforeAccountActionGuard()
 	}
@@ -1317,8 +1336,13 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				s.uncertainAccounts.Store(id, uncertainMutation{revision: state.Revision, generation: state.Generation + 1, status: state.Status})
 			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: state.WeeklyBytes, SessionLimit: state.Sessions, CloseAll: true})
-			invalidationFailed = s.deliverAccountInvalidation(id) != nil
+			change := AccountChange{AccountID: id, WeeklyBytes: state.WeeklyBytes, SessionLimit: state.Sessions, CloseAll: true}
+			reason := s.accountChanged(change)
+			if reason == "" {
+				reason = "account_access_changed"
+			}
+			invalidationFailed = s.deliverAccountInvalidation(id, reason) != nil
+			completeInvalidation = true
 			applied, uncertain = true, e != nil
 		}); guardErr != nil {
 			markGuardDiagnostic(r, guardErr)
@@ -1331,8 +1355,8 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 	}
 	if applied {
-		if closeConnections != nil {
-			closeConnections()
+		if completeInvalidation && s.accountInvalidationComplete(id) != nil {
+			invalidationFailed = true
 		}
 		cookie(w, sessionCookie, "", -1)
 		if uncertain {

@@ -41,7 +41,7 @@ func (c *finiteAccounting) Observe(id string, n int64) error {
 	return nil
 }
 func (c *finiteAccounting) AccountingFailed(id string) {
-	c.server.detachAccount(id, "quota_exhausted")()
+	c.server.CloseAccountWithReason(id, "quota_exhausted")
 }
 
 func TestObservedUsageClosesAllAccountSessionsOnExhaustion(t *testing.T) {
