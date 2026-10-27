@@ -648,7 +648,6 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	if event := adminAccountDiagnosticEvent(action); event != "" {
 		markAction(r, event)
 	} else if action == "review" {
-		// Review has no fixed catalog pair; the route is still handled.
 		markAction(r, "")
 	}
 	actor, ok := s.administrator(w, r, true)
@@ -659,204 +658,21 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 	expected, valid := revision(r.PostForm.Get("revision"))
 	spec, known := accountActions[action]
 	if !known {
-		// Unknown action text never becomes an event name.
 		markAction(r, "http.request_refused")
 	}
 	if !idPattern.MatchString(target) || !valid || !known {
 		markDiagnostic(r, "refused", "invalid_request")
-		fail(w, 400)
+		fail(w, http.StatusBadRequest)
 		return
 	}
 	plan := r.PostForm.Get("plan_id")
 	if spec.planRequired && !idPattern.MatchString(plan) {
 		markDiagnostic(r, "refused", "invalid_request")
-		fail(w, 400)
+		fail(w, http.StatusBadRequest)
 		return
 	}
-	var applied *AccountChange
-	var uncertain bool
-	var invalidationFailed bool
-	var completeInvalidation bool
-	var securitySubject string
-	if s.beforeAccountActionGuard != nil {
-		s.beforeAccountActionGuard()
-	}
-	update := func(unitCtx context.Context) {
-		s.adminAccountUpdate(w, r.WithContext(unitCtx), actor, target, expected, action, spec, plan, securitySubject, &applied, &uncertain)
-		if applied != nil {
-			reason := s.accountChanged(*applied)
-			if reason == "" && applied.CloseAll {
-				reason = "account_access_changed"
-			}
-			if reason != "" {
-				invalidationFailed = s.deliverAccountInvalidation(applied.AccountID, reason) != nil
-				completeInvalidation = true
-			}
-		}
-	}
-	if spec.security {
-		preflight, e := s.persistence.Start(r.Context())
-		if e != nil {
-			markDiagnostic(r, "failed", "database_unavailable")
-			fail(w, 503)
-			return
-		}
-		preflightTx, e := beginAdminAccessTransaction(preflight)
-		if e != nil {
-			preflight.Close()
-			markDiagnostic(r, "failed", "database_unavailable")
-			fail(w, 503)
-			return
-		}
-		state, e := preflightTx.AccountAccessState(preflight.Context(), target, false)
-		_ = preflightTx.Rollback(preflight.Context())
-		preflight.Close()
-		if e != nil {
-			if errors.Is(e, persistence.ErrNotFound) {
-				markDiagnostic(r, "refused", "invalid_request")
-			} else {
-				markDiagnostic(r, "failed", "database_unavailable")
-			}
-			fail(w, 503)
-			return
-		}
-		if state.Deleting {
-			markDiagnostic(r, "refused", "invalid_request")
-			fail(w, 503)
-			return
-		}
-		securitySubject = state.Subject
-		guardEntered := false
-		guardErr := s.withIdentityGuard(r.Context(), securitySubject, func(unitCtx context.Context) error {
-			guardEntered = true
-			if accountGuardErr := s.withAccountGuards(unitCtx, []string{actor.id, target}, update); accountGuardErr != nil {
-				markGuardDiagnostic(r, accountGuardErr)
-				fail(w, 503)
-			}
-			return nil
-		})
-		if guardErr != nil && !guardEntered {
-			markGuardDiagnostic(r, guardErr)
-			fail(w, 503)
-		}
-	} else if accountGuardErr := s.withAccountGuards(r.Context(), []string{actor.id, target}, update); accountGuardErr != nil {
-		markGuardDiagnostic(r, accountGuardErr)
-		fail(w, 503)
-	}
-	if applied != nil {
-		if completeInvalidation && s.accountInvalidationComplete(applied.AccountID) != nil {
-			invalidationFailed = true
-		}
-		if uncertain {
-			markDiagnostic(r, "uncertain", "commit_unconfirmed")
-			uncertainResponse(w)
-		} else if invalidationFailed {
-			markDiagnostic(r, "failed", "invalidation_incomplete")
-			http.Error(w, "Account change committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
-		} else {
-			http.Redirect(w, r, adminReturnHref(r, target), http.StatusSeeOther)
-		}
-	}
-}
-
-func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, actor adminIdentity, target string, expected int64, action string, spec accountActionSpec, plan, subject string, applied **AccountChange, uncertain *bool) {
-	ctx := r.Context()
-	op, err := s.persistence.Start(ctx)
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	defer op.Close()
-	tx, err := beginAdminAccessTransaction(op)
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	defer tx.Rollback(op.Context())
-	err = tx.LockAdministratorAccounts(op.Context(), actor.id, target)
-	if errors.Is(err, persistence.ErrNotFound) {
-		fail(w, 404)
-		return
-	}
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	if status := s.recheckAdministrator(w, tx, r, &actor); status != 0 {
-		fail(w, status)
-		return
-	}
-	state, err := tx.AccountAccessState(op.Context(), target, false)
-	if errors.Is(err, persistence.ErrNotFound) {
-		fail(w, 404)
-		return
-	}
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	if state.Deleting || state.Revision != expected || !spec.states[state.Status] {
-		markDiagnostic(r, "refused", "revision_conflict")
-		portal.Conflict(w, adminReturnHref(r, target), "Reload this account")
-		return
-	}
-	weekly, sessions := state.WeeklyOverride, state.SessionOverride
-	if action == "override" {
-		if values, present := r.PostForm["weekly_bytes_override"]; present {
-			if len(values) == 1 && values[0] != "" {
-				n, e := parseQuotaBytes(values[0], r.PostForm.Get("weekly_bytes_override_unit"))
-				if e != nil || n < 0 {
-					fail(w, 400)
-					return
-				}
-				weekly = &n
-			} else {
-				weekly = nil
-			}
-		}
-		if values, present := r.PostForm["sessions_override"]; present {
-			if len(values) == 1 && values[0] != "" {
-				n, e := strconv.ParseInt(values[0], 10, 32)
-				if e != nil || n < 0 {
-					fail(w, 400)
-					return
-				}
-				v := int(n)
-				sessions = &v
-			} else {
-				sessions = nil
-			}
-		}
-	}
-	auditID, err := uuid()
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	result, err := tx.ApplyAdminAccountMutation(op.Context(), persistence.AdminAccountMutation{AccountID: target, PlanID: plan, Action: action, NextStatus: spec.nextStatus, Event: spec.event, Reason: r.PostForm.Get("reason"), ActorEmail: actor.email, ExpectedRevision: expected, Security: spec.security, WeeklyOverride: weekly, SessionOverride: sessions, AuditID: auditID})
-	if errors.Is(err, persistence.ErrConflict) {
-		markDiagnostic(r, "refused", "revision_conflict")
-		portal.Conflict(w, adminReturnHref(r, target), "Reload this account")
-		return
-	}
-	if err != nil {
-		fail(w, 503)
-		return
-	}
-	if spec.security {
-		s.installIdentityFence(subject)
-	}
-	var commitErr error
-	if s.commitAccountAccess != nil {
-		commitErr = s.commitAccountAccess(op.Context(), tx)
-	} else {
-		commitErr = tx.Commit(op.Context())
-	}
-	if commitErr != nil {
-		s.uncertainAccounts.Store(target, uncertainMutation{revision: result.NewRevision, generation: result.NewGeneration, status: result.NewStatus})
-	}
-	*applied = &AccountChange{AccountID: target, WeeklyBytes: result.WeeklyBytes, SessionLimit: result.Sessions, CloseAll: spec.security || commitErr != nil}
-	*uncertain = commitErr != nil
+	outcome := s.changeAdminAccount(r, actor, target, expected, action, spec, plan)
+	s.renderAdminAccountOutcome(w, r, target, outcome)
 }
 
 func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {

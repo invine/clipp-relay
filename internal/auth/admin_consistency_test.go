@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,77 @@ import (
 	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/persistence/postgres"
 )
+
+type blockingResponseWriter struct {
+	inner   *httptest.ResponseRecorder
+	started chan struct{}
+	release chan struct{}
+}
+
+func (w *blockingResponseWriter) Header() http.Header { return w.inner.Header() }
+func (w *blockingResponseWriter) WriteHeader(status int) {
+	select {
+	case w.started <- struct{}{}:
+	default:
+	}
+	<-w.release
+	w.inner.WriteHeader(status)
+}
+func (w *blockingResponseWriter) Write(data []byte) (int, error) { return w.inner.Write(data) }
+
+type adminHTTPTestWork struct{ state *adminHTTPTestState }
+
+type adminHTTPTestState struct {
+	actorID, targetID string
+	csrfHash          []byte
+	mutation          persistence.AdminAccountMutation
+}
+
+type adminHTTPTestOperation struct{ tx *adminHTTPTestTransaction }
+
+type adminHTTPTestTransaction struct {
+	persistence.AccountAccessTransaction
+	state *adminHTTPTestState
+}
+
+func (w adminHTTPTestWork) Start(context.Context) (persistence.Operation, error) {
+	tx := &adminHTTPTestTransaction{state: w.state}
+	return adminHTTPTestOperation{tx: tx}, nil
+}
+
+func (o adminHTTPTestOperation) Context() context.Context { return context.Background() }
+func (adminHTTPTestOperation) Close()                     {}
+func (o adminHTTPTestOperation) Begin(context.Context) (persistence.Transaction, error) {
+	return o.tx, nil
+}
+func (o adminHTTPTestOperation) BeginAccountAccess(context.Context) (persistence.AccountAccessTransaction, error) {
+	return o.tx, nil
+}
+func (tx *adminHTTPTestTransaction) LockAdministratorAccounts(context.Context, string, string) error {
+	return nil
+}
+func (tx *adminHTTPTestTransaction) PortalSessionForOwner(context.Context, [32]byte, uint64) (persistence.PortalSessionOwner, error) {
+	return persistence.PortalSessionOwner{AccountID: tx.state.actorID, Status: "Active", Email: "admin@example.test", Subject: "admin-subject", Generation: 1, PepperVersion: 1, CSRFHash: tx.state.csrfHash}, nil
+}
+func (*adminHTTPTestTransaction) TouchPortalSession(context.Context, [32]byte, uint64, string, int64) (bool, error) {
+	return true, nil
+}
+func (*adminHTTPTestTransaction) Commit(context.Context) error   { return nil }
+func (*adminHTTPTestTransaction) Rollback(context.Context) error { return nil }
+func (*adminHTTPTestTransaction) AdministratorSession(context.Context, string, []byte, uint64) (persistence.AdministratorSession, error) {
+	domain := "example.test"
+	return persistence.AdministratorSession{Email: "admin@example.test", Verified: true, HostedDomain: &domain, Recent: true}, nil
+}
+func (tx *adminHTTPTestTransaction) AccountAccessState(_ context.Context, id string, _ bool) (persistence.AccountAccessState, error) {
+	if id != tx.state.targetID && id != tx.state.actorID {
+		return persistence.AccountAccessState{}, persistence.ErrNotFound
+	}
+	return persistence.AccountAccessState{ID: id, Status: "Active", Subject: "target-subject", Revision: 1, Generation: 0, WeeklyBytes: 100, Sessions: 3}, nil
+}
+func (tx *adminHTTPTestTransaction) ApplyAdminAccountMutation(_ context.Context, mutation persistence.AdminAccountMutation) (persistence.AdminAccountMutationResult, error) {
+	tx.state.mutation = mutation
+	return persistence.AdminAccountMutationResult{WeeklyBytes: 100, Sessions: 2, NewStatus: "Active", NewRevision: 2, NewGeneration: 0}, nil
+}
 
 func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, string) {
 	t.Helper()
@@ -311,6 +383,73 @@ func TestSuspensionWaitsForAccountRowLockAndRevokesRelayCredential(t *testing.T)
 	var terminated bool
 	if err := db.Pool.QueryRow(ctx, `SELECT a.status,a.credential_generation,g.terminated_at IS NOT NULL FROM public.accounts a JOIN public.native_login_grants g ON g.account_id=a.id WHERE a.id=$1`, target).Scan(&status, &generation, &terminated); err != nil || status != "Suspended" || generation != 1 || !terminated {
 		t.Fatalf("status=%s generation=%d terminated=%t err=%v", status, generation, terminated, err)
+	}
+}
+
+func TestAdminConflictResponseDoesNotHoldAccountProtection(t *testing.T) {
+	actorID := "6dd09395-51a0-451c-96b3-716e6038e870"
+	target := "6dd09395-51a0-451c-96b3-716e6038e871"
+	credential := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	pepper := []byte("test pepper with enough entropy")
+	state := &adminHTTPTestState{actorID: actorID, targetID: target}
+	s := &Server{Origin: "https://portal.example.test", AdminAllowlistFile: filepath.Join(t.TempDir(), "allowlist.json"), Peppers: map[uint64][]byte{1: pepper}, CurrentPepper: 1, persistence: adminHTTPTestWork{state: state}, accountRates: make(map[string]rate)}
+	if err := os.WriteFile(s.AdminAllowlistFile, []byte(`{"revision":1,"emails":["admin@example.test"]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.SetAccountChangedForTest(func(AccountChange) string { return "" })
+	cookie := &http.Cookie{Name: sessionCookie, Value: credential}
+	csrf := s.csrf(s.CurrentPepper, cookie.Value)
+	state.csrfHash = s.digest(s.CurrentPepper, "csrf-store", csrf)
+	firstForm := url.Values{"csrf": {csrf}, "reason": {"security_response"}, "action": {"suspend"}, "revision": {"2"}}
+	first := httptest.NewRequest(http.MethodPost, "/admin/accounts/"+target, strings.NewReader(firstForm.Encode()))
+	first.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	first.Header.Set("Origin", s.Origin)
+	first.AddCookie(cookie)
+	blocked := &blockingResponseWriter{inner: httptest.NewRecorder(), started: make(chan struct{}, 1), release: make(chan struct{})}
+	firstDone := make(chan struct{})
+	go func() {
+		s.Handler().ServeHTTP(blocked, first)
+		close(firstDone)
+	}()
+	select {
+	case <-blocked.started:
+	case <-time.After(3 * time.Second):
+		close(blocked.release)
+		t.Fatal("stale revision did not reach its conflict response")
+	}
+	var releaseOnce sync.Once
+	releaseResponse := func() { releaseOnce.Do(func() { close(blocked.release) }) }
+	defer releaseResponse()
+
+	secondForm := url.Values{"csrf": {csrf}, "reason": {"routine_administration"}, "action": {"override"}, "revision": {"1"}, "sessions_override": {"2"}}
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		secondDone <- internalRequest(s, http.MethodPost, "/admin/accounts/"+target, cookie, secondForm, s.Origin)
+	}()
+	select {
+	case response := <-secondDone:
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("second mutation did not proceed while first response was blocked: %d %s", response.Code, response.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("conflict response held account protection while writing")
+	}
+	select {
+	case <-firstDone:
+		t.Fatal("blocked response unexpectedly completed before being released")
+	default:
+	}
+	releaseResponse()
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request did not finish after response release")
+	}
+	if blocked.inner.Code != http.StatusConflict {
+		t.Fatalf("stale revision response=%d, want %d", blocked.inner.Code, http.StatusConflict)
+	}
+	if state.mutation.Action != "override" || state.mutation.Security {
+		t.Fatalf("second operation was not applied with its own policy: %+v", state.mutation)
 	}
 }
 
