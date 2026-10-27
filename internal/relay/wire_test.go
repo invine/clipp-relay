@@ -298,7 +298,7 @@ func TestSTOPPinsAuthenticatedPhysicalConnection(t *testing.T) {
 	if _, err = client.Reserve(ctx, destination, ai); err != nil {
 		t.Fatal(err)
 	}
-	owned := s.authoritativeConn(destination.ID())
+	owned := s.sessionManager.authoritativeConn(destination.ID())
 	if owned == nil {
 		t.Fatal("missing authenticated connection")
 	}
@@ -308,7 +308,7 @@ func TestSTOPPinsAuthenticatedPhysicalConnection(t *testing.T) {
 	if n := len(s.Host.Network().ConnsToPeer(destination.ID())); n != 2 {
 		t.Fatalf("want two physical connections, got %d", n)
 	}
-	adapter := gatedHost{Host: s.Host, stopConn: s.authoritativeConn}
+	adapter := gatedHost{Host: s.Host, stopConn: s.sessionManager.authoritativeConn}
 	st, err := adapter.NewStream(ctx, destination.ID(), "/libp2p/circuit/relay/0.2.0/stop")
 	if err != nil {
 		t.Fatal(err)

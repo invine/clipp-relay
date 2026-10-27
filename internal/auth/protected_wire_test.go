@@ -227,10 +227,16 @@ func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
 		t.Fatalf("unrelated grant retained %d physical connections, want 1", got)
 	}
 	// Duplicate delivery is harmless and cannot disturb the unrelated grant.
-	if err := p.relay.InvalidateGrant(credentialA.GrantID); err != nil {
+	if err := p.relay.RetireGrant(credentialA.GrantID); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.relay.InvalidateGrant(credentialA.GrantID); err != nil {
+	if err := p.relay.CompleteGrantInvalidation(credentialA.GrantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.relay.RetireGrant(credentialA.GrantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.relay.CompleteGrantInvalidation(credentialA.GrantID); err != nil {
 		t.Fatal(err)
 	}
 	if got := p.relay.AccountSessions(p.account); got != 1 || len(clientB.Network().ConnsToPeer(p.relay.Host.ID())) != 1 {
