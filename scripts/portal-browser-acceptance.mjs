@@ -222,9 +222,8 @@ try {
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
   evidence.keyboard.escape = await evalJS(`({open:document.querySelector('.workspace-menu').open,focus:document.activeElement.matches('.workspace-menu summary')})`)
   if (!evidence.keyboard.open.open || evidence.keyboard.escape.open || !evidence.keyboard.escape.focus) throw new Error(`keyboard menu acceptance failed: ${JSON.stringify(evidence.keyboard)}`)
-  await evalJS(`document.querySelector('.workspace-menu summary').click(); document.querySelector('.workspace-menu button').click()`)
-  evidence.keyboard.closeButton = await evalJS(`({open:document.querySelector('.workspace-menu').open,focus:document.activeElement.matches('.workspace-menu summary')})`)
-  if (evidence.keyboard.closeButton.open || !evidence.keyboard.closeButton.focus) throw new Error('close menu control did not return focus')
+  evidence.keyboard.logout = await evalJS(`({action:document.querySelector('.workspace-menu form')?.getAttribute('action'),method:document.querySelector('.workspace-menu form')?.getAttribute('method'),csrf:!!document.querySelector('.workspace-menu form input[name="csrf"]'),label:document.querySelector('.workspace-menu form button')?.textContent.trim()})`)
+  if (evidence.keyboard.logout.action !== '/auth/logout' || evidence.keyboard.logout.method !== 'post' || !evidence.keyboard.logout.csrf || evidence.keyboard.logout.label !== 'Log out') throw new Error(`menu logout form failed: ${JSON.stringify(evidence.keyboard.logout)}`)
   // Simulate 150% browser zoom on a 390px screen as a 260 CSS-pixel viewport
   // rendered at 1.5x. The override is disposable and does not touch Chrome prefs.
   await call('Emulation.setDeviceMetricsOverride', { width:260, height:1000, deviceScaleFactor:1.5, mobile:false })
