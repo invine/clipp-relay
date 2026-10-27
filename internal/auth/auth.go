@@ -124,6 +124,7 @@ type Server struct {
 	accountInvalidationFallback        func(string) error
 	grantRevoked                       func(string) error
 	grantRevocationFallback            func(string) error
+	grantRevocationComplete            func(string) error
 	deletionAccounting                 QuotaProtection
 	deletionJournal                    DeletionJournal
 	deletionRepository                 string
@@ -238,7 +239,8 @@ func (s *Server) SetAccountInvalidationFallbackForTest(invalidated func(string) 
 type RelaySessions interface {
 	AccountSessions(string) int
 	DetachAccount(string) func()
-	InvalidateGrant(string) error
+	RetireGrant(string) error
+	CompleteGrantInvalidation(string) error
 	InvalidateAccount(string) error
 }
 
@@ -248,6 +250,9 @@ func (s *Server) SetGrantRevokedForTest(revoked func(string) error) {
 	s.grantRevoked = revoked
 	if s.grantRevocationFallback == nil {
 		s.grantRevocationFallback = revoked
+	}
+	if s.grantRevocationComplete == nil {
+		s.grantRevocationComplete = func(string) error { return nil }
 	}
 }
 
@@ -267,11 +272,12 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	}
 	s.deletionAccounting = accounting
 	s.grantRevoked = func(grantID string) error {
-		return sessions.InvalidateGrant(grantID)
+		return sessions.RetireGrant(grantID)
 	}
-	// The recipient is a direct in-process manager call with no I/O. Retain the
-	// same idempotent operation as a fail-closed retry if a wrapper reports error.
-	s.grantRevocationFallback = func(grantID string) error { return sessions.InvalidateGrant(grantID) }
+	// RetireGrant is synchronous logical invalidation. Physical closure is
+	// separately released by Auth after its identity protection is unlocked.
+	s.grantRevocationFallback = func(grantID string) error { return sessions.RetireGrant(grantID) }
+	s.grantRevocationComplete = sessions.CompleteGrantInvalidation
 	s.accountInvalidated = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
 	s.accountInvalidationFallback = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
 	s.accountChanged = func(change AccountChange) func() {
@@ -558,7 +564,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" && (s.grantRevoked == nil || s.grantRevocationFallback == nil) {
+		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" && (s.grantRevoked == nil || s.grantRevocationFallback == nil || s.grantRevocationComplete == nil) {
 			fail(w, http.StatusServiceUnavailable)
 			return
 		}
@@ -588,6 +594,9 @@ func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
 	}
 	if s.grantRevocationFallback == nil {
 		s.grantRevocationFallback = func(string) error { return nil }
+	}
+	if s.grantRevocationComplete == nil {
+		s.grantRevocationComplete = func(string) error { return nil }
 	}
 	if s.accountInvalidated == nil {
 		s.accountInvalidated = func(string) error { return nil }

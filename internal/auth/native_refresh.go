@@ -37,7 +37,12 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	defer op.Close()
+	opOpen := true
+	defer func() {
+		if opOpen {
+			op.Close()
+		}
+	}()
 	lookupTx, lookup, err := beginRefreshTransaction(op)
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
@@ -64,7 +69,12 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	defer guard.Unlock()
+	guardHeld := true
+	defer func() {
+		if guardHeld {
+			guard.Unlock()
+		}
+	}()
 	if !s.allowAccount(owner.Subject) {
 		s.oauthError(w, http.StatusTooManyRequests)
 		return
@@ -74,7 +84,12 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	defer tx.Rollback(op.Context())
+	txOpen := true
+	defer func() {
+		if txOpen {
+			_ = tx.Rollback(op.Context())
+		}
+	}()
 	account, err := refreshTx.LockAccountAuthorization(op.Context(), owner.AccountID)
 	if errors.Is(err, persistence.ErrInvalidCredential) {
 		s.oauthError(w, http.StatusUnauthorized)
@@ -104,6 +119,7 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 			// Commit retired the credential transaction. Confirm through a fresh,
 			// independently admitted operation; cancellation cannot imply rollback.
 			_ = tx.Rollback(context.Background())
+			txOpen = false
 			confirmed, confirmErr := s.confirmRefreshRevocation(owner.GrantID)
 			if confirmErr != nil {
 				markDiagnostic(r, "uncertain", "commit_unconfirmed")
@@ -117,6 +133,19 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 			}
 		}
 		if s.deliverGrantRevocation(owner.GrantID) != nil {
+			markDiagnostic(r, "failed", "invalidation_incomplete")
+			s.oauthError(w, http.StatusServiceUnavailable)
+			return
+		}
+		if txOpen {
+			_ = tx.Rollback(context.Background())
+			txOpen = false
+		}
+		op.Close()
+		opOpen = false
+		guard.Unlock()
+		guardHeld = false
+		if s.completeGrantRevocation(owner.GrantID) != nil {
 			markDiagnostic(r, "failed", "invalidation_incomplete")
 			s.oauthError(w, http.StatusServiceUnavailable)
 			return

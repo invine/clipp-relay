@@ -680,3 +680,63 @@ func (c failingAccounting) AccountingCurrent(string, uint64) bool    { return tr
 func (c failingAccounting) AccountingSessions(string, int)           {}
 func (c failingAccounting) ClosureCurrent(quota.ClosureOutcome) bool { return true }
 func (c failingAccounting) FlushAllAccounting(context.Context) error { return nil }
+
+func TestGrantRevocationKeepsDelayedClosingConnectionTerminal(t *testing.T) {
+	s, err := New(&grantAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "grant-a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("initial auth: %s", response)
+	}
+
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	s.sessionManager.physicalClose = func(c network.Conn) {
+		close(closeStarted)
+		<-releaseClose
+		_ = c.Close()
+	}
+	defer release()
+	if err := s.RetireGrant("grant-a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+		t.Fatal("physical close started before Auth released protection")
+	default:
+	}
+	if got := s.ActiveSessions(); got != 0 {
+		t.Fatalf("grant retirement left %d authorized sessions", got)
+	}
+	if err := s.CompleteGrantInvalidation("grant-a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+	case <-ctx.Done():
+		t.Fatal("grant completion did not start manager-owned physical close")
+	}
+
+	// A physical connection whose logical permission has been revoked must
+	// remain terminal while Close is delayed. The test authority deliberately
+	// accepts the same grant token again to isolate the Relay Session barrier.
+	response := authResponse(t, ctx, h, s.Host.ID(), "grant-a")
+	if strings.Contains(response, `"ok":true`) {
+		t.Fatalf("reauthenticated on a connection while revoked grant close was delayed: %s", response)
+	}
+	release()
+}
