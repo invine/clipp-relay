@@ -75,6 +75,7 @@ type connectionDiagnostic struct {
 }
 
 type session struct {
+	identity  uint64
 	endReason string
 	conn      network.Conn
 	account   string
@@ -110,6 +111,10 @@ type sessionManager struct {
 	maxSessions           int
 	scheduleExpiry        func(time.Duration, func()) sessionTimer
 	globalRate            tokenBucket
+	rvGlobalRate          tokenBucket
+	nextSessionIdentity   uint64
+	relayID               peer.ID
+	verifyPeerRecord      func([]byte, peer.ID, peer.ID) bool
 	physicalClose         func(network.Conn)
 	closePending          map[network.Conn]struct{}
 	closeInFlight         map[network.Conn]struct{}
@@ -149,7 +154,6 @@ type Server struct {
 	wsEnabled         bool
 	webrtcEnabled     bool
 	webSocketHostname string
-	rvGlobalRate      tokenBucket
 	rvCounts          [2]atomic.Uint64
 	closeOnce         sync.Once
 }
@@ -335,6 +339,7 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 		return nil, err
 	}
 	s.Host = h
+	s.sessionManager.relayID = h.ID()
 	if installProtection != nil {
 		if err := installProtection(s); err != nil {
 			_ = h.Close()
@@ -347,7 +352,9 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 	h.SetStreamHandler(RendezvousV1Protocol, s.handleRendezvous)
 	h.SetStreamHandler(RendezvousV2Protocol, s.handleRendezvous)
 	resources := relay.Resources{Limit: &relay.RelayLimit{Duration: 120 * time.Second, Data: 2 << 20}, ReservationTTL: 30 * time.Minute, MaxReservations: 6000, MaxCircuits: 16, BufferSize: 2048, MaxReservationsPerPeer: 1, MaxReservationsPerIP: 6000, MaxReservationsPerASN: 6000}
-	s.stock, err = relay.New(gatedHost{Host: h, check: s.sessionManager.permitted, doneHop: s.sessionManager.doneHop, stopConn: s.sessionManager.authoritativeConn, observeDeniedHop: s.observeDeniedHop, observeReservation: func(st network.Stream) network.Stream { return &reservationStream{Stream: st, server: s} }}, relay.WithResources(resources), relay.WithMetricsTracer(s.tracer), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
+	s.stock, err = relay.New(gatedHost{Host: h, check: s.sessionManager.permitted, doneHop: s.sessionManager.doneHop, stopConn: s.sessionManager.authoritativeConn, observeDeniedHop: s.observeDeniedHop, observeReservation: func(st network.Stream) network.Stream {
+		return &reservationStream{Stream: st, manager: s.sessionManager}
+	}}, relay.WithResources(resources), relay.WithMetricsTracer(s.tracer), relay.WithReservationAddressFilter(func(ma.Multiaddr) bool { return true }))
 	if err != nil {
 		_ = h.Close()
 		_ = manager.Close()
@@ -548,7 +555,7 @@ func (m *sessionManager) removeSessionLocked(v *session, preserveRendezvous bool
 		return
 	}
 	if !preserveRendezvous {
-		m.server.removeRendezvousLocked(v)
+		m.removeRendezvousLocked(v)
 	}
 	delete(m.byConn, v.conn)
 	if m.byPeer[v.conn.RemotePeer()] == v {
@@ -1063,7 +1070,8 @@ func (m *sessionManager) authenticateAdmitted(ctx context.Context, c network.Con
 		m.endSessionLocked(replaced, "replaced")
 		m.queueCloseLocked(replaced.conn)
 	}
-	v := &session{conn: c, account: credential.AccountID, grantID: credential.GrantID, deadline: deadline}
+	m.nextSessionIdentity++
+	v := &session{identity: m.nextSessionIdentity, conn: c, account: credential.AccountID, grantID: credential.GrantID, deadline: deadline}
 	m.byConn[c] = v
 	m.lifecycle[c] = connectionAuthenticated
 	m.byPeer[c.RemotePeer()] = v

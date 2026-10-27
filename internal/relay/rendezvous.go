@@ -34,7 +34,7 @@ type rendezvousLease struct {
 	record       []byte
 	registeredAt time.Time
 	deadline     time.Time
-	timer        *time.Timer
+	timer        sessionTimer
 }
 type reservationOwner struct {
 	conn     network.Conn
@@ -46,7 +46,7 @@ type reservationOwner struct {
 // connection and expiry for Rendezvous's stricter registration gate.
 type reservationStream struct {
 	network.Stream
-	server   *Server
+	manager  *sessionManager
 	response []byte
 }
 
@@ -63,44 +63,136 @@ func (st *reservationStream) Write(p []byte) (int, error) {
 	var msg pbv2.HopMessage
 	if proto.Unmarshal(st.response[header:], &msg) == nil && msg.GetStatus() == pbv2.Status_OK && msg.GetReservation() != nil {
 		deadline := time.Unix(int64(msg.GetReservation().GetExpire()), 0)
-		st.server.mu.Lock()
-		if owner := st.server.byConn[st.Conn()]; owner != nil && st.server.byPeer[st.Conn().RemotePeer()] == owner {
-			st.server.reservations[st.Conn().RemotePeer()] = reservationOwner{conn: st.Conn(), deadline: deadline}
-		}
-		st.server.mu.Unlock()
+		st.manager.recordReservation(st.Conn(), deadline)
 	}
 	return n, err
 }
 
-func (s *Server) removeRendezvousLocked(v *session) {
-	id := v.conn.RemotePeer()
-	if lease := s.leases[id]; lease != nil && lease.owner == v {
-		s.deleteLeaseLocked(id, lease)
-	}
-	if r := s.reservations[id]; r.conn == v.conn {
-		delete(s.reservations, id)
+func (m *sessionManager) recordReservation(conn network.Conn, deadline time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owner := m.byConn[conn]
+	if owner != nil && m.byPeer[conn.RemotePeer()] == owner && m.lifecycle[conn] == connectionAuthenticated {
+		m.reservations[conn.RemotePeer()] = reservationOwner{conn: conn, deadline: deadline}
 	}
 }
-func (s *Server) deleteLeaseLocked(id peer.ID, lease *rendezvousLease) {
-	if s.leases[id] != lease {
+
+func (m *sessionManager) removeRendezvousLocked(v *session) {
+	id := v.conn.RemotePeer()
+	if lease := m.leases[id]; lease != nil && lease.owner == v {
+		m.deleteLeaseLocked(id, lease)
+	}
+	if r := m.reservations[id]; r.conn == v.conn {
+		delete(m.reservations, id)
+	}
+}
+func (m *sessionManager) deleteLeaseLocked(id peer.ID, lease *rendezvousLease) {
+	if m.leases[id] != lease {
 		return
 	}
-	delete(s.leases, id)
+	delete(m.leases, id)
 	if lease.timer != nil {
 		lease.timer.Stop()
 	}
 }
-func (s *Server) currentLeaseLocked(id peer.ID, now time.Time) *rendezvousLease {
-	lease := s.leases[id]
+func (m *sessionManager) currentLeaseLocked(id peer.ID, now time.Time) *rendezvousLease {
+	lease := m.leases[id]
 	if lease == nil {
 		return nil
 	}
-	r := s.reservations[id]
-	if !now.Before(lease.deadline) || s.byConn[lease.owner.conn] != lease.owner || s.byPeer[id] != lease.owner || r.conn != lease.owner.conn || !now.Before(r.deadline) {
-		s.deleteLeaseLocked(id, lease)
+	r := m.reservations[id]
+	if !now.Before(lease.deadline) || m.byConn[lease.owner.conn] != lease.owner || m.byPeer[id] != lease.owner || r.conn != lease.owner.conn || !now.Before(r.deadline) {
+		m.deleteLeaseLocked(id, lease)
 		return nil
 	}
 	return lease
+}
+
+// rendezvousRequest identifies the session that owned a wire request when the
+// protocol adapter admitted it. It carries no permission snapshot or mutable
+// session pointer; every operation resolves the identity again under m.mu.
+type rendezvousRequest struct {
+	conn     network.Conn
+	peer     peer.ID
+	identity uint64
+}
+
+type rendezvousOutcome struct {
+	code         string
+	retryAfter   int
+	peer         peer.ID
+	record       []byte
+	deadline     time.Time
+	registeredAt time.Time
+}
+
+func (o rendezvousOutcome) successful() bool { return o.code == "" }
+
+// response performs only version-specific wire shaping. Session and lease
+// decisions are already complete when an outcome reaches the adapter.
+func (o rendezvousOutcome) response(version protocol.ID, action string) map[string]any {
+	if o.code != "" {
+		response := map[string]any{"ok": false, "code": o.code}
+		if o.retryAfter > 0 {
+			response["retryAfterMillis"] = o.retryAfter
+		}
+		return response
+	}
+	response := map[string]any{"ok": true}
+	switch action {
+	case "register":
+		response["peer"] = o.peer.String()
+		if version == RendezvousV2Protocol {
+			response["leaseExpiresAt"] = o.deadline.UTC().Format(time.RFC3339Nano)
+		}
+	case "lookup":
+		if len(o.record) == 0 {
+			return response
+		}
+		if version == RendezvousV2Protocol {
+			response["record"] = map[string]any{"peer": o.peer.String(), "signedPeerRecord": base64.RawURLEncoding.EncodeToString(o.record)}
+			response["leaseExpiresAt"] = o.deadline.UTC().Format(time.RFC3339Nano)
+		} else {
+			numbers := make([]int, len(o.record))
+			for i, b := range o.record {
+				numbers[i] = int(b)
+			}
+			response["record"] = map[string]any{"peer": o.peer.String(), "signedPeerRecord": numbers, "lastSeen": o.registeredAt.UnixMilli()}
+		}
+	}
+	return response
+}
+
+func (m *sessionManager) beginRendezvous(conn network.Conn) (rendezvousRequest, rendezvousOutcome) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	allowed := m.rvGlobalRate.allow(now, 500, 1000)
+	owner := m.byConn[conn]
+	authenticated := owner != nil && m.byPeer[conn.RemotePeer()] == owner && m.lifecycle[conn] == connectionAuthenticated && now.Before(owner.deadline)
+	if authenticated {
+		bucket := m.rvConnRate[conn]
+		allowed = bucket.allow(now, 4, 8) && allowed
+		m.rvConnRate[conn] = bucket
+	}
+	if !authenticated {
+		if m.closing {
+			return rendezvousRequest{}, rendezvousOutcome{code: "temporarily_unavailable", retryAfter: 5000}
+		}
+		return rendezvousRequest{}, rendezvousOutcome{code: "authentication_failed"}
+	}
+	if !allowed {
+		return rendezvousRequest{}, rendezvousOutcome{code: "rate_limited", retryAfter: 5000}
+	}
+	return rendezvousRequest{conn: conn, peer: conn.RemotePeer(), identity: owner.identity}, rendezvousOutcome{}
+}
+
+func (m *sessionManager) currentRendezvousOwnerLocked(request rendezvousRequest, now time.Time) *session {
+	owner := m.byConn[request.conn]
+	if owner == nil || owner.identity != request.identity || owner.conn != request.conn || owner.conn.RemotePeer() != request.peer || m.byPeer[request.peer] != owner || m.lifecycle[request.conn] != connectionAuthenticated || !now.Before(owner.deadline) {
+		return nil
+	}
+	return owner
 }
 
 func (s *Server) handleRendezvous(st network.Stream) {
@@ -126,27 +218,9 @@ func (s *Server) handleRendezvous(st network.Stream) {
 	defer st.Scope().ReleaseMemory(limit * 2)
 	_ = st.SetDeadline(time.Now().Add(12 * time.Second))
 	defer st.SetDeadline(time.Time{})
-	now := time.Now()
-	s.mu.Lock()
-	owner := s.byConn[st.Conn()]
-	authenticated := owner != nil && s.byPeer[st.Conn().RemotePeer()] == owner && now.Before(owner.deadline)
-	allowed := s.rvGlobalRate.allow(now, 500, 1000)
-	if authenticated {
-		b := s.rvConnRate[st.Conn()]
-		allowed = b.allow(now, 4, 8) && allowed
-		s.rvConnRate[st.Conn()] = b
-	}
-	s.mu.Unlock()
-	if !authenticated {
-		if s.Serving() {
-			s.rvError(st, version, "authentication_failed", 0)
-		} else {
-			s.rvError(st, version, "temporarily_unavailable", 5000)
-		}
-		return
-	}
-	if !allowed {
-		s.rvError(st, version, "rate_limited", 5000)
+	requestOwner, admission := s.sessionManager.beginRendezvous(st.Conn())
+	if !admission.successful() {
+		s.rvError(st, version, admission.code, admission.retryAfter)
 		return
 	}
 	data, err := readRV(st, version, limit)
@@ -159,7 +233,8 @@ func (s *Server) handleRendezvous(st network.Stream) {
 		s.rvError(st, version, "invalid_request", 0)
 		return
 	}
-	response := s.applyRV(st, owner, request)
+	outcome := s.sessionManager.applyRendezvous(requestOwner, request)
+	response := outcome.response(version, request.action)
 	s.observeRendezvous(st, request.action, response, requestID, time.Since(started))
 	if err := writeRV(st, version, response, limit); err != nil {
 		_ = st.Reset()
@@ -206,9 +281,7 @@ func (s *Server) observeRendezvous(st network.Stream, action string, response an
 	} else if action == "lookup" && result["record"] == nil {
 		outcome, reason = "refused", "lease_unavailable"
 	}
-	s.mu.Lock()
-	info := s.connectionInfo[st.Conn()]
-	s.mu.Unlock()
+	info := s.sessionManager.connectionInfoFor(st.Conn())
 	s.diagnostics.Emit(diagnostic.Event{Event: event, Outcome: outcome, Reason: reason, RequestID: requestID, SessionID: info.id, Duration: duration})
 }
 
@@ -445,65 +518,71 @@ func parseRV(data []byte, version protocol.ID) (rvRequest, error) {
 	return req, nil
 }
 
-func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
-	id := st.Conn().RemotePeer()
-	s.mu.Lock()
+func (m *sessionManager) applyRendezvous(requestOwner rendezvousRequest, req rvRequest) rendezvousOutcome {
+	id := requestOwner.peer
+	m.mu.Lock()
 	now := time.Now()
-	if s.closing && req.action == "register" {
-		s.mu.Unlock()
-		return map[string]any{"ok": false, "code": "temporarily_unavailable", "retryAfterMillis": 5000}
+	owner := m.currentRendezvousOwnerLocked(requestOwner, now)
+	if owner == nil {
+		m.mu.Unlock()
+		return rendezvousOutcome{code: "authentication_failed"}
 	}
-	if s.byConn[st.Conn()] != owner || s.byPeer[id] != owner || !now.Before(owner.deadline) {
-		s.mu.Unlock()
-		return map[string]any{"ok": false, "code": "authentication_failed"}
+	if m.closing && req.action == "register" {
+		m.mu.Unlock()
+		return rendezvousOutcome{code: "temporarily_unavailable", retryAfter: 5000}
 	}
 	switch req.action {
 	case "lookup":
-		lease := s.currentLeaseLocked(req.peer, now)
-		s.mu.Unlock()
+		lease := m.currentLeaseLocked(req.peer, now)
 		if lease == nil {
-			return map[string]any{"ok": true}
+			m.mu.Unlock()
+			return rendezvousOutcome{}
 		}
-		if st.Protocol() == RendezvousV2Protocol {
-			return map[string]any{"ok": true, "record": map[string]any{"peer": req.peer.String(), "signedPeerRecord": base64.RawURLEncoding.EncodeToString(lease.record)}, "leaseExpiresAt": lease.deadline.UTC().Format(time.RFC3339Nano)}
-		}
-		numbers := make([]int, len(lease.record))
-		for i, b := range lease.record {
-			numbers[i] = int(b)
-		}
-		return map[string]any{"ok": true, "record": map[string]any{"peer": req.peer.String(), "signedPeerRecord": numbers, "lastSeen": lease.registeredAt.UnixMilli()}}
+		outcome := rendezvousOutcome{peer: req.peer, record: bytes.Clone(lease.record), deadline: lease.deadline, registeredAt: lease.registeredAt}
+		m.mu.Unlock()
+		return outcome
 	case "unregister":
-		if lease := s.leases[id]; lease != nil && lease.owner == owner {
-			s.deleteLeaseLocked(id, lease)
+		if lease := m.leases[id]; lease != nil && lease.owner == owner {
+			m.deleteLeaseLocked(id, lease)
 		}
-		s.mu.Unlock()
-		return map[string]any{"ok": true}
+		m.mu.Unlock()
+		return rendezvousOutcome{}
 	case "register":
-		reservation := s.reservations[id]
+		reservation := m.reservations[id]
 		if reservation.conn != owner.conn || !now.Before(reservation.deadline) {
-			s.mu.Unlock()
-			return map[string]any{"ok": false, "code": "reservation_required"}
+			m.mu.Unlock()
+			return rendezvousOutcome{code: "reservation_required"}
 		}
-		s.mu.Unlock()
-		// Signature verification and address parsing operate on the already bounded
-		// request without holding the shared session/lease lock.
-		if !validPeerRecord(req.envelope, id, s.Host.ID()) {
-			return map[string]any{"ok": false, "code": "invalid_peer_record"}
+		m.mu.Unlock()
+
+		// Verify the bounded Signed Peer Record outside the shared session and
+		// lease lock. The captured request identity is rechecked before commit.
+		verify := m.verifyPeerRecord
+		valid := false
+		if verify != nil {
+			valid = verify(req.envelope, id, m.relayID)
+		} else {
+			valid = validPeerRecord(req.envelope, id, m.relayID)
 		}
-		s.mu.Lock()
+		if !valid {
+			return rendezvousOutcome{code: "invalid_peer_record"}
+		}
+
+		m.mu.Lock()
 		now = time.Now()
-		if s.closing {
-			s.mu.Unlock()
-			return map[string]any{"ok": false, "code": "temporarily_unavailable", "retryAfterMillis": 5000}
+		owner = m.currentRendezvousOwnerLocked(requestOwner, now)
+		if owner == nil {
+			m.mu.Unlock()
+			return rendezvousOutcome{code: "authentication_failed"}
 		}
-		if s.byConn[st.Conn()] != owner || s.byPeer[id] != owner || !now.Before(owner.deadline) {
-			s.mu.Unlock()
-			return map[string]any{"ok": false, "code": "authentication_failed"}
+		if m.closing {
+			m.mu.Unlock()
+			return rendezvousOutcome{code: "temporarily_unavailable", retryAfter: 5000}
 		}
-		reservation = s.reservations[id]
+		reservation = m.reservations[id]
 		if reservation.conn != owner.conn || !now.Before(reservation.deadline) {
-			s.mu.Unlock()
-			return map[string]any{"ok": false, "code": "reservation_required"}
+			m.mu.Unlock()
+			return rendezvousOutcome{code: "reservation_required"}
 		}
 		deadline := now.Add(5 * time.Minute)
 		if owner.deadline.Before(deadline) {
@@ -513,23 +592,25 @@ func (s *Server) applyRV(st network.Stream, owner *session, req rvRequest) any {
 			deadline = reservation.deadline
 		}
 		if !now.Before(deadline) {
-			s.mu.Unlock()
-			return map[string]any{"ok": false, "code": "reservation_required"}
+			m.mu.Unlock()
+			return rendezvousOutcome{code: "reservation_required"}
 		}
-		if old := s.leases[id]; old != nil {
-			s.deleteLeaseLocked(id, old)
+		if old := m.leases[id]; old != nil {
+			m.deleteLeaseLocked(id, old)
 		}
 		lease := &rendezvousLease{owner: owner, record: bytes.Clone(req.envelope), registeredAt: now, deadline: deadline}
-		s.leases[id] = lease
-		lease.timer = time.AfterFunc(time.Until(deadline), func() { s.mu.Lock(); s.deleteLeaseLocked(id, lease); s.mu.Unlock() })
-		s.mu.Unlock()
-		if st.Protocol() == RendezvousV2Protocol {
-			return map[string]any{"ok": true, "peer": id.String(), "leaseExpiresAt": deadline.UTC().Format(time.RFC3339Nano)}
-		}
-		return map[string]any{"ok": true, "peer": id.String()}
+		m.leases[id] = lease
+		lease.timer = m.scheduleExpiry(time.Until(deadline), func() {
+			m.mu.Lock()
+			m.deleteLeaseLocked(id, lease)
+			m.mu.Unlock()
+		})
+		m.mu.Unlock()
+		return rendezvousOutcome{peer: id, deadline: deadline}
+	default:
+		m.mu.Unlock()
+		return rendezvousOutcome{code: "invalid_request"}
 	}
-	s.mu.Unlock()
-	return map[string]any{"ok": false, "code": "invalid_request"}
 }
 
 func validPeerRecord(raw []byte, subject, relayID peer.ID) bool {
