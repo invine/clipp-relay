@@ -246,7 +246,7 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		emit("refused", "not_published")
 		return
 	}
-	if d.server.ActiveSessions() >= d.server.maxSessions {
+	if d.server.SessionCapacityReached() {
 		discoveryError(w, 429, "rate_limited")
 		emit("refused", "safety_limit")
 		return
