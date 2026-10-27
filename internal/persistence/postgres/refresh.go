@@ -46,11 +46,14 @@ func (t *transaction) RotateRefreshCredential(ctx context.Context, digest [32]by
 	var actual string
 	err := t.tx.QueryRow(ctx, `UPDATE public.native_refresh_generations SET consumed_at=clock_timestamp()
 		WHERE credential_digest=$1 AND consumed_at IS NULL RETURNING grant_id::text`, digest[:]).Scan(&actual)
-	if errors.Is(err, pgx.ErrNoRows) || actual != grantID {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return persistence.ErrInvalidCredential
 	}
 	if err != nil {
 		return unavailable(err)
+	}
+	if actual != grantID {
+		return persistence.ErrInvalidCredential
 	}
 	tag, err := t.tx.Exec(ctx, `UPDATE public.native_login_grants SET current_refresh_generation=current_refresh_generation+1,
 		last_used_at=clock_timestamp(),idle_expires_at=LEAST(absolute_expires_at,clock_timestamp()+interval '30 days')

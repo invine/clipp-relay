@@ -240,7 +240,7 @@ func TestOwnerDeleteTransactionalSQLFailureKeepsDatabaseReason(t *testing.T) {
 		return errors.New("injected repository recheck failure")
 	}
 	form := url.Values{"csrf": {s.csrf(s.CurrentPepper, cookie.Value)}}
-	if out := internalRequest(s, http.MethodPost, "/auth/delete", cookie, form, origin); out.Code != http.StatusUnauthorized {
+	if out := internalRequest(s, http.MethodPost, "/auth/delete", cookie, form, origin); out.Code != http.StatusServiceUnavailable {
 		t.Fatalf("recheck SQL error status %d", out.Code)
 	}
 	logger.Close()

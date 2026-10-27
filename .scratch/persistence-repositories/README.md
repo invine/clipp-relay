@@ -1,6 +1,6 @@
 # Clipp Relay persistence repositories
 
-**Status:** design agreed; implementation not started.  
+**Status:** implementation complete on `codex/persistence-repositories-integration`; local verification and PostgreSQL 17/18 qualification passed on 2026-10-27.
 **Owning repository:** relay.  
 **Canonical feature directory:** relay:`.scratch/persistence-repositories/`.  
 **Participating roles:** relay only; client transport behavior is preserved.  
@@ -14,4 +14,4 @@ Functional modules depend on entity repositories and a storage-neutral transacti
 
 This effort expands architecture-review candidate 1 beyond escaped native OAuth reads to all application persistence, including presentation queries, Fosite storage, cleanup, deletion, recovery and credential reset. It preserves the existing database schema and observable behavior. The other architecture candidates are separate work.
 
-The five design choices were approved in this conversation on 2026-10-26. The plan contains implementation choices derived from those decisions; it is not evidence that code was implemented, tests passed or deployment occurred. No implementation tickets have been claimed or dispatched. Follow the selected client checkout's `docs/agents/workflow.md` for any later implementation run, keeping this relay-owned feature directory canonical rather than duplicating its specification in the client repository.
+The five design choices were approved in this conversation on 2026-10-26. All eleven implementation tickets are resolved in the integration branch. Verification evidence is recorded in [the ticket tracker](issues/README.md). This is local implementation and qualification evidence; it does not authorize publication or deployment. Keep this relay-owned feature directory canonical rather than duplicating its specification in the client repository.

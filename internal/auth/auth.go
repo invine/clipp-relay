@@ -51,6 +51,7 @@ func (s *Server) SetRelayCredentialHookForTest(hook func()) { s.relayCredentialH
 // Production leaves this unset.
 func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
 	s.commitRefresh = commit
+	s.commitAuthorization = commit
 }
 
 // SetAuthorizationCommitHookForTest injects storage-neutral commit outcomes for

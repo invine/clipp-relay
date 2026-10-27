@@ -29,7 +29,7 @@ func (w *Work) ReadAccountingEligibility(ctx context.Context, accountID string) 
 		FROM observed CROSS JOIN public.accounts a JOIN public.quota_plans p ON p.id=a.plan_id
 		LEFT JOIN public.weekly_relay_usage u ON u.account_id=a.id
 			AND u.week_start=date_trunc('week',observed.now AT TIME ZONE 'UTC')::date
-		WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL`, accountID).
+		WHERE a.id=$1 AND a.deleted_at IS NULL AND a.deletion_started_at IS NULL AND NOT a.recovery_review_hold`, accountID).
 		Scan(&result.DatabaseNow, &result.CapBytes, &result.SessionLimit, &result.RecordedBytes,
 			&result.Sequence, &result.OperationID, &result.DeltaBytes)
 	if err != nil {

@@ -16,9 +16,27 @@ type Work struct{ runtime *database.Runtime }
 
 func New(runtime *database.Runtime) *Work { return &Work{runtime: runtime} }
 
+// beginOwnedTransaction shares operation admission and transaction lifetime for
+// adapter-specific repositories that expose narrower transaction interfaces.
+func beginOwnedTransaction(ctx context.Context, runtime *database.Runtime) (persistence.Operation, persistence.Transaction, error) {
+	op, err := New(runtime).Start(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	tx, err := op.Begin(op.Context())
+	if err != nil {
+		op.Close()
+		return nil, nil, err
+	}
+	return op, tx, nil
+}
+
 func (w *Work) Start(parent context.Context) (persistence.Operation, error) {
 	ctx, release, err := w.runtime.StartUnit(parent)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, errors.Join(persistence.ErrUnavailable, err)
+		}
 		if errors.Is(err, database.ErrWorkUnavailable) {
 			return nil, errors.Join(persistence.ErrUnavailable, persistence.ErrWorkUnavailable)
 		}

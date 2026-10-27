@@ -36,13 +36,8 @@ func (r *Recovery) FindRecoveryRun(ctx context.Context, id string) (persistence.
 	return run, true, nil
 }
 func (r *Recovery) BeginRecovery(ctx context.Context) (persistence.RecoveryTransaction, error) {
-	op, err := New(r.runtime).Start(ctx)
+	op, tx, err := beginOwnedTransaction(ctx, r.runtime)
 	if err != nil {
-		return nil, err
-	}
-	tx, err := op.Begin(op.Context())
-	if err != nil {
-		op.Close()
 		return nil, err
 	}
 	recovery, ok := tx.(persistence.RecoveryTransaction)

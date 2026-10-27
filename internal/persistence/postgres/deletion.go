@@ -16,13 +16,11 @@ type Deletions struct{ runtime *database.Runtime }
 func NewDeletions(runtime *database.Runtime) *Deletions { return &Deletions{runtime: runtime} }
 
 func (d *Deletions) BeginDeletion(ctx context.Context) (persistence.DeletionTransaction, error) {
-	op, err := New(d.runtime).Start(ctx)
+	op, tx, err := beginOwnedTransaction(ctx, d.runtime)
 	if err != nil {
-		return nil, err
-	}
-	tx, err := op.Begin(op.Context())
-	if err != nil {
-		op.Close()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, errors.Join(persistence.ErrUnavailable, err)
+		}
 		return nil, err
 	}
 	deletion, ok := tx.(persistence.DeletionTransaction)
@@ -199,6 +197,9 @@ func (d *Deletions) NextDeletion(ctx context.Context) (persistence.DeletionOpera
 		return x, persistence.ErrNotFound
 	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return x, errors.Join(persistence.ErrUnavailable, err)
+		}
 		return x, persistence.ErrUnavailable
 	}
 	return x, nil

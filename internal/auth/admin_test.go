@@ -631,7 +631,7 @@ func TestPlanMutationRechecksGoogleAgeAfterActorLockWait(t *testing.T) {
 	waiting := false
 	for deadline := time.Now().Add(180 * time.Millisecond); time.Now().Before(deadline); {
 		var count int
-		if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity WHERE usename=current_user AND wait_event_type='Lock' AND query LIKE '%public.accounts WHERE id=$1 FOR UPDATE%'`).Scan(&count); e != nil {
+		if e := db.Pool.QueryRow(context.Background(), `SELECT count(*) FROM pg_stat_activity WHERE usename=current_user AND wait_event_type='Lock' AND query LIKE '%public.accounts WHERE id=$1 OR id=$2 ORDER BY id FOR UPDATE%'`).Scan(&count); e != nil {
 			t.Fatal(e)
 		}
 		if count > 0 {
