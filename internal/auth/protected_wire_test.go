@@ -688,3 +688,49 @@ func TestOwnerRevocationDeliverySurvivesRequestCancellationAfterCommit(t *testin
 		t.Fatalf("canceled request suppressed account invalidation; sessions=%d", got)
 	}
 }
+
+func TestOwnerRevocationCompletesAfterIdentityProtectionAndClassifiesIncompleteCleanup(t *testing.T) {
+	p := protectedPortalFixture(t)
+	var subject string
+	if err := p.runtime.Pool.QueryRow(context.Background(), `SELECT subject FROM public.accounts WHERE id=$1`, p.account).Scan(&subject); err != nil {
+		t.Fatal(err)
+	}
+	var completions atomic.Int32
+	p.auth.SetAccountInvalidationCompleteForTest(func(string) error {
+		completions.Add(1)
+		acquired := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- p.auth.WithIdentityFence(subject, func() error {
+				close(acquired)
+				return nil
+			})
+		}()
+		select {
+		case <-acquired:
+			if err := <-done; err != nil {
+				return err
+			}
+		case <-time.After(2 * time.Second):
+			return errors.New("identity protection was still held during Relay cleanup completion")
+		}
+		return errors.New("simulated physical cleanup failure")
+	})
+	form := url.Values{"csrf": {csrfFrom(t, p.auth, p.owner)}, "confirm": {"yes"}}
+	out := portalRequest(p.auth, "POST", "/auth/revoke", p.owner, form, p.config.PortalOrigin)
+	if completions.Load() != 1 {
+		t.Fatalf("Relay cleanup completion calls=%d, want exactly one", completions.Load())
+	}
+	if out.Code != http.StatusServiceUnavailable || !strings.Contains(out.Body.String(), "committed") || !strings.Contains(out.Body.String(), "invalidation") {
+		t.Fatalf("committed incomplete revocation response=%d %s", out.Code, out.Body.String())
+	}
+	cleared := false
+	for _, cookie := range out.Result().Cookies() {
+		if cookie.Name == "__Host-clipp-portal" && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("committed revocation did not clear the Portal Session cookie")
+	}
+}
