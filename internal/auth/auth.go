@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -541,6 +542,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	portal.RegisterAssets(mux)
 	mux.HandleFunc("GET /", s.home)
+	mux.HandleFunc("GET /account/security", s.home)
 	mux.HandleFunc("GET /auth/login", s.login)
 	mux.HandleFunc("GET /auth/callback", s.callback)
 	mux.HandleFunc("GET /oauth/authorize", s.authorize)
@@ -551,6 +553,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/delete", s.deleteOwner)
 	mux.HandleFunc("GET /auth/deletion/{id}", s.deletionStatus)
 	mux.HandleFunc("GET /admin", s.adminHome)
+	mux.HandleFunc("GET /admin/plans", s.adminPlanLibrary)
 	mux.HandleFunc("POST /admin/accounts/{id}", s.adminAccount)
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
@@ -835,7 +838,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		guard.Unlock()
 		guardHeld = false
 		op.Close()
-		s.presentConsent(w, r, accountID, credential, s.CurrentPepper, claims.Subject, *f.intent)
+		s.presentConsent(w, r, accountID, credential, s.CurrentPepper, claims.Subject, claims.Email, *f.intent)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -1003,7 +1006,7 @@ func (s *Server) session(r *http.Request) (string, uint64, string, string, strin
 type quotaHistory = portal.QuotaHistoryEntry
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/" && r.URL.Path != "/account/security" {
 		http.NotFound(w, r)
 		return
 	}
@@ -1018,6 +1021,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	}
 	var status, email string
 	var recoveryHeld bool
+	var weekStart time.Time
 	var weeklyBytes *int64
 	var sessions *int
 	var verified bool
@@ -1029,6 +1033,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			s.beforeProfileRead()
 		}
 		profile, err := s.ownerUsageProfile(r, id, version)
+		weekStart = profile.WeekStart
 		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
 		recoveryHeld = profile.RecoveryHeld
 		weeklyBytes, sessions, recorded, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
@@ -1066,6 +1071,8 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
+	showAllHistory := r.URL.Query().Get("history") == "all"
+	history = portal.QuotaHistoryRange(history, showAllHistory)
 	var liveSessions, activeGrants int
 	var liveKnown, grantsKnown bool
 	if e == nil && status == "Active" && s.capacitySampler != nil {
@@ -1085,6 +1092,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		percent = min(100, int64(float64(recorded)*100/float64(bytesValue)))
 	}
 	usageState := "Remaining allowance: " + portal.FormatBytes(max(0, bytesValue-recorded)) + "."
+	remaining := max(0, bytesValue-recorded)
 	if bytesValue == 0 {
 		usageState = "Zero allowance: relay use is unavailable."
 	}
@@ -1092,20 +1100,35 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		usageState += " Recorded Relay Usage exceeds the current allowance."
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	portal.Render(w, http.StatusOK, "account", struct {
+	relayURL, _ := url.Parse(s.Origin)
+	pageData := struct {
 		SignedIn                               bool
 		Status, Description, Email, CSRF       string
-		DiscoveryURL                           string
+		DiscoveryURL, RelayHost                string
 		Active, Admin                          bool
+		Security                               bool
+		Notice                                 string
 		RecoveryHeld                           bool
+		WeekStart                              time.Time
 		WeeklyBytes                            int64
 		Sessions                               int
 		Recorded, Percent                      int64
+		Remaining                              int64
 		UsageState                             string
 		History                                []quotaHistory
+		ShowAllHistory                         bool
 		LiveSessions, ActiveGrants, GrantLimit int
 		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", status == "Active" && !recoveryHeld, admin, recoveryHeld, bytesValue, sessionsValue, recorded, percent, usageState, history, liveSessions, activeGrants, 20, liveKnown, grantsKnown})
+	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", relayURL.Host, status == "Active" && !recoveryHeld, admin, r.URL.Path == "/account/security", r.URL.Query().Get("notice"), recoveryHeld, weekStart, bytesValue, sessionsValue, recorded, percent, remaining, usageState, history, showAllHistory, liveSessions, activeGrants, 20, liveKnown, grantsKnown}
+	if pageData.Security && !pageData.SignedIn {
+		http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
+		return
+	}
+	if pageData.Security {
+		portal.Render(w, http.StatusOK, "account-security", pageData)
+		return
+	}
+	portal.Render(w, http.StatusOK, "account", pageData)
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
@@ -1165,7 +1188,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie(w, sessionCookie, "", -1)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/?notice=portal-logout", http.StatusSeeOther)
 }
 
 func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
@@ -1196,6 +1219,11 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
 		markDiagnostic(r, "refused", "csrf_rejected")
 		fail(w, 403)
+		return
+	}
+	if r.PostForm.Get("confirm") != "yes" {
+		markDiagnostic(r, "refused", "confirmation_required")
+		http.Error(w, "Review the account-wide consequences and confirm before signing out everywhere.", http.StatusBadRequest)
 		return
 	}
 	if s.beforeOwnerSubjectRead != nil {
@@ -1305,7 +1333,7 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 			markDiagnostic(r, "failed", "invalidation_incomplete")
 			http.Error(w, "Account revocation committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
 		} else {
-			http.Redirect(w, r, "/", http.StatusSeeOther)
+			http.Redirect(w, r, "/?notice=revoked", http.StatusSeeOther)
 		}
 	}
 }

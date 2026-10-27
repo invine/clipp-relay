@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -234,10 +236,14 @@ func (s *Server) sessionDigest(r *http.Request, version uint64) []byte {
 }
 
 type adminAccountRow struct {
-	RecoveryHeld                                               bool
-	ID, Email, Status, PlanID, WeeklyOverride, SessionOverride string
-	Revision                                                   int64
-	Usage                                                      *accountUsageQuery
+	RecoveryHeld                                                         bool
+	ID, Email, Status, PlanID, PlanName, WeeklyOverride, SessionOverride string
+	EffectiveBytes                                                       int64
+	EffectiveSessions                                                    int
+	PlanArchived                                                         bool
+	Revision                                                             int64
+	Usage                                                                *accountUsageQuery
+	ReviewHref                                                           template.URL
 }
 type adminPlanRow struct {
 	ID, Name string
@@ -246,18 +252,96 @@ type adminPlanRow struct {
 	Revision int64
 	Archived bool
 }
+
+type adminAccessActionView struct {
+	ID, Action, Title, Effect, Button string
+	Destructive                       bool
+}
+
+type adminAccessActionCopy struct {
+	Action, ID, Title, Effect, Button string
+	Destructive                       bool
+}
+
+var adminAccessActionCopyByAction = []adminAccessActionCopy{
+	{
+		Action: "suspend", ID: "suspend-account-access", Title: "Suspend relay access",
+		Effect: "Suspends Relay Session admission for %s and invalidates its Login Grants, Relay Access Tokens, Relay Sessions, and Portal Sessions. Authorization ends immediately; physical session closure may finish asynchronously. The saved quota assignment remains unchanged.",
+		Button: "Confirm suspension of %s", Destructive: true,
+	},
+	{
+		Action: "deny", ID: "deny-account-access", Title: "Deny relay access",
+		Effect: "Changes %s to Denied and invalidates its Login Grants, Relay Access Tokens, Relay Sessions, and Portal Sessions. Authorization ends immediately; physical session closure may finish asynchronously. The saved quota assignment remains unchanged.",
+		Button: "Confirm denial of %s", Destructive: true,
+	},
+	{
+		Action: "reactivate", ID: "reactivate-account-access", Title: "Restore relay access",
+		Effect: "Changes %s from Suspended to Active. This does not restore any Login Grants, Relay Access Tokens, or Relay Sessions; the owner must authorize an app again.",
+		Button: "Restore %s to Active",
+	},
+	{
+		Action: "review", ID: "return-account-review", Title: "Return to pending review",
+		Effect: "Changes %s from Denied to Pending. This does not grant relay access; the account must be approved again.",
+		Button: "Return %s to Pending review",
+	},
+	{
+		Action: "revoke", ID: "revoke-account-access", Title: "Revoke credentials and sessions",
+		Effect: "Keeps %s's canonical status and quota assignment unchanged, while invalidating all Login Grants, Relay Access Tokens, Relay Sessions, and Portal Sessions. Authorization ends immediately; physical session closure may finish asynchronously.",
+		Button: "Confirm credential revocation for %s", Destructive: true,
+	},
+	{
+		Action: "recovery-review", ID: "review-recovery-hold", Title: "Complete Recovery Review",
+		Effect: "Clears only %s's Recovery Review Hold. Its canonical status and quota assignments stay unchanged; normal status and quota rules continue to control relay access.",
+		Button: "Clear Recovery Review Hold for %s",
+	},
+}
+
+func adminAccessActionsFor(account adminAccountRow) []adminAccessActionView {
+	var actions []adminAccessActionView
+	for _, copy := range adminAccessActionCopyByAction {
+		spec, exists := accountActions[copy.Action]
+		if !exists || !spec.states[account.Status] {
+			continue
+		}
+		if copy.Action == "recovery-review" && !account.RecoveryHeld {
+			continue
+		}
+		email := account.Email
+		actions = append(actions, adminAccessActionView{
+			ID: copy.ID, Action: copy.Action, Title: copy.Title,
+			Effect: fmt.Sprintf(copy.Effect, email), Button: fmt.Sprintf(copy.Button, email),
+			Destructive: copy.Destructive,
+		})
+	}
+	return actions
+}
+
 type adminPageData struct {
-	CSRF                               string
+	CSRF, Email, RelayHost             string
 	PolicyRevision                     uint64
 	Pending, Active, Suspended, Denied int64
 	Accounts                           []adminAccountRow
-	Plans                              []adminPlanRow
-	NextAccount, NextPlan              string
-	AccountCursor, PlanCursor          string
+	FilteredCount                      int64
+	StatusFilter, EmailFilter          string
+	AssignablePlans                    []adminPlanRow
+	AccessActions                      []adminAccessActionView
+	NextAccount, PlanCursor            string
 	Limit                              int
 	Selected                           string
+	DefaultPlanID                      string
+	ListHref                           template.URL
+	MutationHref                       template.URL
+	MobileDetail                       bool
 	SelectedAccount                    *adminAccountRow
 	OperationID, OperationProof        string
+}
+
+type adminPlanLibraryData struct {
+	Email, RelayHost, CSRF, After, Next, CreatedID, OperationID, OperationProof string
+	PolicyRevision                                                              uint64
+	Limit                                                                       int
+	Plans                                                                       []adminPlanRow
+	Created                                                                     *adminPlanRow
 }
 
 func planRetry(w http.ResponseWriter, r *http.Request, actor adminIdentity, name string, bytes, sessions int64) {
@@ -275,6 +359,70 @@ func pageLimit(raw string) (int, bool) {
 	}
 	n, err := strconv.Atoi(raw)
 	return n, err == nil && n >= 1 && n <= 100
+}
+
+type adminListScope struct {
+	accountAfter, planAfter, status, email string
+	limit                                  int
+	query                                  url.Values
+}
+
+// adminListScopeFromQuery is the single boundary for administrator list
+// context. The list route asks for strict validation; return links ask for a
+// safe subset so malformed caller-supplied context is simply discarded.
+func adminListScopeFromQuery(r *http.Request, strict bool) (adminListScope, bool) {
+	values := r.URL.Query()
+	scope := adminListScope{
+		accountAfter: values.Get("accounts_after"),
+		planAfter:    values.Get("plans_after"),
+		status:       values.Get("status"),
+		email:        strings.TrimSpace(values.Get("email")),
+	}
+	var valid bool
+	scope.limit, valid = pageLimit(values.Get("limit"))
+	if strict && !valid {
+		return adminListScope{}, false
+	}
+	statusValid := scope.status == "" || scope.status == "Pending" || scope.status == "Active" || scope.status == "Suspended" || scope.status == "Denied"
+	emailValid := len(scope.email) <= 254
+	accountValid := scope.accountAfter == "" || idPattern.MatchString(scope.accountAfter)
+	planValid := scope.planAfter == "" || idPattern.MatchString(scope.planAfter)
+	if strict && (!statusValid || !emailValid || !accountValid || !planValid) {
+		return adminListScope{}, false
+	}
+	scope.query = url.Values{}
+	if statusValid && scope.status != "" {
+		scope.query.Set("status", scope.status)
+	} else {
+		scope.status = ""
+	}
+	if emailValid && scope.email != "" {
+		scope.query.Set("email", scope.email)
+	} else if !emailValid {
+		scope.email = ""
+	}
+	if accountValid && scope.accountAfter != "" {
+		scope.query.Set("accounts_after", scope.accountAfter)
+	} else if !accountValid {
+		scope.accountAfter = ""
+	}
+	if planValid && scope.planAfter != "" {
+		scope.query.Set("plans_after", scope.planAfter)
+	} else if !planValid {
+		scope.planAfter = ""
+	}
+	if valid && values.Get("limit") != "" {
+		scope.query.Set("limit", strconv.Itoa(scope.limit))
+	}
+	return scope, true
+}
+
+func relayHost(origin string) string {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
 
 func (s *Server) planOperationProof(r *http.Request, actor adminIdentity, id string) string {
@@ -310,17 +458,14 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	limit, valid := pageLimit(r.URL.Query().Get("limit"))
+	scope, valid := adminListScopeFromQuery(r, true)
 	if !valid {
 		fail(w, 400)
 		return
 	}
-	accountAfter, planAfter := r.URL.Query().Get("accounts_after"), r.URL.Query().Get("plans_after")
-	if accountAfter != "" && !idPattern.MatchString(accountAfter) || planAfter != "" && !idPattern.MatchString(planAfter) {
-		fail(w, 400)
-		return
-	}
-	data := adminPageData{CSRF: actor.csrf, PolicyRevision: actor.revision, Selected: r.URL.Query().Get("selected"), AccountCursor: accountAfter, PlanCursor: planAfter, Limit: limit}
+	limit, accountAfter, planAfter := scope.limit, scope.accountAfter, scope.planAfter
+	statusFilter, emailFilter := scope.status, scope.email
+	data := adminPageData{CSRF: actor.csrf, Email: actor.email, RelayHost: relayHost(s.Origin), PolicyRevision: actor.revision, Selected: r.URL.Query().Get("selected"), PlanCursor: planAfter, Limit: limit, StatusFilter: statusFilter, EmailFilter: emailFilter, MobileDetail: r.URL.Query().Get("view") == "detail"}
 	operationID, err := uuid()
 	if err != nil {
 		fail(w, 503)
@@ -328,22 +473,50 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 	}
 	data.OperationID = operationID
 	data.OperationProof = s.planOperationProof(r, actor, data.OperationID)
+	contextQuery := scope.query
+	if limit == 50 {
+		contextQuery.Del("limit")
+	}
+	data.ListHref = template.URL("/admin")
+	if query := contextQuery.Encode(); query != "" {
+		data.ListHref = template.URL("/admin?" + query)
+	}
 	if data.Selected != "" && !idPattern.MatchString(data.Selected) {
 		fail(w, 400)
 		return
 	}
-	views, err := s.readViews.AdminHome(r.Context(), accountAfter, planAfter, limit)
+	if data.Selected != "" {
+		mutationQuery := url.Values{}
+		for key, values := range contextQuery {
+			for _, value := range values {
+				mutationQuery.Add(key, value)
+			}
+		}
+		mutationQuery.Set("selected", data.Selected)
+		mutationQuery.Set("view", "detail")
+		data.MutationHref = template.URL("/admin/accounts/" + url.PathEscape(data.Selected) + "?" + mutationQuery.Encode())
+	}
+	// `plans_after` is retained only as an opaque legacy context query so old
+	// /admin URLs remain harmless. Assignment choices always come from the
+	// first available plan page; plan browsing now has its own view.
+	views, err := s.readViews.AdminHome(r.Context(), accountAfter, "", statusFilter, emailFilter, limit)
 	if err != nil {
 		fail(w, 503)
 		return
 	}
 	data.Pending, data.Active, data.Suspended, data.Denied = views.Counts.Pending, views.Counts.Active, views.Counts.Suspended, views.Counts.Denied
+	data.FilteredCount = views.FilteredCount
 	for _, x := range views.Accounts {
 		if len(data.Accounts) == limit {
 			data.NextAccount = data.Accounts[len(data.Accounts)-1].ID
 			break
 		}
-		data.Accounts = append(data.Accounts, adminAccountRow{ID: x.ID, Email: x.Email, Status: x.Status, PlanID: x.PlanID, WeeklyOverride: x.WeeklyOverride, SessionOverride: x.SessionOverride, Revision: x.Revision, RecoveryHeld: x.RecoveryHeld})
+		account := adminAccountRow{ID: x.ID, Email: x.Email, Status: x.Status, PlanID: x.PlanID, PlanName: x.PlanName, WeeklyOverride: x.WeeklyOverride, SessionOverride: x.SessionOverride, Revision: x.Revision, RecoveryHeld: x.RecoveryHeld, PlanArchived: x.PlanArchived, EffectiveBytes: x.EffectiveBytes, EffectiveSessions: x.EffectiveSessions}
+		selection := contextQuery
+		selection.Set("selected", x.ID)
+		selection.Set("view", "detail")
+		account.ReviewHref = template.URL("/admin?" + selection.Encode())
+		data.Accounts = append(data.Accounts, account)
 	}
 	if data.Selected != "" {
 		selected, readErr := s.adminAccountUsage(r.Context(), data.Selected)
@@ -357,22 +530,110 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data.SelectedAccount = &selected
+		data.AccessActions = adminAccessActionsFor(selected)
 	}
 	for _, x := range views.Plans {
-		if len(data.Plans) == limit {
-			data.NextPlan = data.Plans[len(data.Plans)-1].ID
-			break
+		plan := adminPlanRow{ID: x.ID, Name: x.Name, Bytes: x.Bytes, Sessions: x.Sessions, Revision: x.Revision, Archived: x.Archived}
+		if !plan.Archived {
+			data.AssignablePlans = append(data.AssignablePlans, plan)
 		}
-		data.Plans = append(data.Plans, adminPlanRow{ID: x.ID, Name: x.Name, Bytes: x.Bytes, Sessions: x.Sessions, Revision: x.Revision, Archived: x.Archived})
+	}
+	if len(data.AssignablePlans) > 0 {
+		data.DefaultPlanID = data.AssignablePlans[0].ID
+		if data.SelectedAccount != nil {
+			for _, plan := range data.AssignablePlans {
+				if plan.ID == data.SelectedAccount.PlanID {
+					data.DefaultPlanID = plan.ID
+					break
+				}
+			}
+		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Values are bounded in the schema, and both lists are capped at 100 rows.
 	portal.Render(w, http.StatusOK, "admin", data)
 }
 
+func (s *Server) adminPlanLibrary(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.administrator(w, r, false)
+	if !ok {
+		return
+	}
+	after := r.URL.Query().Get("after")
+	createdID := r.URL.Query().Get("created")
+	limit, valid := pageLimit(r.URL.Query().Get("limit"))
+	if !valid || after != "" && !idPattern.MatchString(after) || createdID != "" && !idPattern.MatchString(createdID) {
+		portal.PlanRequestError(w, http.StatusBadRequest)
+		return
+	}
+	operationID, err := uuid()
+	if err != nil {
+		fail(w, http.StatusServiceUnavailable)
+		return
+	}
+	queryLimit := limit + 1
+	if createdID != "" {
+		queryLimit++
+	}
+	plans, err := s.readViews.AdminPlans(r.Context(), after, queryLimit)
+	if err != nil {
+		portal.Unavailable(w, "/admin/plans", "Check quota plans")
+		return
+	}
+	data := adminPlanLibraryData{Email: actor.email, RelayHost: relayHost(s.Origin), CSRF: actor.csrf, After: after, CreatedID: createdID, Limit: limit, OperationID: operationID, OperationProof: s.planOperationProof(r, actor, operationID), PolicyRevision: actor.revision}
+	if createdID != "" {
+		created, readErr := s.readViews.AdminPlan(r.Context(), createdID)
+		if errors.Is(readErr, persistence.ErrNotFound) {
+			portal.PlanRequestError(w, http.StatusNotFound)
+			return
+		}
+		if readErr != nil {
+			portal.Unavailable(w, "/admin/plans", "Check quota plans")
+			return
+		}
+		data.Created = &adminPlanRow{ID: created.ID, Name: created.Name, Bytes: created.Bytes, Sessions: created.Sessions, Revision: created.Revision, Archived: created.Archived}
+	}
+	for _, plan := range plans {
+		if plan.ID == createdID {
+			continue
+		}
+		if len(data.Plans) == limit {
+			data.Next = data.Plans[len(data.Plans)-1].ID
+			break
+		}
+		data.Plans = append(data.Plans, adminPlanRow{ID: plan.ID, Name: plan.Name, Bytes: plan.Bytes, Sessions: plan.Sessions, Revision: plan.Revision, Archived: plan.Archived})
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	portal.Render(w, http.StatusOK, "plan-library", data)
+}
+
+func planLibraryHref(after, created string) string {
+	query := url.Values{}
+	if after != "" {
+		query.Set("after", after)
+	}
+	if created != "" {
+		query.Set("created", created)
+	}
+	if len(query) == 0 {
+		return "/admin/plans"
+	}
+	return "/admin/plans?" + query.Encode()
+}
+
 func revision(raw string) (int64, bool) {
 	n, e := strconv.ParseInt(raw, 10, 64)
 	return n, e == nil && n > 0
+}
+
+// adminReturnHref preserves only the bounded list scope needed to return to
+// the reviewed account. Caller-supplied return destinations are never used.
+func adminReturnHref(r *http.Request, target string) string {
+	scope, _ := adminListScopeFromQuery(r, false)
+	query := scope.query
+	query.Set("selected", target)
+	query.Set("view", "detail")
+	return "/admin?" + query.Encode()
 }
 
 func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
@@ -489,7 +750,7 @@ func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
 			markDiagnostic(r, "failed", "invalidation_incomplete")
 			http.Error(w, "Account change committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
 		} else {
-			http.Redirect(w, r, "/admin?selected="+url.QueryEscape(target), http.StatusSeeOther)
+			http.Redirect(w, r, adminReturnHref(r, target), http.StatusSeeOther)
 		}
 	}
 }
@@ -532,7 +793,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 	}
 	if state.Deleting || state.Revision != expected || !spec.states[state.Status] {
 		markDiagnostic(r, "refused", "revision_conflict")
-		fail(w, 409)
+		portal.Conflict(w, adminReturnHref(r, target), "Reload this account")
 		return
 	}
 	weekly, sessions := state.WeeklyOverride, state.SessionOverride
@@ -571,7 +832,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 	result, err := tx.ApplyAdminAccountMutation(op.Context(), persistence.AdminAccountMutation{AccountID: target, PlanID: plan, Action: action, NextStatus: spec.nextStatus, Event: spec.event, Reason: r.PostForm.Get("reason"), ActorEmail: actor.email, ExpectedRevision: expected, Security: spec.security, WeeklyOverride: weekly, SessionOverride: sessions, AuditID: auditID})
 	if errors.Is(err, persistence.ErrConflict) {
 		markDiagnostic(r, "refused", "revision_conflict")
-		fail(w, 409)
+		portal.Conflict(w, adminReturnHref(r, target), "Reload this account")
 		return
 	}
 	if err != nil {
@@ -595,6 +856,7 @@ func (s *Server) adminAccountUpdate(w http.ResponseWriter, r *http.Request, acto
 }
 
 func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
+	unavailable := func() { portal.Unavailable(w, "/admin/plans", "Check quota plans") }
 	actor, ok := s.administrator(w, r, true)
 	if !ok {
 		return
@@ -602,57 +864,61 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PostForm.Get("name"))
 	bytes, e1 := parseQuotaBytes(r.PostForm.Get("weekly_bytes"), r.PostForm.Get("weekly_bytes_unit"))
 	sessions, e2 := strconv.ParseInt(r.PostForm.Get("sessions"), 10, 32)
-	if name == "" || len(name) > 120 || e1 != nil || e2 != nil || bytes < 0 || sessions < 0 {
+	if name == "" || len(name) > 120 || e1 != nil || e2 != nil || bytes < 0 || sessions < 0 || !reasonOK(r.PostForm.Get("reason")) {
 		markDiagnostic(r, "refused", "invalid_request")
-		fail(w, 400)
+		portal.PlanRequestError(w, http.StatusBadRequest)
 		return
 	}
 	id := r.PostForm.Get("operation_id")
 	proof := r.PostForm.Get("operation_proof")
 	if !idPattern.MatchString(id) || subtle.ConstantTimeCompare([]byte(proof), []byte(s.planOperationProof(r, actor, id))) != 1 {
 		markDiagnostic(r, "refused", "invalid_request")
-		fail(w, 403)
+		portal.PlanRequestError(w, http.StatusForbidden)
 		return
 	}
 	ctx := r.Context()
 	op, e := s.persistence.Start(ctx)
 	if e != nil {
-		fail(w, 503)
+		unavailable()
 		return
 	}
 	defer op.Close()
 	tx, e := beginAdminAccessTransaction(op)
 	if e != nil {
-		fail(w, 503)
+		unavailable()
 		return
 	}
 	defer tx.Rollback(op.Context())
 	if status := s.lockActor(w, tx, r, &actor); status != 0 {
-		fail(w, status)
+		if status == http.StatusServiceUnavailable {
+			unavailable()
+		} else {
+			fail(w, status)
+		}
 		return
 	}
 	digest := planRequestDigest(actor.id, name, r.PostForm.Get("reason"), bytes, sessions)
 	auditID, e := uuid()
 	if e != nil {
-		fail(w, 503)
+		unavailable()
 		return
 	}
 	created, e := tx.CreateQuotaPlan(op.Context(), persistence.PlanCreate{ID: id, Name: name, WeeklyBytes: bytes, Sessions: int(sessions), Digest: digest[:], AuditID: auditID, ActorEmail: actor.email, Reason: r.PostForm.Get("reason")})
 	if e != nil {
-		fail(w, 503)
+		unavailable()
 		return
 	}
 	if !created.Created {
 		if !created.Matching {
 			markDiagnostic(r, "refused", "revision_conflict")
-			fail(w, 409)
+			portal.Conflict(w, "/admin/plans", "Reload quota plans")
 			return
 		}
 		if !created.Audited {
-			fail(w, 503)
+			unavailable()
 			return
 		}
-		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+		http.Redirect(w, r, planLibraryHref("", id), http.StatusSeeOther)
 		return
 	}
 	if s.commitPlanAccess != nil {
@@ -673,52 +939,58 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	http.Redirect(w, r, planLibraryHref("", id), http.StatusSeeOther)
 }
 
 func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
+	unavailable := func() { portal.Unavailable(w, "/admin/plans", "Check quota plans") }
 	markAction(r, "admin.plan_archive")
 	actor, ok := s.administrator(w, r, true)
 	if !ok {
 		return
 	}
 	id := r.PathValue("id")
+	after, created := r.PostForm.Get("after"), r.PostForm.Get("created")
 	expected, valid := revision(r.PostForm.Get("revision"))
-	if !idPattern.MatchString(id) || !valid {
+	if !idPattern.MatchString(id) || !valid || after != "" && !idPattern.MatchString(after) || created != "" && !idPattern.MatchString(created) || r.PostForm.Get("confirm") != "yes" || !reasonOK(r.PostForm.Get("reason")) {
 		markDiagnostic(r, "refused", "invalid_request")
-		fail(w, 400)
+		portal.PlanRequestError(w, http.StatusBadRequest)
 		return
 	}
 	ctx := r.Context()
 	op, e := s.persistence.Start(ctx)
 	if e != nil {
-		fail(w, 503)
+		unavailable()
 		return
 	}
 	defer op.Close()
 	tx, e := beginAdminAccessTransaction(op)
 	if e != nil {
-		fail(w, 503)
+		unavailable()
 		return
 	}
 	defer tx.Rollback(op.Context())
 	if status := s.lockActor(w, tx, r, &actor); status != 0 {
-		fail(w, status)
+		if status == http.StatusServiceUnavailable {
+			unavailable()
+		} else {
+			fail(w, status)
+		}
 		return
 	}
 	auditID, e := uuid()
 	if e != nil {
-		fail(w, 503)
+		unavailable()
 		return
 	}
 	e = tx.ArchiveQuotaPlan(op.Context(), persistence.PlanArchive{ID: id, ExpectedRevision: expected, AuditID: auditID, ActorEmail: actor.email, Reason: r.PostForm.Get("reason")})
 	if errors.Is(e, persistence.ErrConflict) {
 		markDiagnostic(r, "refused", "revision_conflict")
-		fail(w, 409)
+		portal.Conflict(w, planLibraryHref(after, created), "Reload quota plans")
 		return
 	}
 	if errors.Is(e, persistence.ErrNotFound) {
-		fail(w, 404)
+		portal.PlanRequestError(w, http.StatusNotFound)
 		return
 	}
 	if e != nil {
@@ -727,8 +999,8 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 	}
 	if tx.Commit(op.Context()) != nil {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
-		fail(w, 503)
+		unavailable()
 		return
 	}
-	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	http.Redirect(w, r, planLibraryHref(after, created), http.StatusSeeOther)
 }

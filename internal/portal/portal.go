@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -15,9 +16,10 @@ import (
 var files embed.FS
 
 var pages = template.Must(template.New("portal").Funcs(template.FuncMap{
-	"bytes":     FormatBytes,
-	"byteInput": byteInput,
-	"histogram": quotaHistogram,
+	"bytes":        FormatBytes,
+	"byteInput":    byteInput,
+	"histogram":    quotaHistogram,
+	"emailPattern": func(email string) string { return regexp.QuoteMeta(email) },
 	"clientName": func(client string) string {
 		switch client {
 		case "electron":
@@ -104,23 +106,71 @@ func byteInput(raw string) quotaInput {
 }
 
 func Error(w http.ResponseWriter, status int) {
-	message := "Please return to your account and try again."
+	message := "This request could not be completed. Check your relay account for its current state."
+	title, action, href := "Request could not be completed", "Check your relay account", "/"
 	switch status {
 	case http.StatusUnauthorized:
-		message = "Your sign-in may have expired. Sign in with Google again, then retry the action."
+		title, message, action, href = "Sign-in expired", "Your portal session has ended. Sign in again, then return to the task you were doing.", "Sign in with Google", "/auth/login"
 	case http.StatusForbidden:
-		message = "This action is unavailable for your current sign-in. Return to your account to check your access."
+		title, message = "This action is not available", "Your current sign-in cannot perform this action. Check your account or contact a relay administrator if you think this is a mistake."
 	case http.StatusConflict:
-		message = "The saved account or plan has changed. Reload it before trying again."
+		title, message = "This information has changed", "Reload the affected account or plan to see its latest state before choosing what to do next."
 	case http.StatusTooManyRequests:
-		message = "Please wait a moment before trying again."
+		title, message, action = "Please wait before continuing", "Requests are temporarily limited. Return to your account and check its current state before trying again.", "Check your relay account"
 	case http.StatusServiceUnavailable:
-		message = "The relay portal is temporarily unavailable. Please try again shortly."
+		title, message = "The relay portal is temporarily unavailable", "Your request may not have been saved. Check the relevant account or operation before deciding whether to submit it again."
 	case http.StatusNotFound:
-		message = "This page could not be found. Return to your relay account."
+		title, message = "This page could not be found", "The page may have moved or may no longer be available. Return to your relay account."
 	}
 	Render(w, status, "error", struct {
-		Status  int
-		Message string
-	}{status, message})
+		Status                                   int
+		Title, Message, Action, Href, RetryAfter string
+	}{status, title, message, action, href, w.Header().Get("Retry-After")})
+}
+
+// RecentAuthenticationRequired explains the protected deletion gate without
+// submitting the operation again after the owner completes Google sign-in.
+func RecentAuthenticationRequired(w http.ResponseWriter) {
+	Render(w, http.StatusForbidden, "error", struct {
+		Status                                   int
+		Title, Message, Action, Href, RetryAfter string
+	}{http.StatusForbidden, "Sign in again to continue", "Account deletion requires a recent Google sign-in. Sign in, then return to Access & security and submit deletion again.", "Sign in with Google", "/auth/login", ""})
+}
+
+// Conflict renders a conflict with a server-constructed safe reload destination.
+func Conflict(w http.ResponseWriter, href, label string) {
+	if !strings.HasPrefix(href, "/admin") || strings.HasPrefix(href, "//") {
+		href, label = "/admin", "Reload relay administration"
+	}
+	Render(w, http.StatusConflict, "error", struct {
+		Status                                   int
+		Title, Message, Action, Href, RetryAfter string
+	}{http.StatusConflict, "This information has changed", "Reload the affected account or plan to see its latest state before choosing what to do next.", label, href, w.Header().Get("Retry-After")})
+}
+
+// Unavailable keeps an uncertain action on a safe, task-specific read path.
+func Unavailable(w http.ResponseWriter, href, label string) {
+	if !strings.HasPrefix(href, "/admin") || strings.HasPrefix(href, "//") {
+		href, label = "/", "Check your relay account"
+	}
+	Render(w, http.StatusServiceUnavailable, "error", struct {
+		Status                                   int
+		Title, Message, Action, Href, RetryAfter string
+	}{http.StatusServiceUnavailable, "The relay portal is temporarily unavailable", "Your request may not have been saved. Reload the plan library to check its current state before deciding whether to submit another action.", label, href, w.Header().Get("Retry-After")})
+}
+
+// PlanRequestError preserves the request status while returning administrators
+// to the correct read-only place to correct a plan action.
+func PlanRequestError(w http.ResponseWriter, status int) {
+	title := "Check the quota plan request"
+	message := "The plan request could not be accepted. Return to the quota plan library to correct its fields or review the current plan state."
+	if status == http.StatusForbidden {
+		title, message = "This plan action is not available", "Your current administrator sign-in cannot perform this action. Return to the quota plan library or contact a relay administrator."
+	} else if status == http.StatusNotFound {
+		title, message = "This quota plan is no longer available", "Reload the quota plan library to see the current plans before choosing another action."
+	}
+	Render(w, status, "error", struct {
+		Status                                   int
+		Title, Message, Action, Href, RetryAfter string
+	}{status, title, message, "Return to quota plans", "/admin/plans", w.Header().Get("Retry-After")})
 }

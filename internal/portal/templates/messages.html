@@ -1,39 +1,39 @@
 {{define "consent"}}{{template "head" "Authorize Clipp Relay"}}
-<main class="page narrow">
-<section class="card welcome">
-<p class="eyebrow">CONNECT YOUR APP</p>
-<h1>Authorize Clipp Relay</h1>
-<p class="lede">Allow <strong>{{clientName .Client}}
-</strong> to use this relay account?</p>
-<p class="muted">The app will be able to connect through this relay within your account’s allowance. You can revoke access from your relay account at any time.</p>
-<form method="post" action="/oauth/authorize">
+<main class="page narrow consent-page">
+<section class="card welcome consent-sheet" aria-labelledby="consent-title">
+<p class="eyebrow">App authorization</p>
+<h1 id="consent-title">Authorize {{clientName .Client}}</h1>
+<dl class="consent-facts">
+<div><dt>Signed in as</dt><dd>{{.Email}}</dd></div>
+<div><dt>Relay</dt><dd>{{.RelayHost}}</dd></div>
+</dl>
+<p class="lede">Allow <strong>{{clientName .Client}}</strong> to use your Relay Account?</p>
+<p class="muted">This app can create Relay Sessions within this account’s saved allowance. It does not bind a Device Identity or add a Device Network member. You can revoke this app’s access from your account.</p>
+<form method="post" action="/oauth/authorize" class="consent-actions">
 <input type="hidden" name="flow" value="{{.Flow}}">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
-<button type="submit">Authorize Clipp →</button>
+<button type="submit" name="decision" value="authorize">Authorize {{clientName .Client}} →</button>
+<button class="secondary" type="submit" name="decision" value="cancel">Cancel</button>
 </form>
-<p class="muted fine-print">To cancel, close this page and return to Clipp.</p>
 </section>
 </main>{{template "foot"}}{{end}}
 
 {{define "setup"}}{{template "head" "Clipp Relay — Service setup"}}
 <main class="page narrow">
-<section class="card welcome">
-<p class="eyebrow">CLIPP RELAY</p>
-<span class="badge status-Pending">Setup in progress</span>
-<h1>Getting ready<br>to connect.</h1>
-<p class="lede">Service setup is in progress.</p>
-<p class="muted">The relay portal will be available after the operator completes service configuration. Please check back shortly.</p>
+<section class="message-sheet" aria-labelledby="message-title">
+<p class="eyebrow">CLIPP RELAY · SERVICE SETUP</p>
+<h1 id="message-title">Service setup is in progress</h1>
+<p class="message-copy">The relay portal will be available after the operator completes service configuration. Please check back shortly.</p>
 </section>
 </main>{{template "foot"}}{{end}}
 
 {{define "uncertain"}}{{template "head" "Clipp Relay — Result uncertain"}}
 <main class="page narrow">
-<section class="card welcome">
+<section class="message-sheet" aria-labelledby="message-title">
 <p class="eyebrow">PLEASE CHECK YOUR ACCOUNT</p>
-<h1>Result could not be confirmed</h1>
-<p class="lede">Access has been closed while the saved result is checked.</p>
-<p class="muted">Reload the account before taking another action.</p>
-<a class="button" href="/">Return to your account →</a>
+<h1 id="message-title">Result could not be confirmed</h1>
+<p class="message-copy">Access has been closed while the saved result is checked. Reload the account before taking another action.</p>
+<p class="message-action"><a class="button" href="/">Check your relay account →</a></p>
 </section>
 </main>{{template "foot"}}{{end}}
 
@@ -56,21 +56,18 @@
 <input type="hidden" name="sessions" value="{{.Sessions}}">
 <button>Retry this plan →</button>
 </form>
+<p class="message-action"><a class="button secondary" href="/admin/plans">Check the quota plan library</a></p>
 </section>
 </main>{{template "foot"}}{{end}}
 
 {{define "error"}}{{template "head" "Clipp Relay — Request unavailable"}}
 <main class="page narrow">
-<section class="card welcome">
-<p class="eyebrow">REQUEST {{.Status}}
-</p>
-<h1>Request could not be completed</h1>
-<p class="lede">{{.Message}}
-</p>
-<div class="heading-actions">
-<a class="button" href="/">Return to your account</a>
-<a class="button secondary" href="/auth/login">Sign in with Google</a>
-</div>
+<section class="message-sheet" aria-labelledby="message-title">
+<p class="eyebrow">CLIPP RELAY · REQUEST {{.Status}}</p>
+<h1 id="message-title">{{.Title}}</h1>
+<p class="message-copy">{{.Message}}</p>
+{{if .RetryAfter}}<p class="retry-hint">Retry-After: {{.RetryAfter}}.</p>{{end}}
+<p class="message-action"><a class="button" href="{{.Href}}">{{.Action}} →</a></p>
 </section>
 </main>{{template "foot"}}{{end}}
 
@@ -80,12 +77,12 @@
 <p class="eyebrow">ACCOUNT DELETION</p>{{if .Pending}}
 <span class="badge status-Pending">In progress</span>
 <h1>Deletion pending</h1>
-<p class="lede">Deletion pending; retrying independently.</p>
-<p class="muted">Your access has been closed. This operation continues even if you close the page.</p>
+<p class="lede">Your deletion request has been recorded. It is not complete yet.</p>
+<p class="muted">Your access has been closed. The relay continues this operation independently, even if you close this page. Checking status only reads the operation and does not submit or retry deletion.</p>
 <a class="button secondary" href="{{.StatusURL}}">Check deletion status →</a>{{else}}
 <h1>Deletion complete.</h1>
 <p class="lede">Your relay account has been deleted.</p>
-<p class="muted">Signing in again creates a new account that requires administrator approval.</p>
+<p class="muted">Signing in again creates a new Pending Relay Account that requires administrator approval. Retained Quota Usage for the current week may be imported and reduce its available allowance; this does not restore your deleted account or promise a fresh allowance.</p>
 <a class="button secondary" href="/">Return to the portal →</a>{{end}}
 </section>
 </main>{{template "foot"}}{{end}}

@@ -386,7 +386,7 @@ func TestAdministratorPlanDiagnosticsDistinguishProofFromUncertainty(t *testing.
 	var output bytes.Buffer
 	logger := diagnostic.New(&output)
 	s.SetDiagnostics(logger)
-	page := internalRequest(s, http.MethodGet, "/admin", cookie, nil, "")
+	page := internalRequest(s, http.MethodGet, "/admin/plans", cookie, nil, "")
 	if page.Code != http.StatusOK {
 		t.Fatalf("admin page status %d", page.Code)
 	}
@@ -432,7 +432,7 @@ func TestAdministratorPlanDiagnosticsDistinguishProofFromUncertainty(t *testing.
 	if out := internalRequest(s, http.MethodPost, "/admin/plans", cookie, form, origin); out.Code != http.StatusConflict {
 		t.Fatalf("conflicting replay status %d", out.Code)
 	}
-	archive := url.Values{"csrf": {field("csrf")}, "reason": {"routine_administration"}, "revision": {"1"}}
+	archive := url.Values{"csrf": {field("csrf")}, "reason": {"routine_administration"}, "revision": {"1"}, "confirm": {"yes"}}
 	archivePath := "/admin/plans/" + form.Get("operation_id") + "/archive"
 	if out := internalRequest(s, http.MethodPost, archivePath, cookie, archive, origin); out.Code != http.StatusSeeOther {
 		t.Fatalf("archive status %d", out.Code)

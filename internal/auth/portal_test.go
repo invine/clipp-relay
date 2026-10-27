@@ -13,6 +13,21 @@ import (
 	"clipp-relay/internal/config"
 )
 
+func TestDeletionMessagesDistinguishPendingFromCompletedAndExplainReregistration(t *testing.T) {
+	pending := httptest.NewRecorder()
+	renderDeletion(pending, true, "/auth/deletion/66000000-0000-4000-8000-000000000099")
+	if pending.Code != http.StatusAccepted || pending.Header().Get("Retry-After") != "5" || !strings.Contains(pending.Body.String(), "not complete yet") || !strings.Contains(pending.Body.String(), "does not submit or retry deletion") || !strings.Contains(pending.Body.String(), `href="/auth/deletion/66000000-0000-4000-8000-000000000099"`) {
+		t.Fatalf("pending deletion did not remain an honest read-only status: %d %s", pending.Code, pending.Body.String())
+	}
+	completed := httptest.NewRecorder()
+	renderDeletion(completed, false, "")
+	for _, want := range []string{"Deletion complete", "new Pending Relay Account", "Retained Quota Usage", "current week may be imported", "does not restore your deleted account or promise a fresh allowance"} {
+		if completed.Code != http.StatusOK || !strings.Contains(completed.Body.String(), want) {
+			t.Fatalf("completed deletion missing %q: %d %s", want, completed.Code, completed.Body.String())
+		}
+	}
+}
+
 func TestQuotaFormUnitsAreExact(t *testing.T) {
 	for _, tc := range []struct {
 		value, unit string
@@ -93,7 +108,7 @@ func TestLoggedOutPortalProvidesStylesAndCanonicalSetupURL(t *testing.T) {
 	if out.Code != http.StatusOK {
 		t.Fatalf("portal status %d: %s", out.Code, out.Body.String())
 	}
-	for _, want := range []string{`href="/assets/portal.css"`, `https://relay.example.test/v1/relay`, "Add this relay to Clipp", "Peers sidebar", "Open discovery endpoint", "Authenticated discovery", "HTTPS discovery URL", "Sign in with Google"} {
+	for _, want := range []string{`href="/assets/portal.css"`, `class="portal-workspace"`, `aria-label="Portal navigation"`, `aria-label="Open or close portal navigation"`, `href="/" aria-current="page"`, "relay.example.test", `https://relay.example.test/v1/relay`, "Add this relay to Clipp", "Peers sidebar", "Open discovery endpoint", "Authenticated discovery", "HTTPS discovery URL", "Sign in with Google", "New accounts need administrator approval", "each Clipp app needs its own authorization", "does not mean setup failed"} {
 		if !strings.Contains(out.Body.String(), want) {
 			t.Fatalf("missing portal content %q", want)
 		}

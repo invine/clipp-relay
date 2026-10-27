@@ -66,6 +66,7 @@ type PortalAuthorizationSession struct {
 	Generation                        int64
 	PepperVersion                     uint64
 	CSRFHash                          []byte
+	EmailVerified                     bool
 }
 
 // LoginGrant is the initial persistent grant established by an authorization

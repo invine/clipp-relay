@@ -345,7 +345,7 @@ func TestOwnerProfileUsesOnePolicySnapshotAcrossConcurrentChange(t *testing.T) {
 
 func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 	s, cookie, db, origin := adminFixture(t)
-	page := internalRequest(s, "GET", "/admin", cookie, nil, "")
+	page := internalRequest(s, "GET", "/admin/plans", cookie, nil, "")
 	if page.Code != 200 {
 		t.Fatalf("admin page %d", page.Code)
 	}
@@ -401,7 +401,7 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 	if changed := internalRequest(s, "POST", "/admin/plans", cookie, form, origin); changed.Code != 409 {
 		t.Fatalf("changed replay %d", changed.Code)
 	}
-	newPage := internalRequest(s, "GET", "/admin", cookie, nil, "")
+	newPage := internalRequest(s, "GET", "/admin/plans", cookie, nil, "")
 	if newPage.Code != 200 {
 		t.Fatalf("new operation page = %d", newPage.Code)
 	}

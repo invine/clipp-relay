@@ -174,6 +174,8 @@ func TestDeletionRejectsWrongJournalAndStaleGoogleAuth(t *testing.T) {
 	}
 	if got := portalRequest(s, "POST", "/auth/delete", owner, form, c.PortalOrigin); got.Code != http.StatusForbidden {
 		t.Fatalf("stale auth %d", got.Code)
+	} else if !strings.Contains(got.Body.String(), "Sign in again to continue") || !strings.Contains(got.Body.String(), `href="/auth/login"`) || strings.Contains(got.Body.String(), `href="/auth/delete"`) {
+		t.Fatalf("stale authentication must lead to sign-in without replaying deletion: %s", got.Body.String())
 	}
 	var pending int
 	if err := db.Pool.QueryRow(context.Background(), `SELECT pending FROM public.deletion_capacity`).Scan(&pending); err != nil || pending != 0 {

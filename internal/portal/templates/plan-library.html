@@ -1,0 +1,66 @@
+{{define "plan-library"}}
+{{template "head" "Clipp Relay — Quota plans"}}
+<div class="portal-workspace">
+<aside class="workspace-sidebar" aria-label="Portal navigation">
+  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <div class="relay-scope"><strong>{{.RelayHost}}</strong><span>Administrator portal</span></div>
+  <nav class="workspace-nav" aria-label="Portal navigation">
+    <span class="nav-group-label">Administration</span>
+    <a href="/admin">Account reviews</a>
+    <a href="/admin/plans" aria-current="page">Quota plans</a>
+  </nav>
+  <div class="sidebar-footer"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div>
+</aside>
+<div class="workspace-main">
+<header class="workspace-bar">
+  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> Quota plans</span>
+  <span class="bar-account">{{.Email}}</span>
+  <details class="workspace-menu"><summary aria-label="Open or close portal navigation">Menu</summary><nav aria-label="Portal navigation">
+    <a href="/admin">Account reviews</a><a href="/admin/plans" aria-current="page">Quota plans</a>
+    <button class="menu-close" data-close-menu type="button">Close menu</button>
+  </nav></details>
+</header>
+<main class="page plan-library-page">
+  <div class="page-heading"><div><p class="eyebrow">ADMINISTRATION</p><h1>Quota plans</h1><p class="muted">Reusable weekly allowances and concurrent Relay Session limits.</p></div><a class="button secondary" href="/admin">Account reviews <span aria-hidden="true">↗</span></a></div>
+  <section class="notice plan-policy" aria-label="Plan assignment policy"><strong>Plan values stay fixed after assignment.</strong><p>Archiving a plan prevents new assignments. Accounts already using it keep their saved plan and allowance.</p></section>
+  {{with .Created}}
+  <section class="card plan-created" aria-labelledby="created-plan-heading" data-plan-id="{{.ID}}">
+    <p class="eyebrow">PLAN RESULT</p><h2 id="created-plan-heading">{{if .Archived}}Plan archived{{else}}Plan created{{end}}</h2>
+    <div class="quota-plan-created"><div><span class="plan-field-label">Plan</span><strong>{{.Name}}</strong></div><div><span class="plan-field-label">Weekly allowance</span><strong title="{{.Bytes}} bytes">{{bytes .Bytes}}</strong></div><div><span class="plan-field-label">Relay Sessions</span><strong>{{.Sessions}}</strong></div><div><span class="plan-field-label">Availability</span><span class="badge {{if .Archived}}status-Suspended{{else}}status-Active{{end}}">{{if .Archived}}Archived{{else}}Available{{end}}</span></div></div>
+    {{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive" class="archive-plan-form"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><input type="hidden" name="after" value="{{$.After}}"><input type="hidden" name="created" value="{{$.CreatedID}}"><label><input type="checkbox" name="confirm" value="yes" required> I understand this prevents new assignments; current accounts keep their saved plan.</label><button class="secondary">Archive this plan</button></form>{{end}}
+  </section>
+  {{end}}
+  <section class="card" aria-labelledby="plans-heading">
+    <div class="section-heading"><div><p class="eyebrow">LIBRARY</p><h2 id="plans-heading">Plans</h2></div><span class="muted fine-print">Applied allowlist revision {{.PolicyRevision}}</span></div>
+    <div class="quota-plan-list">
+      {{range .Plans}}
+      <article class="quota-plan">
+        <div class="quota-plan-name"><span class="plan-field-label">Plan</span><h3>{{.Name}}</h3><span class="muted fine-print">Revision {{.Revision}}</span></div>
+        <div class="quota-plan-value"><span class="plan-field-label">Weekly allowance</span><strong title="{{.Bytes}} bytes">{{bytes .Bytes}}</strong></div>
+        <div class="quota-plan-value"><span class="plan-field-label">Relay Sessions</span><strong>{{.Sessions}}</strong></div>
+        <div class="quota-plan-state"><span class="plan-field-label">Availability</span><span class="badge {{if .Archived}}status-Suspended{{else}}status-Active{{end}}">{{if .Archived}}Archived{{else}}Available{{end}}</span></div>
+        <div class="quota-plan-action">{{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive" class="archive-plan-form"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><input type="hidden" name="after" value="{{$.After}}"><input type="hidden" name="created" value="{{$.CreatedID}}"><label><input type="checkbox" name="confirm" value="yes" required> I understand this stops new assignments.</label><button class="secondary compact">Archive plan</button></form>{{else}}<span class="muted fine-print">No new assignments</span>{{end}}</div>
+      </article>
+      {{else}}<p class="empty-state">No quota plans are available yet. Create the first plan below.</p>{{end}}
+    </div>
+    {{if .Next}}<a class="button secondary pagination" href="/admin/plans?after={{.Next}}&amp;limit={{.Limit}}">Next plans →</a>{{end}}
+  </section>
+  <section class="card create-plan-library" id="create-plan" aria-labelledby="create-plan-heading">
+    <p class="eyebrow">NEW PLAN</p><h2 id="create-plan-heading">Create a quota plan</h2>
+    <p class="muted">Use exact whole-byte quantities. A plan cannot be edited after creation; create a replacement plan to change its values.</p>
+    <form class="plan-form" method="post" action="/admin/plans">
+      <label>Name<input name="name" maxlength="120" required autocomplete="off"></label>
+      <div><label for="weekly-bytes">Weekly allowance</label><div class="quantity-input"><input id="weekly-bytes" name="weekly_bytes" type="number" min="0" step="any" required><label class="sr-only" for="weekly-unit">Allowance unit</label><select id="weekly-unit" name="weekly_bytes_unit">{{template "unit-options" "GiB"}}</select></div><p class="muted fine-print">Binary units: 1 GiB = 1,024 MiB. Zero and large exact values are supported.</p></div>
+      <label>Relay Sessions<input name="sessions" type="number" min="0" step="1" required></label>
+      <label>Reason<select name="reason">{{template "reasons"}}</select></label>
+      <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="operation_id" value="{{.OperationID}}"><input type="hidden" name="operation_proof" value="{{.OperationProof}}">
+      <button>Create plan</button>
+    </form>
+  </section>
+</main>
+</div>
+</div>
+<script src="/assets/portal.js" defer></script>
+{{template "foot"}}
+{{end}}
