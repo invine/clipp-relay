@@ -391,6 +391,57 @@ func TestOlderAuthenticationCannotRetireOrOverwriteNewerAttempt(t *testing.T) {
 	}
 }
 
+type capturedSessionTimer struct{}
+
+func (capturedSessionTimer) Stop() bool { return true }
+
+func TestStaleRenewalExpiryCallbackKeepsCurrentSession(t *testing.T) {
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var expiryMu sync.Mutex
+	var expiries []func()
+	s.sessionManager.scheduleExpiry = func(_ time.Duration, callback func()) sessionTimer {
+		expiryMu.Lock()
+		defer expiryMu.Unlock()
+		expiries = append(expiries, callback)
+		return capturedSessionTimer{}
+	}
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if err := h.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"a", "a"} {
+		if response := authResponse(t, ctx, h, s.Host.ID(), token); !strings.Contains(response, `"ok":true`) {
+			t.Fatal(response)
+		}
+	}
+	expiryMu.Lock()
+	if len(expiries) != 2 {
+		count := len(expiries)
+		expiryMu.Unlock()
+		t.Fatalf("scheduled expiries=%d, want initial and renewal callbacks", count)
+	}
+	oldExpiry := expiries[0]
+	expiryMu.Unlock()
+	oldExpiry()
+	if got := s.AccountSessions("a"); got != 1 {
+		t.Fatalf("stale expiry removed current session: count=%d", got)
+	}
+	if _, err := client.Reserve(ctx, h, ai); err != nil {
+		t.Fatalf("current session lost permission after stale expiry: %v", err)
+	}
+}
+
 func TestGrantRevocationClosesOnlySessionsUsingThatGrant(t *testing.T) {
 	s, err := New(&grantAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
