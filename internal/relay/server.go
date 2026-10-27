@@ -104,7 +104,6 @@ const (
 )
 
 type sessionManager struct {
-	server                *Server
 	authority             Authority
 	accounting            Accounting
 	diagnostics           DiagnosticSink
@@ -141,15 +140,13 @@ type sessionManager struct {
 }
 
 type Server struct {
-	Host        host.Host
-	stock       *relay.Relay
-	manager     network.ResourceManager
-	tracer      *circuitTracer
-	authority   Authority
-	diagnostics DiagnosticSink
-	*sessionManager
-	accounting        Accounting
-	maxSessions       int
+	Host              host.Host
+	stock             *relay.Relay
+	manager           network.ResourceManager
+	tracer            *circuitTracer
+	authority         Authority
+	diagnostics       DiagnosticSink
+	sessionManager    *sessionManager
 	tcpEnabled        bool
 	wsEnabled         bool
 	webrtcEnabled     bool
@@ -264,23 +261,31 @@ func NewProtected(a *auth.Server, q *quota.Quota, opts Options) (*Server, error)
 		if err := a.ConfigureRelayProtection(q, s); err != nil {
 			return err
 		}
-		s.accounting = q
-		if err := q.StartAccounting(s.accountingClosure); err != nil {
+		if err := q.StartAccounting(s.sessionManager.accountingClosure); err != nil {
 			return err
 		}
 		return nil
 	})
 }
-func (s *Server) accountingClosure(out quota.ClosureOutcome) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.accounting.ClosureCurrent(out) {
+func (m *sessionManager) accountingClosure(out quota.ClosureOutcome) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.accounting == nil || !m.accounting.ClosureCurrent(out) {
 		return
 	}
-	for v := range s.byAccount[out.AccountID] {
-		s.endSessionLocked(v, out.Reason)
-		s.sessionManager.queueCloseLocked(v.conn)
+	for v := range m.byAccount[out.AccountID] {
+		m.endSessionLocked(v, out.Reason)
+		m.queueCloseLocked(v.conn)
 	}
+}
+
+// closeAccount removes every current account session and queues physical
+// cleanup under the same manager-owned lifecycle used by other close causes.
+func (m *sessionManager) closeAccount(account, reason string) {
+	if reason == "" {
+		reason = "policy_changed"
+	}
+	_ = m.invalidateSessions(reason, func(session *session) bool { return session.account == account }, "", "", false)
 }
 
 // New starts an inbound-only, Noise-authenticated relay with a new in-RAM
@@ -313,8 +318,8 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, accounting: accounting, diagnostics: opts.Diagnostics, maxSessions: opts.MaxSessions, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname}
-	s.sessionManager = &sessionManager{server: s, authority: a, accounting: accounting, diagnostics: opts.Diagnostics, maxSessions: opts.MaxSessions, scheduleExpiry: func(d time.Duration, callback func()) sessionTimer { return time.AfterFunc(d, callback) }, physicalClose: func(c network.Conn) { _ = c.Close() }, closePending: map[network.Conn]struct{}{}, closeInFlight: map[network.Conn]struct{}{}, closeWake: make(chan struct{}, 1), closeStop: make(chan struct{}), closeDone: make(chan struct{}), deferredGrantCloses: map[string]map[network.Conn]struct{}{}, deferredAccountCloses: map[string]map[network.Conn]struct{}{}, lifecycle: map[network.Conn]connectionLifecycle{}, connectionInfo: map[network.Conn]connectionDiagnostic{}, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, authAttempts: map[network.Conn]*authAttempt{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, diagnostics: opts.Diagnostics, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname}
+	s.sessionManager = &sessionManager{authority: a, accounting: accounting, diagnostics: opts.Diagnostics, maxSessions: opts.MaxSessions, scheduleExpiry: func(d time.Duration, callback func()) sessionTimer { return time.AfterFunc(d, callback) }, physicalClose: func(c network.Conn) { _ = c.Close() }, closePending: map[network.Conn]struct{}{}, closeInFlight: map[network.Conn]struct{}{}, closeWake: make(chan struct{}, 1), closeStop: make(chan struct{}), closeDone: make(chan struct{}), deferredGrantCloses: map[string]map[network.Conn]struct{}{}, deferredAccountCloses: map[string]map[network.Conn]struct{}{}, lifecycle: map[network.Conn]connectionLifecycle{}, connectionInfo: map[network.Conn]connectionDiagnostic{}, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, authAttempts: map[network.Conn]*authAttempt{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
 	reporter := &endpointReporter{sessions: s.sessionManager}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -367,15 +372,13 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 func (s *Server) Close() error {
 	var result error
 	s.closeOnce.Do(func() {
-		pending := s.sessionManager.prepareClose()
+		s.sessionManager.prepareClose()
 		// Host.Close is the force-close backstop for real transports. The worker
 		// retains ownership of queued and already-detached connections until it
 		// observes completion.
 		_ = s.stock.Close()
 		_ = s.Host.Close()
-		for _, c := range pending {
-			_ = c.Close()
-		}
+		s.sessionManager.forceClosePending()
 		close(s.sessionManager.closeStop)
 		<-s.sessionManager.closeDone
 		result = s.manager.Close()
@@ -383,7 +386,7 @@ func (s *Server) Close() error {
 	return result
 }
 
-func (m *sessionManager) prepareClose() []network.Conn {
+func (m *sessionManager) prepareClose() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	draining := m.closing
@@ -397,13 +400,6 @@ func (m *sessionManager) prepareClose() []network.Conn {
 	for c := range m.preauth {
 		m.queueCloseLocked(c)
 	}
-	pending := make([]network.Conn, 0, len(m.closePending)+len(m.closeInFlight))
-	for c := range m.closePending {
-		pending = append(pending, c)
-	}
-	for c := range m.closeInFlight {
-		pending = append(pending, c)
-	}
 	for _, deferred := range m.deferredGrantCloses {
 		for c := range deferred {
 			m.queueCloseLocked(c)
@@ -416,7 +412,35 @@ func (m *sessionManager) prepareClose() []network.Conn {
 		}
 	}
 	clear(m.deferredAccountCloses)
-	return pending
+}
+
+// forceClosePending runs the final shutdown backstop without exposing owned
+// connection handles to Server. The worker retains ownership of in-flight
+// closes; pending items are drained here before the worker stops.
+func (m *sessionManager) forceClosePending() {
+	for {
+		m.mu.Lock()
+		var conn network.Conn
+		for candidate := range m.closePending {
+			conn = candidate
+			delete(m.closePending, candidate)
+			m.closeInFlight[candidate] = struct{}{}
+			break
+		}
+		closeConn := m.physicalClose
+		m.mu.Unlock()
+		if conn == nil {
+			return
+		}
+		closeConn(conn)
+		m.mu.Lock()
+		delete(m.closeInFlight, conn)
+		if m.lifecycle[conn] == connectionClosing && conn.IsClosed() {
+			m.lifecycle[conn] = connectionClosed
+			delete(m.lifecycle, conn)
+		}
+		m.mu.Unlock()
+	}
 }
 
 func connectionTransport(c network.Conn) string {
@@ -468,11 +492,11 @@ func (m *sessionManager) connected(_ network.Network, c network.Conn) {
 		reason = "resource_limit"
 	}
 	if reason != "" {
+		m.queueCloseLocked(c)
 		m.mu.Unlock()
 		if m.diagnostics != nil {
 			m.diagnostics.Emit(diagnostic.Event{Event: "relay.connection", Outcome: "refused", Reason: reason, Transport: connectionTransport(c)})
 		}
-		_ = c.Close()
 		return
 	}
 	m.lifecycle[c] = connectionUnauthenticated
@@ -529,11 +553,6 @@ func (m *sessionManager) disconnected(_ network.Network, c network.Conn) {
 	m.mu.Unlock()
 }
 
-func (s *Server) removeLocked(v *session) { s.endSessionLocked(v, "connection_closed") }
-func (s *Server) endSessionLocked(v *session, reason string) {
-	s.sessionManager.endSessionLocked(v, reason)
-}
-
 func (m *sessionManager) endSessionLocked(v *session, reason string) {
 	if m.byConn[v.conn] != v {
 		return
@@ -544,10 +563,6 @@ func (m *sessionManager) endSessionLocked(v *session, reason string) {
 		m.diagnostics.Emit(diagnostic.Event{Event: "relay.session", Outcome: "ended", Reason: reason, SessionID: info.id, Transport: info.transport})
 	}
 	m.removeSessionLocked(v, false)
-}
-
-func (s *Server) removeSessionLocked(v *session, preserveRendezvous bool) {
-	s.sessionManager.removeSessionLocked(v, preserveRendezvous)
 }
 
 func (m *sessionManager) removeSessionLocked(v *session, preserveRendezvous bool) {
@@ -635,8 +650,8 @@ func (s *Server) Drain(ctx context.Context) error {
 		pending := s.sessionManager.activeHopHandlers()
 		if pending == 0 && s.tracer.active.Load() == 0 {
 			err := s.Close()
-			if s.accounting != nil && ctx.Err() == nil {
-				if flushErr := s.accounting.FlushAllAccounting(ctx); err == nil {
+			if s.sessionManager.accounting != nil && ctx.Err() == nil {
+				if flushErr := s.sessionManager.accounting.FlushAllAccounting(ctx); err == nil {
 					err = flushErr
 				}
 			}
@@ -670,10 +685,6 @@ func (m *sessionManager) authoritativeConn(id peer.ID) network.Conn {
 	return v.conn
 }
 
-func (s *Server) expire(v *session) {
-	s.sessionManager.expire(v)
-}
-
 func (m *sessionManager) expire(v *session) {
 	m.mu.Lock()
 	owned := m.byConn[v.conn] == v && !time.Now().Before(v.deadline)
@@ -682,15 +693,6 @@ func (m *sessionManager) expire(v *session) {
 		m.queueCloseLocked(v.conn)
 	}
 	m.mu.Unlock()
-}
-
-func (s *Server) authenticate(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string) {
-	deadline, renew, code, _ := s.sessionManager.authenticateObserved(ctx, c, raw)
-	return deadline, renew, code
-}
-
-func (s *Server) authenticateObserved(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, string) {
-	return s.sessionManager.authenticateObserved(ctx, c, raw)
 }
 
 func (m *sessionManager) authenticateObserved(ctx context.Context, c network.Conn, raw string) (time.Time, time.Duration, string, string) {
@@ -842,7 +844,7 @@ func (m *sessionManager) closeWorker() {
 	}
 }
 
-// InvalidateGrant processes a committed grant revocation. Pending authentication
+// RetireGrant processes a committed grant revocation. Pending authentication
 // attempts are conservatively retired because their grant association may not
 // have arrived yet; established sessions are removed only when they use grantID.
 // The manager lock serializes this transition with applying authentication.
@@ -868,27 +870,6 @@ func (s *Server) CompleteGrantInvalidation(grantID string) error {
 	delete(m.deferredGrantCloses, grantID)
 	m.mu.Unlock()
 	return nil
-}
-
-// InvalidateGrant retains the synchronous combined operation for callers that
-// do not hold Auth protection across the mutation.
-func (s *Server) InvalidateGrant(grantID string) error {
-	if err := s.RetireGrant(grantID); err != nil {
-		return err
-	}
-	return s.CompleteGrantInvalidation(grantID)
-}
-
-// InvalidateAccount processes account-wide revocation or restriction without
-// enumerating persisted grants.
-func (s *Server) InvalidateAccount(accountID string) error {
-	if accountID == "" {
-		return errors.New("account ID is required")
-	}
-	if err := s.RetireAccount(accountID, "account_access_changed"); err != nil {
-		return err
-	}
-	return s.CompleteAccountInvalidation(accountID)
 }
 
 // RetireAccount removes account sessions from authorization and defers their
@@ -924,26 +905,25 @@ func (s *Server) CompleteAccountInvalidation(accountID string) error {
 // not yet be known, then removes only matching established sessions. The same
 // lock serializes invalidation with successful authentication application.
 func (m *sessionManager) invalidateSessions(reason string, matches func(*session) bool, deferredGrant, deferredAccount string, cancelPending bool) error {
-	s := m.server
-	s.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(s.authAttempts))
+	m.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(m.authAttempts))
 	if cancelPending {
-		for conn, attempt := range s.authAttempts {
-			delete(s.authAttempts, conn)
+		for conn, attempt := range m.authAttempts {
+			delete(m.authAttempts, conn)
 			if attempt.cancel != nil {
 				cancels = append(cancels, attempt.cancel)
 			}
 			// A pending unauthenticated connection has no known grant association.
 			// Preserve conservative cancellation by making it terminal too, while
 			// leaving an established unrelated session usable during renewal.
-			if s.byConn[conn] == nil {
+			if m.byConn[conn] == nil {
 				m.markClosingLocked(conn)
 			}
 		}
 	}
-	for _, session := range s.byConn {
+	for _, session := range m.byConn {
 		if matches(session) {
-			s.endSessionLocked(session, reason)
+			m.endSessionLocked(session, reason)
 			if deferredGrant != "" {
 				if m.deferredGrantCloses[deferredGrant] == nil {
 					m.deferredGrantCloses[deferredGrant] = map[network.Conn]struct{}{}
@@ -959,7 +939,7 @@ func (m *sessionManager) invalidateSessions(reason string, matches func(*session
 			}
 		}
 	}
-	s.mu.Unlock()
+	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
 	}
@@ -996,10 +976,6 @@ func (m *sessionManager) authenticateSerial(ctx context.Context, c network.Conn,
 
 // Session Manager's current-attempt and accounting-revision checks fence
 // committed account and policy changes before a session can be installed.
-func (s *Server) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn, reason *string, attempt *authAttempt) (time.Time, time.Duration, string) {
-	return s.sessionManager.authenticateAdmitted(ctx, c, credential, oldToClose, reason, attempt)
-}
-
 func (m *sessionManager) authenticateAdmitted(ctx context.Context, c network.Conn, credential auth.RelayCredential, oldToClose *network.Conn, reason *string, attempt *authAttempt) (time.Time, time.Duration, string) {
 	if ctx.Err() != nil {
 		*reason = "deadline"
@@ -1290,10 +1266,9 @@ func (s *Server) handleAuth(st network.Stream) {
 }
 
 func (m *sessionManager) isAuthenticated(c network.Conn) bool {
-	s := m.server
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.byConn[c] != nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.byConn[c] != nil
 }
 
 // ActiveSessions is an aggregate observation; it never exposes Peer IDs.

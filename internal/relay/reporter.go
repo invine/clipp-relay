@@ -58,10 +58,7 @@ func (r *endpointReporter) TrimIdle(time.Time) {}
 // manager-owned close queue. It is used for asynchronous policy and quota
 // cutoffs that do not hold Auth's account protection.
 func (s *Server) CloseAccountWithReason(account, reason string) {
-	if err := s.RetireAccount(account, reason); err != nil {
-		return
-	}
-	_ = s.CompleteAccountInvalidation(account)
+	s.sessionManager.closeAccount(account, reason)
 }
 
 // CloseAccount invalidates all live sessions after an account policy change.

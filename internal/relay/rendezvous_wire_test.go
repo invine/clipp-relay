@@ -843,9 +843,7 @@ func TestRendezvousLateVerificationCannotRegisterAfterAccountInvalidation(t *tes
 	case <-ctx.Done():
 		t.Fatal("registration did not reach the controlled verification barrier")
 	}
-	if err := s.InvalidateAccount("a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateAccountForTest(t, s, "a")
 	select {
 	case <-closeStarted:
 	case <-ctx.Done():

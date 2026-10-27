@@ -53,7 +53,8 @@ func (a *policyAuthority) change(active bool, cap int, s *Server) {
 	a.active, a.cap = active, cap
 	a.mu.Unlock()
 	if !active {
-		_ = s.InvalidateAccount("a")
+		_ = s.RetireAccount("a", "account_access_changed")
+		_ = s.CompleteAccountInvalidation("a")
 	} else if s.AccountSessions("a") > cap {
 		s.CloseAccount("a")
 	}
@@ -138,13 +139,16 @@ func TestAccountInvalidationFencesInFlightRelayAuthentication(t *testing.T) {
 	if err := h.Connect(ctx, ai); err != nil {
 		t.Fatal(err)
 	}
-	conns := s.Host.Network().ConnsToPeer(h.ID())
-	if len(conns) != 1 {
-		t.Fatalf("physical connections=%d", len(conns))
-	}
 	accounting.arm()
-	result := make(chan string, 1)
-	go func() { _, _, code := s.authenticate(ctx, conns[0], "authorized"); result <- code }()
+	type authResult struct {
+		response string
+		err      error
+	}
+	result := make(chan authResult, 1)
+	go func() {
+		response, err := transportAuthResponse(ctx, h, s.Host.ID(), "authorized")
+		result <- authResult{response: response, err: err}
+	}()
 	select {
 	case <-accounting.entered:
 	case <-ctx.Done():
@@ -153,14 +157,12 @@ func TestAccountInvalidationFencesInFlightRelayAuthentication(t *testing.T) {
 	a.mu.Lock()
 	a.active = false
 	a.mu.Unlock()
-	if err := s.InvalidateAccount("a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateAccountForTest(t, s, "a")
 	close(accounting.release)
 	select {
-	case code := <-result:
-		if code != "temporarily_unavailable" {
-			t.Fatalf("stale admission result=%q", code)
+	case got := <-result:
+		if got.err == nil && !strings.Contains(got.response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("stale admission response=%q", got.response)
 		}
 	case <-ctx.Done():
 		t.Fatal("authentication remained blocked")

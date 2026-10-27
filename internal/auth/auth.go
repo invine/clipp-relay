@@ -250,7 +250,6 @@ type RelaySessions interface {
 	CompleteAccountInvalidation(string) error
 	RetireGrant(string) error
 	CompleteGrantInvalidation(string) error
-	InvalidateAccount(string) error
 }
 
 // SetGrantRevokedForTest installs the grant invalidation recipient for isolated

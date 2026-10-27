@@ -468,9 +468,7 @@ func TestGrantRevocationClosesOnlySessionsUsingThatGrant(t *testing.T) {
 		}
 	}
 
-	if err := s.InvalidateGrant("grant-a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateGrantForTest(t, s, "grant-a")
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) && len(clients[0].Network().ConnsToPeer(s.Host.ID())) != 0 {
 		time.Sleep(10 * time.Millisecond)
@@ -483,6 +481,26 @@ func TestGrantRevocationClosesOnlySessionsUsingThatGrant(t *testing.T) {
 	}
 	if got := len(clients[1].Network().ConnsToPeer(s.Host.ID())); got != 1 {
 		t.Fatalf("unrelated grant retained %d connections, want 1", got)
+	}
+}
+
+func invalidateGrantForTest(t *testing.T, s *Server, grantID string) {
+	t.Helper()
+	if err := s.RetireGrant(grantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteGrantInvalidation(grantID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func invalidateAccountForTest(t *testing.T, s *Server, accountID string) {
+	t.Helper()
+	if err := s.RetireAccount(accountID, "account_access_changed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteAccountInvalidation(accountID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -527,9 +545,7 @@ func TestGrantRevocationRetiresValidationThatReturnsAfterNotification(t *testing
 	case <-ctx.Done():
 		t.Fatal("authentication did not enter token validation")
 	}
-	if err := s.InvalidateGrant("grant-a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateGrantForTest(t, s, "grant-a")
 	close(authority.release)
 	select {
 	case response := <-result:
@@ -571,9 +587,7 @@ func TestAccountInvalidationRetiresValidationThatReturnsAfterNotification(t *tes
 	case <-ctx.Done():
 		t.Fatal("authentication did not enter token validation")
 	}
-	if err := s.InvalidateAccount("a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateAccountForTest(t, s, "a")
 	close(authority.release)
 	select {
 	case response := <-result:
@@ -616,9 +630,7 @@ func TestGrantRevocationRetiresAuthenticationDuringInitialQuotaAssessment(t *tes
 	case <-ctx.Done():
 		t.Fatal("authentication did not enter quota assessment")
 	}
-	if err := s.InvalidateGrant("grant-a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateGrantForTest(t, s, "grant-a")
 	close(accounting.release)
 	select {
 	case response := <-result:
