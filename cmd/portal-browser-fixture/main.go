@@ -111,7 +111,7 @@ ON CONFLICT (account_id,week_start) DO UPDATE SET recorded_bytes=EXCLUDED.record
 	portal.SetDiagnostics(diagnostic.New(os.Stdout))
 	// The fixture has no live relay session manager; install the explicit
 	// no-op adapter required to exercise guarded portal mutations through HTTP.
-	portal.SetAccountChangedForTest(func(auth.AccountChange) func() { return nil })
+	portal.SetAccountChangedForTest(func(auth.AccountChange) string { return "" })
 	portal.SetCapacitySampler(portal.SampleActiveGrants)
 	zeroHash := strings.Repeat("0", 64)
 	portal.SetDeletionJournal(&browserDeletionJournal{etag: "initial", head: auth.JournalHead{RepositoryID: "browser-acceptance", CoverageFloor: 0, CoverageHash: zeroHash, Hash: zeroHash, Format: 1}, events: make(map[string][]byte)}, "browser-acceptance", 0, zeroHash)
