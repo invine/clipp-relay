@@ -3,13 +3,12 @@
 <div class="portal-workspace">
 <aside class="workspace-sidebar" aria-label="Portal navigation">
   <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
-  <div class="relay-scope"><strong>{{.RelayHost}}</strong><span>Account portal</span></div>
   <nav class="workspace-nav" aria-label="Portal navigation">
     <a href="/" aria-current="page">Your account</a>
     {{if .SignedIn}}<a href="/account/security">Access &amp; security</a>{{end}}
     {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
   </nav>
-  {{if .SignedIn}}<div class="sidebar-footer"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div>{{end}}
+  {{if .SignedIn}}<div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form></div>{{end}}
 </aside>
 <div class="workspace-main">
 <header class="workspace-bar">
