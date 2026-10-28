@@ -32,11 +32,15 @@ weekly totals. Its capacity table distinguishes configured limits from separatel
 sampled live counts. Active Login Grants are sampled from PostgreSQL; live Relay
 Sessions are sampled from this process. A confirmed grant-local revocation closes
 Relay Sessions authenticated with that Login Grant; Account-wide Revocation and
-account access restrictions invalidate all affected sessions. The session manager
-acknowledges logical invalidation before the mutation reports success, then closes
-the physical connections asynchronously. Already-admitted streams and buffered
-traffic can finish. Notifications are in-process: direct database edits do not
-invalidate sessions immediately, and multiple relay processes are unsupported.
+account access restrictions invalidate all affected sessions. Auth keeps administrator
+changes, Account-wide Revocation, and deletion admission as distinct complete operations
+and renders their classified outcomes after protected work releases its guards. The
+private Relay Session manager owns connection, authentication-attempt, reservation,
+Rendezvous Lease, and bounded physical-close state. It removes logical permission
+synchronously and performs physical closure after Auth releases protection. Already admitted streams and buffered
+traffic can finish. Notifications are in-process: direct
+database edits do not invalidate sessions immediately, and multiple relay processes
+are unsupported.
 `/readyz` is `200 ok` only after every enabled relay listener and a complete
 public address snapshot are available; otherwise it is `503 unavailable`. `/livez` is
 `200 ok` while the process runs. Public relay discovery is withdrawn during

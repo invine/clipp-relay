@@ -9,11 +9,15 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
+type trafficSession interface {
+	ObserveTraffic(peer.ID, int64) bool
+}
+
 // endpointReporter receives the stock swarm's HOP and STOP byte callbacks.
 // It retains only aggregate counts; association with an account is sampled at
 // report time, so an old connection's tail may charge a replacement session.
 type endpointReporter struct {
-	server         *Server
+	sessions       trafficSession
 	sent, received atomic.Int64
 	unattributed   atomic.Int64
 }
@@ -32,23 +36,9 @@ func (r *endpointReporter) report(n int64, proto protocol.ID, p peer.ID) {
 	if n <= 0 || proto != hopProtocol && proto != "/libp2p/circuit/relay/0.2.0/stop" {
 		return
 	}
-	s := r.server
-	s.mu.Lock()
-	active := s.byPeer[p]
-	if s.accounting != nil && active != nil && time.Now().Before(active.deadline) {
-		err := s.accounting.Observe(active.account, n)
-		s.mu.Unlock()
-		if err != nil {
-			s.accounting.AccountingFailed(active.account)
-		}
-		return
-	}
-	s.mu.Unlock()
-	if active == nil || !time.Now().Before(active.deadline) {
+	if !r.sessions.ObserveTraffic(p, n) {
 		r.unattributed.Add(n)
-		return
 	}
-
 }
 func (r *endpointReporter) GetBandwidthForPeer(peer.ID) metrics.Stats         { return metrics.Stats{} }
 func (r *endpointReporter) GetBandwidthForProtocol(protocol.ID) metrics.Stats { return metrics.Stats{} }
@@ -64,26 +54,12 @@ func (r *endpointReporter) GetBandwidthByProtocol() map[protocol.ID]metrics.Stat
 func (r *endpointReporter) Reset()             { r.sent.Store(0); r.received.Store(0); r.unattributed.Store(0) }
 func (r *endpointReporter) TrimIdle(time.Time) {}
 
-// DetachAccount removes every session while the caller still holds its account
-// guard. The returned connection closes perform I/O after that guard is released.
-func (s *Server) DetachAccount(account string) func() {
-	return s.detachAccount(account, "policy_changed")
-}
-
-func (s *Server) detachAccount(account, reason string) func() {
-	s.mu.Lock()
-	connections := make([]*session, 0, len(s.byAccount[account]))
-	for v := range s.byAccount[account] {
-		connections = append(connections, v)
-		s.endSessionLocked(v, reason)
-	}
-	s.mu.Unlock()
-	return func() {
-		for _, v := range connections {
-			_ = v.conn.Close()
-		}
-	}
+// CloseAccountWithReason retires an account's sessions through the shared
+// manager-owned close queue. It is used for asynchronous policy and quota
+// cutoffs that do not hold Auth's account protection.
+func (s *Server) CloseAccountWithReason(account, reason string) {
+	s.sessionManager.closeAccount(account, reason)
 }
 
 // CloseAccount invalidates all live sessions after an account policy change.
-func (s *Server) CloseAccount(account string) { s.DetachAccount(account)() }
+func (s *Server) CloseAccount(account string) { s.CloseAccountWithReason(account, "policy_changed") }

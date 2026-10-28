@@ -18,6 +18,7 @@ import (
 	"clipp-relay/internal/relay"
 	libp2p "github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	ma "github.com/multiformats/go-multiaddr"
@@ -132,6 +133,21 @@ func authenticateClient(t *testing.T, ctx context.Context, h host.Host, id peer.
 	}
 }
 
+func waitForPeerDisconnect(ctx context.Context, h host.Host, id peer.ID) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if h.Network().Connectedness(id) == network.NotConnected {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func freePort(t *testing.T, network string) int {
 	t.Helper()
 	if network == "tcp" {
@@ -231,6 +247,12 @@ func TestFakeServiceRealClientDrainRestartAndRediscovery(t *testing.T) {
 	}
 	if err = first.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	disconnectCtx, stopDisconnectWait := context.WithTimeout(ctx, 2*time.Second)
+	err = waitForPeerDisconnect(disconnectCtx, h, oldInfo.ID)
+	stopDisconnectWait()
+	if err != nil {
+		t.Fatalf("old relay connection remained after drain: %v", err)
 	}
 	// The logical Service slot remains the same, but the process has stopped.
 	second, secondDiscovery, _ := start()

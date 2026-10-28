@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -103,158 +102,16 @@ func (s *Server) qualifiedHead(h JournalHead) bool {
 
 func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
-		markDiagnostic(r, "refused", "origin_rejected")
-		fail(w, 503)
-		return
-	}
-	if s.deletionJournal == nil || s.deletionRepository == "" {
-		markDiagnostic(r, "failed", "journal_unavailable")
-		fail(w, 503)
+		s.renderAccountDeletion(w, r, refusedAccountDeletion(http.StatusServiceUnavailable, "origin_rejected"))
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if r.ParseForm() != nil {
-		markDiagnostic(r, "refused", "csrf_rejected")
-		fail(w, 400)
+		s.renderAccountDeletion(w, r, refusedAccountDeletion(http.StatusBadRequest, "csrf_rejected"))
 		return
 	}
-	id, version, _, _, csrf, e := s.session(r)
-	if e != nil {
-		switch {
-		case errors.Is(e, errRateLimit):
-			markAction(r, "")
-		case errors.Is(e, errInvalidSession):
-			markDiagnostic(r, "refused", "invalid_credentials")
-		default:
-			markDiagnostic(r, "failed", "database_unavailable")
-		}
-		fail(w, 401)
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
-		markDiagnostic(r, "refused", "csrf_rejected")
-		fail(w, 403)
-		return
-	}
-	if _, _, err := s.readHead(r.Context()); err != nil {
-		markDiagnostic(r, "failed", "journal_unavailable")
-		fail(w, 503)
-		return
-	}
-	if s.beforeOwnerSubjectRead != nil {
-		s.beforeOwnerSubjectRead()
-	}
-	readTx, err := s.deletions.BeginDeletion(r.Context())
-	if err != nil {
-		markDiagnostic(r, "failed", "database_unavailable")
-		fail(w, 503)
-		return
-	}
-	owner, err := readTx.DeletionOwner(r.Context(), id)
-	_ = readTx.Rollback(r.Context())
-	if err != nil {
-		if errors.Is(err, persistence.ErrNotFound) || errors.Is(err, persistence.ErrInvalidCredential) {
-			markDiagnostic(r, "refused", "invalid_credentials")
-		} else {
-			markDiagnostic(r, "failed", "database_unavailable")
-		}
-		fail(w, 409)
-		return
-	}
-	subject := owner.Subject
-	operation, e := uuid()
-	if e != nil {
-		fail(w, 503)
-		return
-	}
-	var admitted, uncertain bool
-	var invalidationFailed bool
-	var closeConnections func()
-	if s.beforeAccountActionGuard != nil {
-		s.beforeAccountActionGuard()
-	}
-	guardEntered := false
-	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
-		guardEntered = true
-		if accountGuardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
-			tx, err := s.deletions.BeginDeletion(ctx)
-			if err != nil {
-				fail(w, 503)
-				return
-			}
-			defer tx.Rollback(ctx)
-			if s.beforeOwnerDeletionRecheck != nil {
-				if err = s.beforeOwnerDeletionRecheck(ctx); err != nil {
-					markDiagnostic(r, "failed", "database_unavailable")
-					fail(w, 503)
-					return
-				}
-			}
-			admission, err := tx.AdmitDeletion(ctx, persistence.DeletionAdmissionRequest{AccountID: id, OperationID: operation, ExpectedSubject: subject, SessionDigest: s.sessionDigest(r, version), PepperVersion: version})
-			if errors.Is(err, persistence.ErrInvalidCredential) {
-				markDiagnostic(r, "refused", "invalid_credentials")
-				fail(w, 401)
-				return
-			}
-			if errors.Is(err, persistence.ErrRecentAuthentication) {
-				markDiagnostic(r, "refused", "recent_auth_required")
-				portal.RecentAuthenticationRequired(w)
-				return
-			}
-			if errors.Is(err, persistence.ErrCapacityExceeded) {
-				markDiagnostic(r, "refused", "deletion_capacity")
-				fail(w, 503)
-				return
-			}
-			if err != nil {
-				fail(w, 503)
-				return
-			}
-			if s.commitDeletionAdmission != nil {
-				err = s.commitDeletionAdmission(ctx, tx)
-			} else {
-				err = tx.Commit(ctx)
-			}
-			s.installIdentityFence(subject)
-			if err != nil {
-				s.uncertainAccounts.Store(id, uncertainDeletion{operationID: operation})
-			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: admission.WeeklyBytes, SessionLimit: admission.Sessions, CloseAll: true})
-			invalidationFailed = s.deliverAccountInvalidation(id) != nil
-			admitted, uncertain = true, err != nil
-		}); accountGuardErr != nil {
-			markGuardDiagnostic(r, accountGuardErr)
-			fail(w, 503)
-		}
-		return nil
-	})
-	if guardErr != nil && !guardEntered {
-		markGuardDiagnostic(r, guardErr)
-		fail(w, 503)
-	}
-	if !admitted {
-		return
-	}
-	if s.deletionAccounting != nil {
-		s.deletionAccounting.BeginAccountingDeletion(id)
-	}
-	if closeConnections != nil {
-		closeConnections()
-	}
-	cookie(w, sessionCookie, "", -1)
-	if uncertain {
-		markDiagnostic(r, "uncertain", "commit_unconfirmed")
-		uncertainResponse(w)
-		return
-	}
-	if invalidationFailed {
-		markDiagnostic(r, "failed", "invalidation_incomplete")
-		http.Error(w, "Deletion admission committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Location", "/auth/deletion/"+operation)
-	w.Header().Set("Retry-After", "5")
-	renderDeletion(w, true, "/auth/deletion/"+operation)
+	outcome := s.admitAccountDeletion(r)
+	s.renderAccountDeletion(w, r, outcome)
 }
 
 func (s *Server) deletionStatus(w http.ResponseWriter, r *http.Request) {

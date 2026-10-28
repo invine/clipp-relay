@@ -111,3 +111,10 @@ func (s *Server) nativeToken(w http.ResponseWriter, r *http.Request) {
 	}
 	s.nativeRefreshToken(w, r, client, rawToken, digest)
 }
+
+func (s *Server) completeGrantRevocation(grantID string) error {
+	if grantID == "" || s.grantRevocationComplete == nil {
+		return errors.New("grant invalidation completion is not configured")
+	}
+	return s.grantRevocationComplete(grantID)
+}

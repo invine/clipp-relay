@@ -119,11 +119,13 @@ type Server struct {
 	commitDeletionRepository           func(context.Context, persistence.DeletionTransaction) error
 	commitRecovery                     func(context.Context, persistence.RecoveryTransaction) error
 	capacitySampler                    func(context.Context, string) (CapacitySample, error)
-	accountChanged                     func(AccountChange) func()
-	accountInvalidated                 func(string) error
-	accountInvalidationFallback        func(string) error
+	accountChanged                     func(AccountChange) string
+	accountInvalidated                 func(string, string) error
+	accountInvalidationFallback        func(string, string) error
+	accountInvalidationComplete        func(string) error
 	grantRevoked                       func(string) error
 	grantRevocationFallback            func(string) error
+	grantRevocationComplete            func(string) error
 	deletionAccounting                 QuotaProtection
 	deletionJournal                    DeletionJournal
 	deletionRepository                 string
@@ -211,35 +213,43 @@ type AccountChange struct {
 
 // SetAccountChangedForTest installs a controlled invalidation adapter. Production
 // must use ConfigureRelayProtection, which owns the complete policy operation.
-func (s *Server) SetAccountChangedForTest(changed func(AccountChange) func()) {
+func (s *Server) SetAccountChangedForTest(changed func(AccountChange) string) {
 	s.accountChanged = changed
 	if s.accountInvalidated == nil {
-		s.accountInvalidated = func(string) error { return nil }
+		s.accountInvalidated = func(string, string) error { return nil }
 	}
 	if s.accountInvalidationFallback == nil {
-		s.accountInvalidationFallback = func(string) error { return nil }
+		s.accountInvalidationFallback = func(string, string) error { return nil }
+	}
+	if s.accountInvalidationComplete == nil {
+		s.accountInvalidationComplete = func(string) error { return nil }
 	}
 }
 
 // SetAccountInvalidatedForTest wraps the primary account notification while
 // retaining the configured manager as its fail-closed fallback.
 func (s *Server) SetAccountInvalidatedForTest(invalidated func(string) error) {
-	s.accountInvalidated = invalidated
+	s.accountInvalidated = func(id, _ string) error { return invalidated(id) }
 	if s.accountInvalidationFallback == nil {
-		s.accountInvalidationFallback = invalidated
+		s.accountInvalidationFallback = func(id, _ string) error { return invalidated(id) }
 	}
 }
 
 func (s *Server) SetAccountInvalidationFallbackForTest(invalidated func(string) error) {
-	s.accountInvalidationFallback = invalidated
+	s.accountInvalidationFallback = func(id, _ string) error { return invalidated(id) }
+}
+
+func (s *Server) SetAccountInvalidationCompleteForTest(complete func(string) error) {
+	s.accountInvalidationComplete = complete
 }
 
 // RelaySessions exposes physical operations, not account policy decisions.
 type RelaySessions interface {
 	AccountSessions(string) int
-	DetachAccount(string) func()
-	InvalidateGrant(string) error
-	InvalidateAccount(string) error
+	RetireAccount(string, string) error
+	CompleteAccountInvalidation(string) error
+	RetireGrant(string) error
+	CompleteGrantInvalidation(string) error
 }
 
 // SetGrantRevokedForTest installs the grant invalidation recipient for isolated
@@ -248,6 +258,9 @@ func (s *Server) SetGrantRevokedForTest(revoked func(string) error) {
 	s.grantRevoked = revoked
 	if s.grantRevocationFallback == nil {
 		s.grantRevocationFallback = revoked
+	}
+	if s.grantRevocationComplete == nil {
+		s.grantRevocationComplete = func(string) error { return nil }
 	}
 }
 
@@ -267,19 +280,27 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	}
 	s.deletionAccounting = accounting
 	s.grantRevoked = func(grantID string) error {
-		return sessions.InvalidateGrant(grantID)
+		return sessions.RetireGrant(grantID)
 	}
-	// The recipient is a direct in-process manager call with no I/O. Retain the
-	// same idempotent operation as a fail-closed retry if a wrapper reports error.
-	s.grantRevocationFallback = func(grantID string) error { return sessions.InvalidateGrant(grantID) }
-	s.accountInvalidated = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
-	s.accountInvalidationFallback = func(accountID string) error { return sessions.InvalidateAccount(accountID) }
-	s.accountChanged = func(change AccountChange) func() {
+	// RetireGrant is synchronous logical invalidation. Physical closure is
+	// separately released by Auth after its identity protection is unlocked.
+	s.grantRevocationFallback = func(grantID string) error { return sessions.RetireGrant(grantID) }
+	s.grantRevocationComplete = sessions.CompleteGrantInvalidation
+	s.accountInvalidated = sessions.RetireAccount
+	s.accountInvalidationFallback = sessions.RetireAccount
+	s.accountInvalidationComplete = sessions.CompleteAccountInvalidation
+	s.accountChanged = func(change AccountChange) string {
 		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes)
-		if change.CloseAll || exhausted || sessions.AccountSessions(change.AccountID) > change.SessionLimit {
-			return sessions.DetachAccount(change.AccountID)
+		if change.CloseAll {
+			return "account_access_changed"
 		}
-		return nil
+		if exhausted {
+			return "quota_exhausted"
+		}
+		if sessions.AccountSessions(change.AccountID) > change.SessionLimit {
+			return "policy_changed"
+		}
+		return ""
 	}
 	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
 		sample, err := s.SampleActiveGrants(ctx, account)
@@ -296,17 +317,17 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 // deliverAccountInvalidation synchronously applies a confirmed account access
 // change to Session Manager. Cancellation of pending validation is independent
 // of the initiating HTTP request, and duplicate delivery is safe.
-func (s *Server) deliverAccountInvalidation(accountID string) error {
+func (s *Server) deliverAccountInvalidation(accountID, reason string) error {
 	if accountID == "" || s.accountInvalidated == nil || s.accountInvalidationFallback == nil {
 		return errors.New("account invalidation is not configured")
 	}
-	if s.nativeIssuer != nil {
+	if reason == "account_access_changed" && s.nativeIssuer != nil {
 		s.nativeIssuer.CancelPendingValidations()
 	}
-	if err := s.accountInvalidated(accountID); err == nil {
+	if err := s.accountInvalidated(accountID, reason); err == nil {
 		return nil
 	}
-	return s.accountInvalidationFallback(accountID)
+	return s.accountInvalidationFallback(accountID, reason)
 }
 
 // SampleActiveGrants reads only an aggregate live count, separately from the
@@ -558,11 +579,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/plans", s.adminPlan)
 	mux.HandleFunc("POST /admin/plans/{id}/archive", s.adminArchivePlan)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" && (s.grantRevoked == nil || s.grantRevocationFallback == nil) {
+		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" && (s.grantRevoked == nil || s.grantRevocationFallback == nil || s.grantRevocationComplete == nil) {
 			fail(w, http.StatusServiceUnavailable)
 			return
 		}
-		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && (s.accountChanged == nil || s.accountInvalidated == nil || s.accountInvalidationFallback == nil) {
+		if r.Method == http.MethodPost && (r.URL.Path == "/auth/revoke" || r.URL.Path == "/auth/delete" || strings.HasPrefix(r.URL.Path, "/admin/accounts/")) && (s.accountChanged == nil || s.accountInvalidated == nil || s.accountInvalidationFallback == nil || s.accountInvalidationComplete == nil) {
 			fail(w, http.StatusServiceUnavailable)
 			return
 		}
@@ -589,11 +610,17 @@ func (s *Server) NativeHandlerForTest(secret []byte) http.Handler {
 	if s.grantRevocationFallback == nil {
 		s.grantRevocationFallback = func(string) error { return nil }
 	}
+	if s.grantRevocationComplete == nil {
+		s.grantRevocationComplete = func(string) error { return nil }
+	}
 	if s.accountInvalidated == nil {
-		s.accountInvalidated = func(string) error { return nil }
+		s.accountInvalidated = func(string, string) error { return nil }
 	}
 	if s.accountInvalidationFallback == nil {
-		s.accountInvalidationFallback = func(string) error { return nil }
+		s.accountInvalidationFallback = func(string, string) error { return nil }
+	}
+	if s.accountInvalidationComplete == nil {
+		s.accountInvalidationComplete = func(string) error { return nil }
 	}
 	base := s.Handler()
 	return base
@@ -1203,137 +1230,12 @@ func (s *Server) revokeOwner(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	id, version, _, _, csrf, err := s.session(r)
-	if err != nil {
-		switch {
-		case errors.Is(err, errRateLimit):
-			markAction(r, "")
-		case errors.Is(err, errInvalidSession):
-			markDiagnostic(r, "refused", "invalid_credentials")
-		default:
-			markDiagnostic(r, "failed", "database_unavailable")
-		}
-		fail(w, 401)
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
-		markDiagnostic(r, "refused", "csrf_rejected")
-		fail(w, 403)
-		return
-	}
 	if r.PostForm.Get("confirm") != "yes" {
 		markDiagnostic(r, "refused", "confirmation_required")
 		http.Error(w, "Review the account-wide consequences and confirm before signing out everywhere.", http.StatusBadRequest)
 		return
 	}
-	if s.beforeOwnerSubjectRead != nil {
-		s.beforeOwnerSubjectRead()
-	}
-	readOp, err := s.persistence.Start(r.Context())
-	if err != nil {
-		markDiagnostic(r, "failed", "database_unavailable")
-		fail(w, 503)
-		return
-	}
-	readTx, err := beginAdminAccessTransaction(readOp)
-	if err != nil {
-		readOp.Close()
-		markDiagnostic(r, "failed", "database_unavailable")
-		fail(w, 503)
-		return
-	}
-	ownerState, err := readTx.AccountAccessState(readOp.Context(), id, false)
-	_ = readTx.Rollback(readOp.Context())
-	readOp.Close()
-	if err != nil {
-		if errors.Is(err, persistence.ErrNotFound) {
-			markDiagnostic(r, "refused", "invalid_credentials")
-		} else {
-			markDiagnostic(r, "failed", "database_unavailable")
-		}
-		fail(w, 503)
-		return
-	}
-	subject := ownerState.Subject
-	var applied, uncertain bool
-	var invalidationFailed bool
-	var closeConnections func()
-	if s.beforeAccountActionGuard != nil {
-		s.beforeAccountActionGuard()
-	}
-	guardEntered := false
-	guardErr := s.withIdentityGuard(r.Context(), subject, func(unitCtx context.Context) error {
-		guardEntered = true
-		if guardErr := s.withAccountGuards(unitCtx, []string{id}, func(ctx context.Context) {
-			op, e := s.persistence.Start(ctx)
-			if e != nil {
-				fail(w, 503)
-				return
-			}
-			defer op.Close()
-			tx, e := beginAdminAccessTransaction(op)
-			if e != nil {
-				fail(w, 503)
-				return
-			}
-			defer tx.Rollback(op.Context())
-			if s.beforeOwnerAccessRecheck != nil {
-				if e = s.beforeOwnerAccessRecheck(ctx); e != nil {
-					markDiagnostic(r, "failed", "database_unavailable")
-					fail(w, 401)
-					return
-				}
-			}
-			auditID, e := uuid()
-			if e != nil {
-				fail(w, 503)
-				return
-			}
-			state, e := tx.RevokeAccountAccess(op.Context(), id, s.sessionDigest(r, version), version, auditID)
-			if errors.Is(e, persistence.ErrInvalidCredential) {
-				markDiagnostic(r, "refused", "invalid_credentials")
-				fail(w, 401)
-				return
-			}
-			if e != nil {
-				fail(w, 503)
-				return
-			}
-			if s.commitAccountAccess != nil {
-				e = s.commitAccountAccess(op.Context(), tx)
-			} else {
-				e = tx.Commit(op.Context())
-			}
-			s.installIdentityFence(subject)
-			if e != nil {
-				s.uncertainAccounts.Store(id, uncertainMutation{revision: state.Revision, generation: state.Generation + 1, status: state.Status})
-			}
-			closeConnections = s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: state.WeeklyBytes, SessionLimit: state.Sessions, CloseAll: true})
-			invalidationFailed = s.deliverAccountInvalidation(id) != nil
-			applied, uncertain = true, e != nil
-		}); guardErr != nil {
-			markGuardDiagnostic(r, guardErr)
-			fail(w, 503)
-		}
-		return nil
-	})
-	if guardErr != nil && !guardEntered {
-		markGuardDiagnostic(r, guardErr)
-		fail(w, 503)
-	}
-	if applied {
-		if closeConnections != nil {
-			closeConnections()
-		}
-		cookie(w, sessionCookie, "", -1)
-		if uncertain {
-			markDiagnostic(r, "uncertain", "commit_unconfirmed")
-			uncertainResponse(w)
-		} else if invalidationFailed {
-			markDiagnostic(r, "failed", "invalidation_incomplete")
-			http.Error(w, "Account revocation committed, but relay session invalidation could not be confirmed.", http.StatusServiceUnavailable)
-		} else {
-			http.Redirect(w, r, "/?notice=revoked", http.StatusSeeOther)
-		}
-	}
+
+	outcome := s.revokeAccountAccess(r)
+	s.renderAccountRevocation(w, r, outcome)
 }

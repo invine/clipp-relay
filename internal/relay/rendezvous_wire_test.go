@@ -12,6 +12,8 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -112,6 +114,45 @@ func rvExchange(t *testing.T, ctx context.Context, h host.Host, relayID peer.ID,
 		t.Fatalf("response %q: %v", raw, err)
 	}
 	return out
+}
+
+func rvExchangeResult(ctx context.Context, h host.Host, relayID peer.ID, proto string, payload []byte) (map[string]json.RawMessage, error) {
+	st, err := h.NewStream(ctx, relayID, protocolID(proto))
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+	_ = st.SetDeadline(time.Now().Add(4 * time.Second))
+	if proto == string(RendezvousV2Protocol) {
+		payload = frame(string(payload))
+	}
+	if _, err = st.Write(payload); err != nil {
+		return nil, err
+	}
+	if err = st.CloseWrite(); err != nil {
+		return nil, err
+	}
+	var raw []byte
+	if proto == string(RendezvousV2Protocol) {
+		n, readErr := binary.ReadUvarint(byteReader{st})
+		if readErr != nil {
+			return nil, readErr
+		}
+		raw = make([]byte, n)
+		if _, err = io.ReadFull(st, raw); err != nil {
+			return nil, err
+		}
+	} else {
+		raw, err = io.ReadAll(io.LimitReader(st, 128<<10))
+		if err != nil {
+			return nil, err
+		}
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func protocolID(s string) protocol.ID { return protocol.ID(s) }
@@ -596,6 +637,234 @@ func TestRendezvousLeaseAndReservationSurviveSameConnectionRenewal(t *testing.T)
 	}
 	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), req); !bytes.Equal(got["ok"], []byte("true")) {
 		t.Fatalf("renewal lost reservation: %v", got)
+	}
+}
+
+func TestRendezvousLateVerificationCannotReplaceReplacementOwnerLease(t *testing.T) {
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	key, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeOwner := func() host.Host {
+		h, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Close() })
+		if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+		sendWireAuth(t, ctx, h, s.Host.ID())
+		return h
+	}
+	first := makeOwner()
+	reservation := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if _, err = client.Reserve(ctx, first, reservation); err != nil {
+		t.Fatal(err)
+	}
+	envelope := rvEnvelope(t, first, s.Host.ID())
+	request, err := json.Marshal(map[string]any{"action": "register", "topic": "clipp", "signedPeerRecord": base64.RawURLEncoding.EncodeToString(envelope)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	releaseVerify := make(chan struct{})
+	var releaseVerifyOnce sync.Once
+	closeStarted := make(chan struct{})
+	var closeStartedOnce sync.Once
+	releaseClose := make(chan struct{})
+	var releaseCloseOnce sync.Once
+	var blockNext atomic.Bool
+	blockNext.Store(true)
+	s.sessionManager.verifyPeerRecord = func(raw []byte, subject, relayID peer.ID) bool {
+		if blockNext.CompareAndSwap(true, false) {
+			close(entered)
+			<-releaseVerify
+		}
+		return validPeerRecord(raw, subject, relayID)
+	}
+	s.sessionManager.physicalClose = func(conn network.Conn) {
+		closeStartedOnce.Do(func() { close(closeStarted) })
+		<-releaseClose
+		_ = conn.Close()
+	}
+	defer func() {
+		releaseVerifyOnce.Do(func() { close(releaseVerify) })
+		releaseCloseOnce.Do(func() { close(releaseClose) })
+		_ = s.Close()
+	}()
+
+	type exchangeResult struct {
+		response map[string]json.RawMessage
+		err      error
+	}
+	oldResult := make(chan exchangeResult, 1)
+	go func() {
+		response, err := rvExchangeResult(ctx, first, s.Host.ID(), string(RendezvousV2Protocol), request)
+		oldResult <- exchangeResult{response: response, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("registration did not reach the controlled verification barrier")
+	}
+
+	// A new physical connection for the same Peer ID replaces the original
+	// owner while the original Signed Peer Record is being checked.
+	second := makeOwner()
+	select {
+	case <-closeStarted:
+	case <-ctx.Done():
+		t.Fatal("replacement did not begin manager-owned cleanup")
+	}
+	if _, err = client.Reserve(ctx, second, reservation); err != nil {
+		t.Fatal(err)
+	}
+	if got := rvExchange(t, ctx, second, s.Host.ID(), string(RendezvousV2Protocol), request); !bytes.Equal(got["ok"], []byte("true")) {
+		t.Fatalf("replacement owner registration: %v", got)
+	}
+	releaseVerifyOnce.Do(func() { close(releaseVerify) })
+	select {
+	case got := <-oldResult:
+		if got.err != nil {
+			t.Fatalf("late registration exchange: %v", got.err)
+		}
+		if !bytes.Equal(got.response["code"], []byte(`"authentication_failed"`)) {
+			t.Fatalf("late registration was not rejected for stale session ownership: %v", got.response)
+		}
+	case <-ctx.Done():
+		t.Fatal("late registration did not complete after verification resumed")
+	}
+
+	finder := rvClient(t, ctx, s, "authorized")
+	lookup, _ := json.Marshal(map[string]any{"action": "lookup", "topic": "clipp", "peerId": first.ID().String()})
+	if got := rvExchange(t, ctx, finder, s.Host.ID(), string(RendezvousV2Protocol), lookup); got["record"] == nil {
+		t.Fatalf("late stale registration replaced or removed replacement owner's lease: %v", got)
+	}
+}
+
+func TestRendezvousCapturedUnregisterCannotDeleteRenewedOwnerLease(t *testing.T) {
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	owner := rvClient(t, ctx, s, "authorized")
+	if _, err = client.Reserve(ctx, owner, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	raw := rvEnvelope(t, owner, s.Host.ID())
+	register, _ := json.Marshal(map[string]any{"action": "register", "topic": "clipp", "signedPeerRecord": base64.RawURLEncoding.EncodeToString(raw)})
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), register); !bytes.Equal(got["ok"], []byte("true")) {
+		t.Fatalf("register before renewal: %v", got)
+	}
+	conns := s.Host.Network().ConnsToPeer(owner.ID())
+	if len(conns) != 1 {
+		t.Fatalf("server has %d owner connections, want 1", len(conns))
+	}
+	requestOwner, admission := s.sessionManager.beginRendezvous(conns[0])
+	if !admission.successful() {
+		t.Fatalf("begin request: %+v", admission)
+	}
+
+	// This token represents an unregister request admitted before its body
+	// finished reading. A later renewal must not lend it the new session's
+	// authority to remove the preserved lease.
+	sendWireAuth(t, ctx, owner, s.Host.ID())
+	outcome := s.sessionManager.applyRendezvous(requestOwner, rvRequest{action: "unregister"})
+	if outcome.code != "authentication_failed" {
+		t.Fatalf("stale unregister outcome: %+v", outcome)
+	}
+	lookup, _ := json.Marshal(map[string]any{"action": "lookup", "topic": "clipp", "peerId": owner.ID().String()})
+	if got := rvExchange(t, ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), lookup); got["record"] == nil {
+		t.Fatalf("stale unregister removed lease transferred to renewed owner: %v", got)
+	}
+}
+
+func TestRendezvousLateVerificationCannotRegisterAfterAccountInvalidation(t *testing.T) {
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	owner := rvClient(t, ctx, s, "authorized")
+	if _, err = client.Reserve(ctx, owner, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	raw := rvEnvelope(t, owner, s.Host.ID())
+	request, _ := json.Marshal(map[string]any{"action": "register", "topic": "clipp", "signedPeerRecord": base64.RawURLEncoding.EncodeToString(raw)})
+	entered := make(chan struct{})
+	releaseVerify := make(chan struct{})
+	var releaseVerifyOnce sync.Once
+	closeStarted := make(chan struct{})
+	var closeStartedOnce sync.Once
+	releaseClose := make(chan struct{})
+	var releaseCloseOnce sync.Once
+	var blockNext atomic.Bool
+	blockNext.Store(true)
+	s.sessionManager.verifyPeerRecord = func(raw []byte, subject, relayID peer.ID) bool {
+		if blockNext.CompareAndSwap(true, false) {
+			close(entered)
+			<-releaseVerify
+		}
+		return validPeerRecord(raw, subject, relayID)
+	}
+	s.sessionManager.physicalClose = func(conn network.Conn) {
+		closeStartedOnce.Do(func() { close(closeStarted) })
+		<-releaseClose
+		_ = conn.Close()
+	}
+	defer func() {
+		releaseVerifyOnce.Do(func() { close(releaseVerify) })
+		releaseCloseOnce.Do(func() { close(releaseClose) })
+		_ = s.Close()
+	}()
+	type exchangeResult struct {
+		response map[string]json.RawMessage
+		err      error
+	}
+	result := make(chan exchangeResult, 1)
+	go func() {
+		response, err := rvExchangeResult(ctx, owner, s.Host.ID(), string(RendezvousV2Protocol), request)
+		result <- exchangeResult{response: response, err: err}
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("registration did not reach the controlled verification barrier")
+	}
+	invalidateAccountForTest(t, s, "a")
+	select {
+	case <-closeStarted:
+	case <-ctx.Done():
+		t.Fatal("account invalidation did not enqueue manager-owned close")
+	}
+	releaseVerifyOnce.Do(func() { close(releaseVerify) })
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("late registration exchange: %v", got.err)
+		}
+		if !bytes.Equal(got.response["code"], []byte(`"authentication_failed"`)) {
+			t.Fatalf("late registration survived account invalidation: %v", got.response)
+		}
+	case <-ctx.Done():
+		t.Fatal("late registration did not finish after account invalidation")
+	}
+	finder := rvClient(t, ctx, s, "authorized")
+	lookup, _ := json.Marshal(map[string]any{"action": "lookup", "topic": "clipp", "peerId": owner.ID().String()})
+	if got := rvExchange(t, ctx, finder, s.Host.ID(), string(RendezvousV2Protocol), lookup); got["record"] != nil {
+		t.Fatalf("registration completed after account invalidation: %v", got)
 	}
 }
 

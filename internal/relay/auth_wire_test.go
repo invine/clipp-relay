@@ -391,6 +391,57 @@ func TestOlderAuthenticationCannotRetireOrOverwriteNewerAttempt(t *testing.T) {
 	}
 }
 
+type capturedSessionTimer struct{}
+
+func (capturedSessionTimer) Stop() bool { return true }
+
+func TestStaleRenewalExpiryCallbackKeepsCurrentSession(t *testing.T) {
+	s, err := New(twoAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var expiryMu sync.Mutex
+	var expiries []func()
+	s.sessionManager.scheduleExpiry = func(_ time.Duration, callback func()) sessionTimer {
+		expiryMu.Lock()
+		defer expiryMu.Unlock()
+		expiries = append(expiries, callback)
+		return capturedSessionTimer{}
+	}
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ai := peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}
+	if err := h.Connect(ctx, ai); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"a", "a"} {
+		if response := authResponse(t, ctx, h, s.Host.ID(), token); !strings.Contains(response, `"ok":true`) {
+			t.Fatal(response)
+		}
+	}
+	expiryMu.Lock()
+	if len(expiries) != 2 {
+		count := len(expiries)
+		expiryMu.Unlock()
+		t.Fatalf("scheduled expiries=%d, want initial and renewal callbacks", count)
+	}
+	oldExpiry := expiries[0]
+	expiryMu.Unlock()
+	oldExpiry()
+	if got := s.AccountSessions("a"); got != 1 {
+		t.Fatalf("stale expiry removed current session: count=%d", got)
+	}
+	if _, err := client.Reserve(ctx, h, ai); err != nil {
+		t.Fatalf("current session lost permission after stale expiry: %v", err)
+	}
+}
+
 func TestGrantRevocationClosesOnlySessionsUsingThatGrant(t *testing.T) {
 	s, err := New(&grantAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
@@ -417,9 +468,7 @@ func TestGrantRevocationClosesOnlySessionsUsingThatGrant(t *testing.T) {
 		}
 	}
 
-	if err := s.InvalidateGrant("grant-a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateGrantForTest(t, s, "grant-a")
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) && len(clients[0].Network().ConnsToPeer(s.Host.ID())) != 0 {
 		time.Sleep(10 * time.Millisecond)
@@ -432,6 +481,26 @@ func TestGrantRevocationClosesOnlySessionsUsingThatGrant(t *testing.T) {
 	}
 	if got := len(clients[1].Network().ConnsToPeer(s.Host.ID())); got != 1 {
 		t.Fatalf("unrelated grant retained %d connections, want 1", got)
+	}
+}
+
+func invalidateGrantForTest(t *testing.T, s *Server, grantID string) {
+	t.Helper()
+	if err := s.RetireGrant(grantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteGrantInvalidation(grantID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func invalidateAccountForTest(t *testing.T, s *Server, accountID string) {
+	t.Helper()
+	if err := s.RetireAccount(accountID, "account_access_changed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteAccountInvalidation(accountID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -476,9 +545,7 @@ func TestGrantRevocationRetiresValidationThatReturnsAfterNotification(t *testing
 	case <-ctx.Done():
 		t.Fatal("authentication did not enter token validation")
 	}
-	if err := s.InvalidateGrant("grant-a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateGrantForTest(t, s, "grant-a")
 	close(authority.release)
 	select {
 	case response := <-result:
@@ -520,9 +587,7 @@ func TestAccountInvalidationRetiresValidationThatReturnsAfterNotification(t *tes
 	case <-ctx.Done():
 		t.Fatal("authentication did not enter token validation")
 	}
-	if err := s.InvalidateAccount("a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateAccountForTest(t, s, "a")
 	close(authority.release)
 	select {
 	case response := <-result:
@@ -565,9 +630,7 @@ func TestGrantRevocationRetiresAuthenticationDuringInitialQuotaAssessment(t *tes
 	case <-ctx.Done():
 		t.Fatal("authentication did not enter quota assessment")
 	}
-	if err := s.InvalidateGrant("grant-a"); err != nil {
-		t.Fatal(err)
-	}
+	invalidateGrantForTest(t, s, "grant-a")
 	close(accounting.release)
 	select {
 	case response := <-result:
@@ -680,3 +743,115 @@ func (c failingAccounting) AccountingCurrent(string, uint64) bool    { return tr
 func (c failingAccounting) AccountingSessions(string, int)           {}
 func (c failingAccounting) ClosureCurrent(quota.ClosureOutcome) bool { return true }
 func (c failingAccounting) FlushAllAccounting(context.Context) error { return nil }
+
+func TestGrantRevocationKeepsDelayedClosingConnectionTerminal(t *testing.T) {
+	s, err := New(&grantAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "grant-a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("initial auth: %s", response)
+	}
+
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	s.sessionManager.physicalClose = func(c network.Conn) {
+		close(closeStarted)
+		<-releaseClose
+		_ = c.Close()
+	}
+	defer release()
+	if err := s.RetireGrant("grant-a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+		t.Fatal("physical close started before Auth released protection")
+	default:
+	}
+	if got := s.ActiveSessions(); got != 0 {
+		t.Fatalf("grant retirement left %d authorized sessions", got)
+	}
+	if err := s.CompleteGrantInvalidation("grant-a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+	case <-ctx.Done():
+		t.Fatal("grant completion did not start manager-owned physical close")
+	}
+
+	// A physical connection whose logical permission has been revoked must
+	// remain terminal while Close is delayed. The test authority deliberately
+	// accepts the same grant token again to isolate the Relay Session barrier.
+	response := authResponse(t, ctx, h, s.Host.ID(), "grant-a")
+	if strings.Contains(response, `"ok":true`) {
+		t.Fatalf("reauthenticated on a connection while revoked grant close was delayed: %s", response)
+	}
+	release()
+}
+
+func TestAccountRetirementDefersPhysicalCloseUntilCompletion(t *testing.T) {
+	s, err := New(&grantAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, h, s.Host.ID(), "grant-a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("initial auth: %s", response)
+	}
+
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	s.sessionManager.physicalClose = func(c network.Conn) {
+		close(closeStarted)
+		<-releaseClose
+		_ = c.Close()
+	}
+	defer release()
+	if err := s.RetireAccount("a", "policy_changed"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+		t.Fatal("physical close started before account protection was released")
+	default:
+	}
+	if got := s.ActiveSessions(); got != 0 {
+		t.Fatalf("account retirement left %d authorized sessions", got)
+	}
+	if err := s.CompleteAccountInvalidation("a"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+	case <-ctx.Done():
+		t.Fatal("account completion did not start manager-owned physical close")
+	}
+	release()
+}
