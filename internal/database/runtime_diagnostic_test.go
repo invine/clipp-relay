@@ -118,6 +118,9 @@ func TestRuntimeExecHonorsEarlierCallerDeadline(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
 		t.Fatalf("database work ignored the caller deadline: %s", elapsed)
 	}
+	if _, err := runtime.Exec(context.Background(), "SELECT 1"); err != nil {
+		t.Fatalf("runtime did not recover after the canceled operation: %v", err)
+	}
 }
 
 func TestRuntimeAcquisitionFailureRecoversAfterPoolReturns(t *testing.T) {
