@@ -8,6 +8,7 @@ import (
 
 	"clipp-relay/internal/diagnostic"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestRuntimeAdmissionDoesNotChangeDatabaseState(t *testing.T) {
@@ -66,6 +67,11 @@ func TestRuntimeSQLFailureAndNoRowsRecovery(t *testing.T) {
 	ctx := context.Background()
 	if _, err := r.Exec(ctx, "SELECT 1/0"); err == nil {
 		t.Fatal("invalid SQL succeeded")
+	} else {
+		var sqlErr *pgconn.PgError
+		if !errors.As(err, &sqlErr) || sqlErr.Code != "22012" {
+			t.Fatalf("work error was not preserved: %T %v", err, err)
+		}
 	}
 	_, release, err := r.StartUnit(ctx)
 	if err != nil {
@@ -92,6 +98,25 @@ func TestRuntimeSQLFailureAndNoRowsRecovery(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("steady success emitted an extra transition: %+v", got)
+	}
+}
+
+func TestRuntimeExecHonorsEarlierCallerDeadline(t *testing.T) {
+	c, _, serving := fixture(t)
+	pool, err := NewPool(context.Background(), c, serving, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	runtime := NewRuntime(pool)
+	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := runtime.Exec(ctx, "SELECT pg_sleep(0.4)"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("database work did not report the caller deadline: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Fatalf("database work ignored the caller deadline: %s", elapsed)
 	}
 }
 

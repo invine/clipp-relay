@@ -2,9 +2,9 @@
 
 Status: ready-for-agent
 
-Owning repository: relay (clipp-relay).  
-Date: 2026-10-29.  
-Planning baseline: `main` at `06d1847aa350c9f6fafcd362969f1958aab2a653`.  
+Owning repository: relay (clipp-relay).
+Date: 2026-10-29.
+Planning baseline: `main` at `06d1847aa350c9f6fafcd362969f1958aab2a653`.
 Decision source: the user requested a specification for the cleanup discussed in this conversation and confirmed the existing persistence and database runtime test interfaces. This specification does not start implementation.
 
 ## Problem Statement
