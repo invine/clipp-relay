@@ -3,11 +3,12 @@ package auth_test
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/diagnostic"
+	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
 )
@@ -17,6 +18,14 @@ func TestQuotaEligibilityUsesItsOwnDatabaseBudget(t *testing.T) {
 	account := newAuthWithRuntime(db, c, m, auth.Google())
 	accounting := quota.New(postgres.New(db))
 	defer accounting.Close()
+	var databaseEvents []diagnostic.Event
+	db.SetTransitions(diagnostic.NewTransitions(func(event diagnostic.Event) { databaseEvents = append(databaseEvents, event) }))
+	if _, err := accounting.Settle(context.Background(), quota.Settlement{}); !errors.Is(err, quota.ErrSettlementConflict) {
+		t.Fatalf("invalid settlement policy = %v", err)
+	}
+	if len(databaseEvents) != 0 {
+		t.Fatalf("policy refusal without persistence work changed database state: %+v", databaseEvents)
+	}
 	id, err := quota.NewOperationID()
 	if err != nil {
 		t.Fatal(err)
@@ -29,33 +38,35 @@ func TestQuotaEligibilityUsesItsOwnDatabaseBudget(t *testing.T) {
 		_, _ = db.Pool.Exec(context.Background(), `DELETE FROM public.weekly_relay_usage WHERE account_id=$1; DELETE FROM public.accounts WHERE id=$1`, id)
 	})
 
-	entered := make(chan struct{}, 64)
-	release := make(chan struct{})
-	releaseUnits := sync.OnceFunc(func() { close(release) })
-	var workers sync.WaitGroup
-	defer func() { releaseUnits(); workers.Wait() }()
-	startUnit := func() {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			_ = db.WithUnit(context.Background(), func(context.Context) error {
-				entered <- struct{}{}
-				<-release
-				return nil
-			})
-		}()
+	work := postgres.New(db)
+	ordinary := make([]persistence.Operation, 0, 63)
+	defer func() {
+		for _, op := range ordinary {
+			op.Close()
+		}
+	}()
+	startOrdinary := func() {
+		t.Helper()
+		op, err := work.Start(context.Background())
+		if err != nil {
+			t.Fatalf("ordinary operation did not reserve admission: %v", err)
+		}
+		ordinary = append(ordinary, op)
 	}
 	for range 63 {
-		startUnit()
+		startOrdinary()
 	}
-	for range 63 {
-		<-entered
+	settlement, err := postgres.New(db).StartSettlement(context.Background())
+	if err != nil {
+		t.Fatalf("settlement did not reserve the last admission slot: %v", err)
 	}
-	if result, err := accounting.Eligibility(context.Background(), id); err != nil || result.EffectiveBytes != 0 {
-		t.Fatalf("quota did not use remaining database capacity: result=%+v err=%v", result, err)
+	defer settlement.Close()
+	if _, err := work.Start(context.Background()); !errors.Is(err, persistence.ErrWorkUnavailable) || !errors.Is(err, persistence.ErrUnavailable) {
+		t.Fatalf("ordinary operation did not reject at the shared capacity limit: %v", err)
 	}
-	startUnit()
-	<-entered
+	if _, err := postgres.New(db).StartSettlement(context.Background()); !errors.Is(err, persistence.ErrUnavailable) {
+		t.Fatalf("settlement did not reject at the shared capacity limit: %v", err)
+	}
 	start := time.Now()
 	if _, err := accounting.Eligibility(context.Background(), id); !errors.Is(err, quota.ErrTemporary) {
 		t.Fatalf("quota admitted beyond database budget: %v", err)
@@ -66,8 +77,17 @@ func TestQuotaEligibilityUsesItsOwnDatabaseBudget(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
 		t.Fatalf("overflow queued for %s", elapsed)
 	}
-	releaseUnits()
-	workers.Wait()
+	settlement.Close()
+	settlement, err = postgres.New(db).StartSettlement(context.Background())
+	if err != nil {
+		t.Fatalf("settlement did not recover after its prior scope closed: %v", err)
+	}
+	settlement.Close()
+	for _, op := range ordinary {
+		op.Close()
+	}
+	startOrdinary()
+	ordinary[len(ordinary)-1].Close()
 	if _, err := accounting.Eligibility(context.Background(), id); err != nil {
 		t.Fatalf("quota did not recover after release: %v", err)
 	}

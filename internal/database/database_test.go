@@ -51,34 +51,32 @@ func fixture(t *testing.T) (config.Config, config.Material, config.Material) {
 // account, quota and cleanup callers enter it at the same time.
 func TestRuntimeWorkAdmissionIsSharedAndRejectsOverflow(t *testing.T) {
 	runtime := NewRuntime(nil)
-	entered := make(chan struct{}, 64)
-	release := make(chan struct{})
-	var workers sync.WaitGroup
+	releases := make([]func(), 0, 64)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
 	for range 64 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			if err := runtime.WithUnit(context.Background(), func(ctx context.Context) error {
-				entered <- struct{}{}
-				<-release
-				return ctx.Err()
-			}); err != nil && err != context.DeadlineExceeded {
-				t.Errorf("admitted work: %v", err)
-			}
-		}()
-	}
-	for range 64 {
-		<-entered
+		ctx, release, err := runtime.StartUnit(context.Background())
+		if err != nil || ctx.Err() != nil {
+			t.Fatalf("admitted work: context=%v err=%v", ctx, err)
+		}
+		releases = append(releases, release)
 	}
 	start := time.Now()
-	if err := runtime.WithUnit(context.Background(), func(context.Context) error {
-		t.Fatal("overflow work entered")
-		return nil
-	}); err == nil || time.Since(start) > 100*time.Millisecond {
+	if _, _, err := runtime.StartUnit(context.Background()); !errors.Is(err, ErrWorkUnavailable) || time.Since(start) > 100*time.Millisecond {
 		t.Fatalf("overflow admission was not promptly rejected: %v", err)
 	}
-	close(release)
-	workers.Wait()
+	for _, release := range releases {
+		release()
+		release()
+	}
+	if _, release, err := runtime.StartUnit(context.Background()); err != nil {
+		t.Fatalf("capacity did not recover after release: %v", err)
+	} else {
+		release()
+	}
 }
 
 func TestRuntimeRowRowsAndTransactionRetainWorkUntilCompletion(t *testing.T) {
@@ -89,24 +87,19 @@ func TestRuntimeRowRowsAndTransactionRetainWorkUntilCompletion(t *testing.T) {
 	}
 	defer p.Close()
 	runtime := NewRuntime(p)
-	entered := make(chan struct{}, 63)
-	release := make(chan struct{})
-	var workers sync.WaitGroup
+	releases := make([]func(), 0, 63)
 	for range 63 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			_ = runtime.WithUnit(context.Background(), func(context.Context) error {
-				entered <- struct{}{}
-				<-release
-				return nil
-			})
-		}()
+		_, release, err := runtime.StartUnit(context.Background())
+		if err != nil {
+			t.Fatalf("could not reserve runtime admission: %v", err)
+		}
+		releases = append(releases, release)
 	}
-	defer func() { close(release); workers.Wait() }()
-	for range 63 {
-		<-entered
-	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
 	ctx := context.Background()
 	assertFull := func() {
 		var n int
@@ -139,7 +132,7 @@ func TestRuntimeRowRowsAndTransactionRetainWorkUntilCompletion(t *testing.T) {
 	}
 }
 
-func TestRuntimeTransactionHonorsStatementAndUnitContexts(t *testing.T) {
+func TestRuntimeTransactionHonorsStatementAndOperationContexts(t *testing.T) {
 	c, _, sm := fixture(t)
 	p, err := NewPool(context.Background(), c, sm, false)
 	if err != nil {
@@ -409,11 +402,11 @@ INSERT INTO public.audit_events(id,occurred_at,event,account_id) VALUES('3333333
 		borrowed = append(borrowed, conn)
 	}
 	start := time.Now()
-	e = NewRuntime(sp).Unit(ctx, func(context.Context, *pgxpool.Conn) error { return nil })
+	_, e = NewRuntime(sp).Exec(ctx, "SELECT 1")
 	for _, conn := range borrowed {
 		conn.Release()
 	}
-	if e == nil || time.Since(start) > time.Second {
+	if !errors.Is(e, ErrPoolUnavailable) || time.Since(start) > time.Second {
 		t.Fatalf("pool acquisition was not bounded: %v", e)
 	}
 	if _, e = sp.Exec(ctx, "CREATE TABLE public.serving_must_not_create (id integer)"); e == nil {
