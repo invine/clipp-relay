@@ -86,26 +86,6 @@ func (r *Runtime) StartUnit(parent context.Context) (context.Context, func(), er
 	return l.ctx, l.close, nil
 }
 
-// WithUnit scopes admission to work and reports a deadline reached in work.
-func (r *Runtime) WithUnit(parent context.Context, work func(context.Context) error) error {
-	started := time.Now()
-	ctx, release, err := r.StartUnit(parent)
-	if err != nil {
-		return err
-	}
-	defer release()
-	err = work(ctx)
-	if deadlineErr := ctx.Err(); deadlineErr != nil {
-		if errors.Is(deadlineErr, context.DeadlineExceeded) && parent.Err() == nil {
-			r.observe(parent, started, deadlineErr)
-		}
-		if err == nil {
-			return deadlineErr
-		}
-	}
-	return err
-}
-
 func (r *Runtime) acquire(l *lease) (*pgxpool.Conn, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, 500*time.Millisecond)
 	defer cancel()
@@ -116,34 +96,49 @@ func (r *Runtime) acquire(l *lease) (*pgxpool.Conn, error) {
 	return conn, nil
 }
 
-func (r *Runtime) Unit(parent context.Context, work func(context.Context, *pgxpool.Conn) error) error {
-	started := time.Now()
-	return r.WithUnit(parent, func(ctx context.Context) error {
-		l := &lease{ctx: ctx}
-		conn, err := r.acquire(l)
-		if err != nil {
-			r.observe(parent, started, err)
-			return err
-		}
-		defer conn.Release()
-		err = work(ctx, conn)
-		// Callbacks can return policy errors after SQL work. Only a driver error,
-		// broken connection, or clean completion establishes database state.
-		var sqlErr *pgconn.PgError
-		if err == nil || errors.Is(err, pgx.ErrNoRows) || errors.As(err, &sqlErr) || conn.Conn().PgConn().IsClosed() {
-			r.observe(parent, started, err)
-		}
-		return err
-	})
-}
-
 func (r *Runtime) Exec(parent context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	var tag pgconn.CommandTag
-	err := r.Unit(parent, func(ctx context.Context, conn *pgxpool.Conn) error {
-		var err error
-		tag, err = conn.Exec(ctx, sql, args...)
-		return err
-	})
+	started := time.Now()
+	unitStarted := time.Now()
+	ctx, release, err := r.StartUnit(parent)
+	if err != nil {
+		return tag, err
+	}
+	defer release()
+
+	conn, err := r.acquire(&lease{ctx: ctx})
+	if err != nil {
+		r.observe(parent, started, err)
+		return tag, err
+	}
+	connReleased := false
+	defer func() {
+		if !connReleased {
+			conn.Release()
+		}
+	}()
+
+	tag, err = conn.Exec(ctx, sql, args...)
+	// Only database outcomes establish database state. Admission and caller
+	// policy do not constitute database failure or recovery observations.
+	var sqlErr *pgconn.PgError
+	if err == nil || errors.Is(err, pgx.ErrNoRows) || errors.As(err, &sqlErr) || conn.Conn().PgConn().IsClosed() {
+		r.observe(parent, started, err)
+	}
+	conn.Release()
+	connReleased = true
+
+	// Match the scoped work contract: release the connection before checking
+	// whether the operation deadline elapsed, while retaining the admission
+	// slot through this completion check.
+	if deadlineErr := ctx.Err(); deadlineErr != nil {
+		if errors.Is(deadlineErr, context.DeadlineExceeded) && parent.Err() == nil {
+			r.observe(parent, unitStarted, deadlineErr)
+		}
+		if err == nil {
+			err = deadlineErr
+		}
+	}
 	return tag, err
 }
 
