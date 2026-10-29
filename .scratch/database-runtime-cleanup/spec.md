@@ -1,6 +1,6 @@
 # Narrow the database runtime interface while preserving admission control
 
-Status: ready-for-agent
+Status: implemented
 
 Owning repository: relay (clipp-relay).
 Date: 2026-10-29.
@@ -83,6 +83,11 @@ The admission mechanism passes the deletion test: deleting it would remove a rea
 
 This specification preserves the accepted [persistence decisions](../persistence-repositories/decisions.md) and the [persistence specification](../persistence-repositories/spec.md), especially admitted operation lifetime, adapter ownership and testing. It does not reopen the client transport ADR or introduce a new domain concept.
 
-Canonical publication is this relay-owned local tracker file. The current request authorizes specification creation only. Future implementation should use the repository's existing isolated spec workflow and verification procedure; this planning baseline must be rechecked before work starts.
+Canonical publication is this relay-owned local tracker file. At publication, the specification request did not start implementation. The user requested implementation on 2026-10-30; resolved tickets, integrated revisions, reviews and verification evidence are recorded in the ticket files and coordinator run record.
 
 Reference documents: [project operations](../../docs/agents/operations.md), [verification](../../docs/verification.md), and [glossary](../../GLOSSARY.md).
+
+
+## Implementation completion
+
+Implemented on `codex/database-runtime-cleanup-integration` from the declared `main` baseline. Final reviewed code revision: `e2970fd758e1a75970470c97fd93e93700eb67db`. The Standards and Spec reviews passed; final routine and race profiles passed on this revision. Ticket 02 records disposable PostgreSQL 17.11 and 18.6 qualification and applicable database-backed race results. Hosted CI, images, live cluster/provider, native device and forced live relay acceptance remain outside this implementation.
