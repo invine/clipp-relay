@@ -150,13 +150,10 @@ func TestRefreshReplayInvalidatesOnlyOwningLiveRelayGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	initial, err := p.quota.Eligibility(ctx, p.account)
-	if err != nil {
+	if _, err := p.quota.Eligibility(ctx, p.account); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = p.quota.Settle(ctx, quota.Settlement{AccountID: p.account, WeekStart: initial.WeekStart, Sequence: 1, DeltaBytes: 123, OperationID: "5f29fe63-8676-49e0-b918-f792896323f0"}); err != nil {
-		t.Fatalf("seed recorded usage: %v", err)
-	}
+	observeAndConfirm(t, p, 123)
 	if err = p.quota.Observe(p.account, 55); err != nil {
 		t.Fatalf("seed pending usage: %v", err)
 	}
@@ -429,18 +426,12 @@ func TestProductionProtectionCrossAccountReplacementAtCapacity(t *testing.T) {
 	}
 }
 
-func TestProductionProtectionComposesObservedSettlement(t *testing.T) {
+func TestProductionProtectionComposesObservedUsage(t *testing.T) {
 	p := protectedPortalFixture(t)
-	now := time.Now().UTC()
-	days := (int(now.Weekday()) + 6) % 7
-	week := time.Date(now.Year(), now.Month(), now.Day()-days, 0, 0, 0, 0, time.UTC)
-	op, err := quota.NewOperationID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := p.quota.Settle(context.Background(), quota.Settlement{AccountID: p.account, WeekStart: week, OperationID: op, Sequence: 1, DeltaBytes: 123456})
-	if err != nil || result.RecordedBytes != 123456 {
-		t.Fatalf("composed settlement=%+v %v", result, err)
+	observeAndConfirm(t, p, 123456)
+	eligibility, err := p.quota.Eligibility(context.Background(), p.account)
+	if err != nil || eligibility.RecordedBytes != 123456 || eligibility.EffectiveBytes != 123456 {
+		t.Fatalf("composed quota usage=%+v %v", eligibility, err)
 	}
 }
 
@@ -554,13 +545,10 @@ func TestProductionObservedSuspensionRetainsUsage(t *testing.T) {
 
 func TestOwnerAccountRevocationInvalidatesOnlyThatAccountsSessions(t *testing.T) {
 	p := protectedPortalFixture(t)
-	usage, err := p.quota.Eligibility(context.Background(), p.account)
-	if err != nil {
+	if _, err := p.quota.Eligibility(context.Background(), p.account); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = p.quota.Settle(context.Background(), quota.Settlement{AccountID: p.account, WeekStart: usage.WeekStart, Sequence: 1, DeltaBytes: 123, OperationID: "a550e1a9-755e-4cba-8e87-a36da25d1d98"}); err != nil {
-		t.Fatal(err)
-	}
+	observeAndConfirm(t, p, 123)
 	if err := p.quota.Observe(p.account, 55); err != nil {
 		t.Fatal(err)
 	}

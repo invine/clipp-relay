@@ -8,9 +8,9 @@ import (
 	"clipp-relay/internal/persistence"
 )
 
-// Settlement identifies one immutable batch of observed traffic. Sequence is
+// settlement identifies one immutable batch of observed traffic. Sequence is
 // exactly the preceding durable sequence plus one; retries retain every field.
-type Settlement struct {
+type settlement struct {
 	AccountID   string
 	WeekStart   time.Time
 	OperationID string
@@ -42,11 +42,11 @@ func (q *Quota) SetSettlementHooksForTest(before func(context.Context, persisten
 	q.periodic.mu.Unlock()
 }
 
-// Settle atomically records all observed bytes, even above the allowance or
+// settle atomically records all observed bytes, even above the allowance or
 // after authorization changes. Only final deletion or week retirement seals it.
 // The observed Weekly Quota Window owns the in-flight batch and its uncertainty;
 // an ambiguous commit blocks successors until that identical batch is reconciled.
-func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUsage, err error) {
+func (q *Quota) settle(ctx context.Context, batch settlement) (result RecordedUsage, err error) {
 	started := time.Now()
 	defer func() { q.accountingDiagnostic("quota.settlement", err, started) }()
 	if batch.AccountID == "" || batch.OperationID == "" || batch.DeltaBytes <= 0 || batch.Sequence <= 0 || !batch.WeekStart.Equal(weekStart(batch.WeekStart)) {
@@ -66,7 +66,7 @@ func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUs
 		return result, ErrTemporary
 	}
 	defer op.Close()
-	result, err = q.settle(op, batch)
+	result, err = q.settleInOperation(op, batch)
 	q.periodic.mu.Lock()
 	if week.retired || errors.Is(err, ErrUsageRetired) {
 		week.retired = true
@@ -94,7 +94,7 @@ func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUs
 // lockSettlementWeek reserves one account/week batch in the same state that
 // owns observations, receipts and retirement. Waiting is outside the accounting
 // mutex and happens before acquiring a persistence operation/connection.
-func (q *Quota) lockSettlementWeek(ctx context.Context, batch Settlement) (*observedWeek, bool, error) {
+func (q *Quota) lockSettlementWeek(ctx context.Context, batch settlement) (*observedWeek, bool, error) {
 	q.periodic.mu.Lock()
 	account := q.observedAccountLocked(batch.AccountID)
 	if account == nil {
@@ -137,7 +137,7 @@ func (q *Quota) lockSettlementWeek(ctx context.Context, batch Settlement) (*obse
 	return week, true, nil
 }
 
-func (q *Quota) settle(op persistence.AccountingOperation, b Settlement) (RecordedUsage, error) {
+func (q *Quota) settleInOperation(op persistence.AccountingOperation, b settlement) (RecordedUsage, error) {
 	ctx := op.Context()
 	tx, err := op.BeginAccounting(ctx)
 	if err != nil {

@@ -42,7 +42,7 @@ func fixture(t *testing.T) (*Quota, string, *pgxpool.Pool) {
 	}
 	t.Cleanup(p.Close)
 	// A random account avoids coupling the test to the portal's login flow.
-	id, err := NewOperationID()
+	id, err := newOperationID()
 	if err != nil {
 		t.Fatal(err)
 	}

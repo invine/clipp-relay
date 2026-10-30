@@ -27,7 +27,7 @@ type ClosureOutcome struct {
 }
 type observedWeek struct {
 	pending     int64
-	flight      *Settlement
+	flight      *settlement
 	recorded    RecordedUsage
 	initialized bool
 	uncertain   bool
@@ -414,7 +414,7 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 		for retry := 0; ; retry++ {
 			q.periodic.mu.Lock()
 			if w.flight == nil {
-				op, err := NewOperationID()
+				op, err := newOperationID()
 				if err != nil {
 					q.periodic.mu.Unlock()
 					return ErrTemporary
@@ -423,12 +423,12 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 					q.periodic.mu.Unlock()
 					return ErrSettlementConflict
 				}
-				w.flight = &Settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: w.pending, Sequence: w.recorded.Sequence + 1}
+				w.flight = &settlement{AccountID: id, WeekStart: week, OperationID: op, DeltaBytes: w.pending, Sequence: w.recorded.Sequence + 1}
 				w.pending = 0
 			}
 			batch := *w.flight
 			q.periodic.mu.Unlock()
-			_, settlementErr = q.Settle(ctx, batch)
+			_, settlementErr = q.settle(ctx, batch)
 			if errors.Is(settlementErr, ErrUsageRetired) {
 				q.periodic.mu.Lock()
 				delete(a.weeks, week)
@@ -481,7 +481,7 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 
 // A confirmed sequence conflict means this batch rolled back before commit.
 // Refresh the durable receipt and preserve its observations in a new batch.
-func (q *Quota) rebaseSettlementConflict(ctx context.Context, id string, week time.Time, batch Settlement) error {
+func (q *Quota) rebaseSettlementConflict(ctx context.Context, id string, week time.Time, batch settlement) error {
 	latest, err := q.RecordedUsage(ctx, id, week)
 	if err != nil {
 		return err

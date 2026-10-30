@@ -131,8 +131,8 @@ func (q *Quota) Close() {
 	}
 }
 
-// NewOperationID produces a cryptographically random stable operation identifier.
-func NewOperationID() (string, error) {
+// newOperationID produces a cryptographically random stable operation identifier.
+func newOperationID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err

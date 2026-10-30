@@ -60,20 +60,20 @@ func TestQuotaDiagnosticsKnownRollbackAndReconciledSettlement(t *testing.T) {
 	defer log.Close()
 	q.SetDiagnostics(log)
 	ctx := context.Background()
-	op, _ := NewOperationID()
-	b := Settlement{AccountID: id, WeekStart: weekStart(time.Now()), Sequence: 1, DeltaBytes: 12345, OperationID: op}
+	op, _ := newOperationID()
+	b := settlement{AccountID: id, WeekStart: weekStart(time.Now()), Sequence: 1, DeltaBytes: 12345, OperationID: op}
 	q.SetSettlementHooksForTest(func(context.Context, persistence.AccountingTransaction) error {
 		return errors.New("private-rollback-canary")
 	}, nil)
-	if _, err := q.Settle(ctx, b); !errors.Is(err, ErrTemporary) {
+	if _, err := q.settle(ctx, b); !errors.Is(err, ErrTemporary) {
 		t.Fatalf("rollback: %v", err)
 	}
 	q.SetSettlementHooksForTest(nil, func(context.Context) error { return errors.New("private-lost-ack-canary") })
-	if _, err := q.Settle(ctx, b); !errors.Is(err, ErrSettlementUncertain) {
+	if _, err := q.settle(ctx, b); !errors.Is(err, ErrSettlementUncertain) {
 		t.Fatalf("ambiguous: %v", err)
 	}
 	q.SetSettlementHooksForTest(nil, nil)
-	got, err := q.Settle(ctx, b)
+	got, err := q.settle(ctx, b)
 	if err != nil || got.RecordedBytes != 12345 {
 		t.Fatalf("reconcile: %+v %v", got, err)
 	}
