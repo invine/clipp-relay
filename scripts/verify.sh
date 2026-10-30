@@ -100,6 +100,7 @@ for suite in \
   run "$suite" bash "$suite"
 done
 run 'scripts/test-isolated-test-chart.py' python3 scripts/test-isolated-test-chart.py
+run 'scripts/test-prepare-isolated-installation.py' python3 scripts/test-prepare-isolated-installation.py
 run 'scripts/test-install-metadata.py' python3 scripts/test-install-metadata.py
 run 'scripts/test-verify.py' python3 scripts/test-verify.py
 success
