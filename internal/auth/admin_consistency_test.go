@@ -65,6 +65,11 @@ func (w adminHTTPTestWork) StartPortalSession(context.Context) (persistence.Port
 	return adminHTTPTestOperation{tx: tx}, nil
 }
 
+func (w adminHTTPTestWork) StartAccountAccess(context.Context) (persistence.AccountAccessOperation, error) {
+	tx := &adminHTTPTestTransaction{state: w.state}
+	return adminHTTPTestOperation{tx: tx}, nil
+}
+
 func (o adminHTTPTestOperation) Context() context.Context { return context.Background() }
 func (adminHTTPTestOperation) Close()                     {}
 func (o adminHTTPTestOperation) Begin(context.Context) (persistence.Transaction, error) {
@@ -130,7 +135,7 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 	t.Cleanup(pool.Close)
 	runtime := database.NewRuntime(pool)
 	work := postgres.New(runtime)
-	s := New(Dependencies{Work: work, AccountRegistration: work, PortalSessions: work, Authorization: work, Refresh: work, Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}, c, m, Provider{})
+	s := New(Dependencies{Work: work, AccountRegistration: work, PortalSessions: work, Authorization: work, Refresh: work, AccountAccess: work, Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}, c, m, Provider{})
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +406,8 @@ func TestAdminConflictResponseDoesNotHoldAccountProtection(t *testing.T) {
 	credential := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	pepper := []byte("test pepper with enough entropy")
 	state := &adminHTTPTestState{actorID: actorID, targetID: target}
-	s := &Server{Origin: "https://portal.example.test", AdminAllowlistFile: filepath.Join(t.TempDir(), "allowlist.json"), Peppers: map[uint64][]byte{1: pepper}, CurrentPepper: 1, persistence: adminHTTPTestWork{state: state}, portalSessions: adminHTTPTestWork{state: state}, accountRates: make(map[string]rate)}
+	work := adminHTTPTestWork{state: state}
+	s := &Server{Origin: "https://portal.example.test", AdminAllowlistFile: filepath.Join(t.TempDir(), "allowlist.json"), Peppers: map[uint64][]byte{1: pepper}, CurrentPepper: 1, persistence: work, portalSessions: work, accountAccess: work, accountRates: make(map[string]rate)}
 	if err := os.WriteFile(s.AdminAllowlistFile, []byte(`{"revision":1,"emails":["admin@example.test"]}`), 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -51,7 +51,7 @@ func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.M
 
 func authDependencies(runtime *database.Runtime) auth.Dependencies {
 	work := postgres.New(runtime)
-	return auth.Dependencies{Work: work, AccountRegistration: work, PortalSessions: work, Authorization: work, Refresh: work, Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}
+	return auth.Dependencies{Work: work, AccountRegistration: work, PortalSessions: work, Authorization: work, Refresh: work, AccountAccess: work, Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}
 }
 
 func newAuthWithRuntime(runtime *database.Runtime, c config.Config, m config.Material, provider auth.Provider) *auth.Server {

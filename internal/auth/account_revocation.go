@@ -59,11 +59,11 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 	if s.beforeOwnerSubjectRead != nil {
 		s.beforeOwnerSubjectRead()
 	}
-	readOp, err := s.persistence.Start(r.Context())
+	readOp, err := s.startAccountAccess(r.Context())
 	if err != nil {
 		return failedAccountRevocation(http.StatusServiceUnavailable, "database_unavailable")
 	}
-	readTx, err := beginAdminAccessTransaction(readOp)
+	readTx, err := beginAccountAccessTransaction(readOp)
 	if err != nil {
 		readOp.Close()
 		return failedAccountRevocation(http.StatusServiceUnavailable, "database_unavailable")
@@ -90,12 +90,12 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 		subject:  subject,
 		accounts: []string{id},
 		work: func(ctx context.Context) bool {
-			op, operationErr := s.persistence.Start(ctx)
+			op, operationErr := s.startAccountAccess(ctx)
 			if operationErr != nil {
 				return false
 			}
 			defer op.Close()
-			tx, operationErr := beginAdminAccessTransaction(op)
+			tx, operationErr := beginAccountAccessTransaction(op)
 			if operationErr != nil {
 				return false
 			}

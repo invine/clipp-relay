@@ -10,6 +10,9 @@ exact-connection Relay Sessions, and stock HOP/STOP forwarding.
 Native authorization and refresh operations declare their persistence
 capabilities at admission; Auth owns each transaction while Fosite callbacks
 share that same transaction for credential reads and writes.
+Protected administrator and owner account-access workflows also declare their
+persistence capability at admission. Auth retains each commit decision and
+rechecks administrator authority after the account locks are acquired.
 Owner deletion uses the separate Recovery Journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
 The journal owns append, exact readback, conditional head advancement, lost

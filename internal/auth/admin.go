@@ -21,14 +21,15 @@ import (
 	"clipp-relay/internal/portal"
 )
 
-func beginAdminAccessTransaction(op persistence.Operation) (persistence.AccountAccessTransaction, error) {
-	access, ok := any(op).(interface {
-		BeginAccountAccess(context.Context) (persistence.AccountAccessTransaction, error)
-	})
-	if !ok {
+func beginAccountAccessTransaction(op persistence.AccountAccessOperation) (persistence.AccountAccessTransaction, error) {
+	return op.BeginAccountAccess(op.Context())
+}
+
+func (s *Server) startAccountAccess(ctx context.Context) (persistence.AccountAccessOperation, error) {
+	if s.accountAccess == nil {
 		return nil, persistence.ErrUnavailable
 	}
-	return access.BeginAccountAccess(op.Context())
+	return s.accountAccess.StartAccountAccess(ctx)
 }
 
 var idPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -115,14 +116,14 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 	if s.beforeAdminDetailsRead != nil {
 		s.beforeAdminDetailsRead()
 	}
-	op, err := s.persistence.Start(r.Context())
+	op, err := s.startAccountAccess(r.Context())
 	if err != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return actor, false
 	}
 	defer op.Close()
-	authTx, err := beginAdminAccessTransaction(op)
+	authTx, err := beginAccountAccessTransaction(op)
 	if err != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
@@ -439,12 +440,12 @@ func planRequestDigest(actorID, name, reason string, bytes, sessions int64) [32]
 }
 
 func (s *Server) planCreateCommitted(ctx context.Context, id string, digest [32]byte) bool {
-	op, err := s.persistence.Start(ctx)
+	op, err := s.startAccountAccess(ctx)
 	if err != nil {
 		return false
 	}
 	defer op.Close()
-	tx, err := beginAdminAccessTransaction(op)
+	tx, err := beginAccountAccessTransaction(op)
 	if err != nil {
 		return false
 	}
@@ -697,13 +698,13 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	op, e := s.persistence.Start(ctx)
+	op, e := s.startAccountAccess(ctx)
 	if e != nil {
 		unavailable()
 		return
 	}
 	defer op.Close()
-	tx, e := beginAdminAccessTransaction(op)
+	tx, e := beginAccountAccessTransaction(op)
 	if e != nil {
 		unavailable()
 		return
@@ -778,13 +779,13 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	op, e := s.persistence.Start(ctx)
+	op, e := s.startAccountAccess(ctx)
 	if e != nil {
 		unavailable()
 		return
 	}
 	defer op.Close()
-	tx, e := beginAdminAccessTransaction(op)
+	tx, e := beginAccountAccessTransaction(op)
 	if e != nil {
 		unavailable()
 		return

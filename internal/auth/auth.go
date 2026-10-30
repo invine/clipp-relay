@@ -88,6 +88,7 @@ type Server struct {
 	portalSessions                     persistence.PortalSessionWork
 	authorization                      persistence.AuthorizationWork
 	refresh                            persistence.RefreshWork
+	accountAccess                      persistence.AccountAccessWork
 	deletions                          persistence.DeletionRepository
 	recovery                           persistence.RecoveryRepository
 	readViews                          persistence.ReadViews
@@ -408,6 +409,7 @@ type Dependencies struct {
 	PortalSessions      persistence.PortalSessionWork
 	Authorization       persistence.AuthorizationWork
 	Refresh             persistence.RefreshWork
+	AccountAccess       persistence.AccountAccessWork
 	Deletions           persistence.DeletionRepository
 	Recovery            persistence.RecoveryRepository
 	ReadViews           persistence.ReadViews
@@ -430,7 +432,7 @@ func New(deps Dependencies, c config.Config, m config.Material, provider Provide
 	}
 	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), provider.KeysURL)
 	googleVerifier := oidc.NewVerifier(googleIssuer, keySet, &oidc.Config{ClientID: m.GoogleClientID, SupportedSigningAlgs: []string{"RS256"}})
-	s := &Server{persistence: deps.Work, accountRegistration: deps.AccountRegistration, portalSessions: deps.PortalSessions, authorization: deps.Authorization, refresh: deps.Refresh, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
+	s := &Server{persistence: deps.Work, accountRegistration: deps.AccountRegistration, portalSessions: deps.PortalSessions, authorization: deps.Authorization, refresh: deps.Refresh, accountAccess: deps.AccountAccess, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
