@@ -76,12 +76,12 @@ def render_documents(release: str, chart: pathlib.Path, namespace: str, values: 
     return json.loads(checked(["ruby", "-ryaml", "-rjson", "-e", source], input=rendered))
 
 
-def chart_fingerprint(chart: pathlib.Path) -> str:
+def tree_fingerprint(chart: pathlib.Path, *, exclude_marker: bool = False) -> str:
     digest = hashlib.sha256()
     for path in sorted(chart.rglob("*")):
         if path.is_symlink():
             fail(f"Prepared chart contains a symbolic link: {path}")
-        if path.is_file() and path.name != ".clipp-installation.json":
+        if path.is_file() and not (exclude_marker and path.name == ".clipp-installation.json"):
             digest.update(path.relative_to(chart).as_posix().encode())
             digest.update(b"\0")
             digest.update(path.read_bytes())
@@ -141,7 +141,7 @@ def prepare_chart(source: pathlib.Path, work: pathlib.Path, fingerprint: str) ->
             retained = json.loads(marker.read_text())
         except (OSError, json.JSONDecodeError):
             fail(f"Retained chart identity is unreadable: {target}")
-        if retained.get("input_fingerprint") != fingerprint or retained.get("chart_sha256") != chart_fingerprint(target):
+        if retained.get("input_fingerprint") != fingerprint or retained.get("chart_sha256") != tree_fingerprint(target, exclude_marker=True):
             fail(f"Retained chart has changed since preparation: {target}")
         return target
     if target == source or target.is_relative_to(source) or source.is_relative_to(target):
@@ -149,7 +149,7 @@ def prepare_chart(source: pathlib.Path, work: pathlib.Path, fingerprint: str) ->
     target.mkdir(mode=0o700)
     try:
         checked([sys.executable, str(PREPARE_CHART), str(source), str(target)])
-        metadata = {"format": 1, "input_fingerprint": fingerprint, "chart_sha256": chart_fingerprint(target)}
+        metadata = {"format": 1, "input_fingerprint": fingerprint, "chart_sha256": tree_fingerprint(target, exclude_marker=True)}
         marker.write_text(json.dumps(metadata, sort_keys=True) + "\n")
         os.chmod(marker, 0o600)
     except BaseException:
@@ -266,9 +266,7 @@ def main() -> None:
         "native_secret": args.native_secret, "install_fingerprint": args.install_fingerprint,
         "values_sha256": hashlib.sha256(values.read_bytes()).hexdigest(),
         "overlay_sha256": hashlib.sha256(overlay.read_bytes()).hexdigest(),
-        "chart_tree_sha256": hashlib.sha256("".join(
-            hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(source.rglob("*")) if p.is_file()
-        ).encode()).hexdigest()}
+        "chart_tree_sha256": tree_fingerprint(source)}
     input_fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     chart = prepare_chart(source, work, input_fingerprint)
 
