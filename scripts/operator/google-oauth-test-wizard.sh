@@ -830,14 +830,6 @@ release_status() {
     puts(matches.empty? ? "absent" : matches.fetch(0).fetch("status"))
   ' "$CLIPP_TEST_RELEASE"
 }
-release_phase() {
-  helm --kube-context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get values "$CLIPP_TEST_RELEASE" -o json | ruby -rjson -e '
-    values = JSON.parse(STDIN.read)
-    deployment = values.fetch("deployment")
-    database = values.fetch("database").fetch("bundled")
-    puts [deployment.fetch("phase"), deployment.fetch("runId", ""), database.fetch("initialize")].join("|")
-  '
-}
 # Explicitly approved isolated-test profile; canonical chart and values stay intact.
 source_chart_dir="$chart_dir"
 if [[ -z "$db_run_id" ]]; then
@@ -863,6 +855,11 @@ say "Local chart, migration Job and OAuth-reset Job are prepared and runtime con
 refresh_preparation_observations() {
   local values_json='{}' bootstrap_json='' bootstrap_pod_json=''
   local migration_json='' migration_logs='' reset_json='' reset_logs=''
+  local recorded_serving_args=()
+  if [[ "$CLIPP_TEST_KUBE_CONTEXT" == context-couryw6kqaa && "$CLIPP_TEST_NAMESPACE" == relay-portal-test && "$CLIPP_TEST_RELEASE" == clipp-relay-test ]]; then
+    recorded_serving_args=(--recorded-serving-values "$reviewed_serving_values_file"
+      --recorded-serving-values-sha256 "$reviewed_serving_values_sha256")
+  fi
   current_release_status=$(release_status) || die "Could not refresh the retained Helm release status."
   if [[ "$current_release_status" == deployed ]]; then
     values_json=$(helm --kube-context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get values "$CLIPP_TEST_RELEASE" -o json) || die "Could not collect retained release evidence."
@@ -907,7 +904,7 @@ PY_INSTALL_OBSERVATIONS
     --release "$CLIPP_TEST_RELEASE" --namespace "$CLIPP_TEST_NAMESPACE" --run-id "$db_run_id" \
     --migration-secret "$db_migration_secret" --ca-secret "$db_ca_secret" \
     --native-secret "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" --install-fingerprint "$install_fingerprint" \
-    --observations-file "$observation_file") || die "Retained installation evidence does not match the reviewed artifacts."
+    --observations-file "$observation_file" "${recorded_serving_args[@]}") || die "Retained installation evidence does not match the reviewed artifacts."
   say "Preparation evidence: release=$(preparation_observation release), bootstrap=$(preparation_observation bootstrap), migration=$(preparation_observation migration), reset=$(preparation_observation reset)."
 }
 
@@ -1101,52 +1098,24 @@ wait_for_job_completion() {
   die "Job $job_name did not finish within $max_seconds seconds. Inspect it before rerunning."
 }
 
-verify_recorded_serving_release() {
-  [[ "$current_phase" == serving && "$CLIPP_TEST_KUBE_CONTEXT" == context-couryw6kqaa && "$CLIPP_TEST_NAMESPACE" == relay-portal-test && "$CLIPP_TEST_RELEASE" == clipp-relay-test ]] || die "Installed release values drifted from the reviewed test configuration. Only the recorded serving deployment can resume with newer values."
-  require_file "$reviewed_serving_values_file"
-  local registered_extension_id
-  registered_extension_id=$(printf '%s' "$installed_values_json" | ruby -rjson -rdigest -e '
-    payload = File.binread(ARGV.fetch(0))
-    abort "recorded serving configuration changed; review its deployment receipt" unless Digest::SHA256.hexdigest(payload) == ARGV.fetch(1)
-    expected = JSON.parse(payload)
-    actual = JSON.parse(STDIN.read)
-    unless actual == expected
-      changed = (actual.keys | expected.keys).select { |key| actual[key] != expected[key] }
-      abort "installed values differ from the recorded serving deployment: #{changed.join(", ")}"
-    end
-    abort "recorded deployment is not serving" unless expected.dig("deployment", "phase") == "serving" && expected.dig("deployment", "runId") == "" && expected.dig("database", "bundled", "initialize") == false
-    callback = expected.dig("clients", "extensionRedirect").to_s.match(%r{\Ahttps://([a-p]{32})\.chromiumapp\.org/clipp-relay\z})
-    abort "recorded Chrome callback is invalid" unless callback
-    puts callback[1]
-  ' "$reviewed_serving_values_file" "$reviewed_serving_values_sha256") || die "Installed release values drifted from the recorded serving configuration."
-  # This changes only the in-process expectations for live checks. The original
-  # private values and fingerprint still identify the completed migration Job.
+apply_preparation_release_expectations() {
+  local recorded_serving registered_extension_id
+  recorded_serving=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("observations").fetch("recorded_serving_release")' <<< "$prepared_installation") || die "Preparation did not return a release classification."
+  [[ "$recorded_serving" == true ]] || return 0
+  registered_extension_id=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("observations").fetch("extension_id")' <<< "$prepared_installation") || die "Preparation did not return the verified extension identity."
   CLIPP_TEST_VALUES_FILE="$reviewed_serving_values_file"
   CLIPP_TEST_EXTENSION_ID="$registered_extension_id"
-  say "Verified the recorded serving deployment: Android callback image, current Chrome callback, and public NLBs. Original migration identity is retained."
+  say "Preparation verified the recorded serving deployment; resuming its reviewed live-check values."
 }
 
 verify_installed_release() {
   [[ "$current_release_status" == deployed && "$saved_fingerprint" == "$install_fingerprint" ]] || die "An existing Helm release has unreviewed status or ownership: $current_release_status."
-  IFS='|' read -r current_phase current_run_id current_initialize <<< "$(release_phase)" || die "Could not inspect installed release phase."
-  [[ "$current_phase" == stopped || "$current_phase" == migrating || "$current_phase" == serving ]] || die "Unexpected installed relay phase."
-  installed_values_json=$(helm --kube-context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get values "$CLIPP_TEST_RELEASE" -o json) || die "Could not read the installed release values."
   refresh_preparation_observations
-  [[ "$(preparation_observation release)" == "$current_phase" ]] || die "Preparation rejected the retained Helm release phase."
-  if printf '%s' "$installed_values_json" | ruby -ryaml -rjson -e '
-    actual = JSON.parse(STDIN.read)
-    expected = YAML.safe_load(File.read(ARGV.fetch(0)))
-    overlay = YAML.safe_load(File.read(ARGV.fetch(1)))
-    overlay.each { |key, value| expected[key] = expected.fetch(key, {}).merge(value) }
-    expected.fetch("database").fetch("bundled")["initialize"] = (ARGV.fetch(2) == "stopped")
-    %w[image public certificates clients transports database credentials journal oci scheduling].each do |key|
-      exit 1 unless actual[key] == expected[key]
-    end
-  ' "$CLIPP_TEST_VALUES_FILE" "$letsencrypt_overlay" "$current_phase"; then
-    :
-  else
-    verify_recorded_serving_release
-  fi
+  current_phase=$(preparation_observation release)
+  current_run_id=$(preparation_observation release_run_id)
+  current_initialize=$(preparation_observation release_initialize)
+  [[ "$current_phase" == stopped || "$current_phase" == migrating || "$current_phase" == serving ]] || die "Preparation rejected the retained Helm release phase."
+  apply_preparation_release_expectations
   if [[ "$current_phase" == serving ]]; then
     [[ -z "$current_run_id" && "$current_initialize" == false ]] || die "Serving release retains a migration run ID or first-initialization flag."
   fi

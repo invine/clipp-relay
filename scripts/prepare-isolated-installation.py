@@ -10,6 +10,7 @@ any live operation.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -199,6 +200,71 @@ def build_migration_job(documents: list[dict], release: str, namespace: str, job
                     "volumes": [config, db, ca]}}}}
 
 
+def normalized_job_spec(observed: dict, expected: dict) -> dict:
+    """Remove only Kubernetes-generated identity and documented API defaults."""
+    actual = copy.deepcopy(observed.get("spec", {}))
+    expected_spec = expected["spec"]
+
+    # Jobs receive a selector and matching template labels from the API server
+    # unless manualSelector is set. These values identify this exact Job.
+    metadata = observed.get("metadata", {})
+    uid = metadata.get("uid")
+    selector = actual.get("selector", {})
+    match_labels = selector.get("matchLabels", {}) if isinstance(selector, dict) else {}
+    generated_selectors = (
+        {"batch.kubernetes.io/controller-uid": uid, "batch.kubernetes.io/job-name": metadata.get("name")},
+        {"controller-uid": uid, "job-name": metadata.get("name")},
+    )
+    if selector and any(match_labels == generated for generated in generated_selectors) and not selector.get("matchExpressions"):
+        actual.pop("selector", None)
+    for key in ("parallelism", "completions"):
+        if key not in expected_spec and actual.get(key) == 1:
+            actual.pop(key, None)
+    if "podReplacementPolicy" not in expected_spec and actual.get("podReplacementPolicy") == "TerminatingOrFailed":
+        actual.pop("podReplacementPolicy", None)
+
+    template = actual.get("template", {})
+    template_metadata = template.get("metadata", {}) if isinstance(template, dict) else {}
+    labels = template_metadata.get("labels", {}) if isinstance(template_metadata, dict) else {}
+    if isinstance(labels, dict):
+        for key, value in (("batch.kubernetes.io/controller-uid", uid),
+                           ("batch.kubernetes.io/job-name", metadata.get("name")),
+                           ("controller-uid", uid), ("job-name", metadata.get("name"))):
+            if value is not None and labels.get(key) == value:
+                labels.pop(key)
+        if not labels:
+            template_metadata.pop("labels", None)
+    template_metadata.pop("creationTimestamp", None)
+
+    pod = template.get("spec", {}) if isinstance(template, dict) else {}
+    expected_pod = expected_spec.get("template", {}).get("spec", {})
+    pod_defaults = {
+        "serviceAccountName": "default", "dnsPolicy": "ClusterFirst",
+        "schedulerName": "default-scheduler", "terminationGracePeriodSeconds": 30,
+        "enableServiceLinks": True, "preemptionPolicy": "PreemptLowerPriority",
+        "hostNetwork": False, "hostPID": False, "hostIPC": False,
+        "shareProcessNamespace": False, "setHostnameAsFQDN": False,
+        "hostUsers": True, "priority": 0,
+    }
+    for key, value in pod_defaults.items():
+        if key not in expected_pod and pod.get(key) == value:
+            pod.pop(key, None)
+    if "imagePullSecrets" not in expected_pod and pod.get("imagePullSecrets") == []:
+        pod.pop("imagePullSecrets", None)
+    for container in pod.get("containers", []):
+        expected_container = next((item for item in expected_pod.get("containers", [])
+                                   if item.get("name") == container.get("name")), {})
+        container_defaults = {
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File", "stdin": False,
+            "stdinOnce": False, "tty": False,
+        }
+        for key, value in container_defaults.items():
+            if key not in expected_container and container.get(key) == value:
+                container.pop(key, None)
+    return actual
+
+
 def job_observation(name: str, observed: dict | None, expected: dict, logs: list[str | dict]) -> str:
     if observed is None:
         return "missing"
@@ -209,23 +275,13 @@ def job_observation(name: str, observed: dict | None, expected: dict, logs: list
     if metadata.get("name") != expected_metadata["name"] or metadata.get("namespace") != expected_metadata["namespace"]:
         fail(f"Refusing foreign {name} Job evidence")
     annotations = metadata.get("annotations", {})
-    if annotations.get("clipp-relay-test/install-fingerprint") != expected_metadata["annotations"]["clipp-relay-test/install-fingerprint"]:
+    if (metadata.get("labels", {}) != expected_metadata.get("labels", {}) or
+            annotations != expected_metadata.get("annotations", {})):
         fail(f"Refusing foreign {name} Job evidence")
-    expected_container = expected["spec"]["template"]["spec"]["containers"][0]
-    actual_pod = observed.get("spec", {}).get("template", {}).get("spec", {})
-    actual_container = next((container for container in actual_pod.get("containers", [])
-                             if container.get("name") == expected_container["name"]), {})
-    if (actual_container.get("image") != expected_container.get("image") or
-            actual_container.get("args") != expected_container.get("args") or
-            actual_container.get("resources") != expected_container.get("resources")):
+    normalized = normalized_job_spec(observed, expected)
+    if normalized != expected["spec"]:
         fail(f"Retained {name} Job configuration differs from the reviewed artifact")
-    expected_secrets = {volume["name"]: volume.get("secret", {}).get("secretName")
-                        for volume in expected["spec"]["template"]["spec"].get("volumes", [])
-                        if volume.get("secret")}
-    actual_secrets = {volume["name"]: volume.get("secret", {}).get("secretName")
-                      for volume in actual_pod.get("volumes", []) if volume.get("secret")}
-    if any(actual_secrets.get(name) != secret for name, secret in expected_secrets.items()):
-        fail(f"Retained {name} Job Secret references differ from the reviewed artifact")
+    actual_pod = normalized.get("template", {}).get("spec", {})
     status = observed.get("status", {})
     if not isinstance(status, dict):
         fail(f"{name.capitalize()} Job status evidence is invalid")
@@ -247,8 +303,57 @@ def job_observation(name: str, observed: dict | None, expected: dict, logs: list
     return "completed" if complete else "incomplete"
 
 
+def reviewed_release_values(values_path: pathlib.Path, overlay_path: pathlib.Path, phase: str) -> dict:
+    source = r'''
+      require "yaml"; require "json"
+      values = YAML.safe_load(File.read(ARGV.fetch(0)))
+      overlay = YAML.safe_load(File.read(ARGV.fetch(1)))
+      abort "reviewed values must be mappings" unless values.is_a?(Hash) && overlay.is_a?(Hash)
+      overlay.each { |key, value| values[key] = values.fetch(key, {}).merge(value) }
+      puts JSON.generate(values)
+    '''
+    try:
+        values = json.loads(checked(["ruby", "-ryaml", "-rjson", "-e", source,
+                                     str(values_path), str(overlay_path)]))
+    except (json.JSONDecodeError, SystemExit):
+        fail("Reviewed chart values could not be compared")
+    try:
+        values["database"]["bundled"]["initialize"] = phase == "stopped"
+    except (KeyError, TypeError):
+        fail("Reviewed chart values have no bundled database configuration")
+    return values
+
+
+def recorded_serving_release(release_values: dict, receipt_path: pathlib.Path | None,
+                             receipt_sha256: str | None) -> str | None:
+    if receipt_path is None or receipt_sha256 is None:
+        return None
+    if not receipt_path.is_absolute() or receipt_path.is_symlink() or not receipt_path.is_file():
+        fail("Recorded serving values receipt is unavailable")
+    payload = receipt_path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != receipt_sha256:
+        fail("Recorded serving values receipt digest does not match")
+    try:
+        expected = json.loads(payload)
+    except json.JSONDecodeError:
+        fail("Recorded serving values receipt is invalid JSON")
+    if release_values != expected:
+        fail("Installed values differ from the recorded serving deployment")
+    deployment = expected.get("deployment", {})
+    database = expected.get("database", {}).get("bundled", {})
+    if deployment.get("phase") != "serving" or deployment.get("runId") != "" or database.get("initialize") is not False:
+        fail("Recorded deployment is not a completed serving release")
+    extension = expected.get("clients", {}).get("extensionRedirect", "")
+    match = re.fullmatch(r"https://([a-p]{32})\.chromiumapp\.org/clipp-relay", extension)
+    if match is None:
+        fail("Recorded Chrome callback is invalid")
+    return match.group(1)
+
+
 def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, run_id: str,
-                           migration: dict, reset: dict) -> dict:
+                           migration: dict, reset: dict, values_path: pathlib.Path,
+                           overlay_path: pathlib.Path, recorded_values_path: pathlib.Path | None,
+                           recorded_values_sha256: str | None) -> dict:
     try:
         observations = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as error:
@@ -260,7 +365,11 @@ def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, 
         fail("Helm release observations have an invalid shape")
     if release_observation.get("name") != release or release_observation.get("namespace") != namespace:
         fail("Refusing Helm release evidence for a different release or namespace")
+    recorded_serving = False
+    extension_id = None
     release_status = release_observation.get("status")
+    release_run_id = None
+    release_initialize = None
     if release_status == "absent":
         release_state = "absent"
     elif isinstance(release_status, str) and release_status.startswith("pending"):
@@ -287,7 +396,20 @@ def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, 
             fail("Installed migration phase does not match the reviewed run identity")
         if phase == "serving" and (observed_run_id != "" or initialize is not False):
             fail("Installed serving phase does not match the reviewed completion identity")
+        expected_values = reviewed_release_values(values_path, overlay_path, phase)
+        compared_keys = ("image", "public", "certificates", "clients", "transports", "database",
+                         "credentials", "journal", "oci", "scheduling")
+        mismatched = any(values.get(key) != expected_values.get(key) for key in compared_keys)
+        if mismatched:
+            if phase != "serving":
+                fail("Installed release values differ from the reviewed preparation")
+            extension_id = recorded_serving_release(values, recorded_values_path, recorded_values_sha256)
+            if extension_id is None:
+                fail("Installed release values differ from the reviewed preparation")
+            recorded_serving = True
         release_state = phase
+        release_run_id = observed_run_id
+        release_initialize = initialize
     else:
         fail("Installed release status is missing or unsupported")
 
@@ -314,7 +436,9 @@ def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, 
     jobs = observations.get("jobs", {})
     if not isinstance(jobs, dict):
         fail("Application Job observations have an invalid shape")
-    return {"release": release_state, "bootstrap": bootstrap_state,
+    return {"release": release_state, "release_run_id": release_run_id,
+            "release_initialize": release_initialize, "bootstrap": bootstrap_state,
+            "recorded_serving_release": recorded_serving, "extension_id": extension_id,
             "migration": job_observation("migration", jobs.get("migration"), migration, jobs.get("migration_logs", [])),
             "reset": job_observation("reset", jobs.get("reset"), reset, jobs.get("reset_logs", []))}
 
@@ -336,6 +460,8 @@ def main() -> None:
     parser.add_argument("--install-fingerprint", required=True)
     parser.add_argument("--relay-binary", help="built clipp-relay binary; defaults to go run")
     parser.add_argument("--observations-file", help="optional JSON snapshot of retained release and Job evidence")
+    parser.add_argument("--recorded-serving-values", help="optional reviewed serving values receipt")
+    parser.add_argument("--recorded-serving-values-sha256", help="SHA-256 digest for the serving receipt")
     args = parser.parse_args()
 
     for label, value in (("release", args.release), ("namespace", args.namespace),
@@ -347,6 +473,10 @@ def main() -> None:
         fail("The reviewed database run ID must be eight lowercase hexadecimal characters")
     if not re.fullmatch(r"[a-f0-9]{64}", args.install_fingerprint):
         fail("The reviewed installation fingerprint must be a SHA-256 hex digest")
+    if bool(args.recorded_serving_values) != bool(args.recorded_serving_values_sha256):
+        fail("Both recorded serving receipt path and digest are required")
+    if args.recorded_serving_values_sha256 and not re.fullmatch(r"[a-f0-9]{64}", args.recorded_serving_values_sha256):
+        fail("The recorded serving receipt digest must be a SHA-256 hex digest")
     migration_name = f"{args.release}-clipp-relay-migrate-{args.run_id}"
     reset_name = f"{args.release}-clipp-relay-reset-auth-{args.run_id}"
     for name in (migration_name, reset_name):
@@ -444,7 +574,9 @@ def main() -> None:
     if args.observations_file:
         result["observations"] = interpret_observations(pathlib.Path(args.observations_file),
             release=args.release, namespace=args.namespace, run_id=args.run_id,
-            migration=migration, reset=reset)
+            migration=migration, reset=reset, values_path=values, overlay_path=overlay,
+            recorded_values_path=pathlib.Path(args.recorded_serving_values) if args.recorded_serving_values else None,
+            recorded_values_sha256=args.recorded_serving_values_sha256)
     print(json.dumps(result, sort_keys=True))
 
 

@@ -37,10 +37,26 @@ class InstallationPreparationTests(unittest.TestCase):
                 "--native-secret", "clipp-native-oauth-v1", "--install-fingerprint", "a" * 64,
                 "--relay-binary", str(self.validator)]
 
-    def observe_command(self, observations):
+    def observe_command(self, observations, extra_args=()):
         path = self.root / "observations.json"
         path.write_text(json.dumps(observations))
-        return subprocess.run(self.command() + ["--observations-file", str(path)], capture_output=True, text=True)
+        return subprocess.run(self.command() + ["--observations-file", str(path), *extra_args], capture_output=True, text=True)
+
+    def reviewed_values(self, *, phase="migrating", run_id="deadbeef"):
+        source = r'''
+          require "yaml"; require "json"
+          values = YAML.safe_load(File.read(ARGV.fetch(0)))
+          overlay = YAML.safe_load(File.read(ARGV.fetch(1)))
+          overlay.each { |key, value| values[key] = values.fetch(key, {}).merge(value) }
+          puts JSON.generate(values)
+        '''
+        values_path = CHART / "examples/bundled-test-values.yaml"
+        overlay_path = CHART / "examples/letsencrypt-values.yaml"
+        values = json.loads(subprocess.check_output([
+            "ruby", "-ryaml", "-rjson", "-e", source, str(values_path), str(overlay_path)], text=True))
+        values.setdefault("deployment", {}).update({"phase": phase, "runId": run_id})
+        values["database"]["bundled"]["initialize"] = phase == "stopped"
+        return values
 
     def completed_observations(self, artifacts):
         migration = json.loads(pathlib.Path(artifacts["migration_manifest"]).read_text())
@@ -51,8 +67,7 @@ class InstallationPreparationTests(unittest.TestCase):
                     "status": {"succeeded": 1}}
         return {
             "release": {"name": "isolated", "namespace": "relay-portal-test", "status": "deployed",
-                        "values": {"deployment": {"phase": "migrating", "runId": "deadbeef"},
-                                   "database": {"bundled": {"initialize": False}}}},
+                        "values": self.reviewed_values()},
             "bootstrap": {"job": bootstrap, "pod_initialize": False},
             "jobs": {"migration": migration | {"status": {"succeeded": 1}},
                      "migration_logs": success_log,
@@ -144,7 +159,9 @@ class InstallationPreparationTests(unittest.TestCase):
         result = self.observe_command(self.completed_observations(artifacts))
         self.assertEqual(result.returncode, 0, result.stderr)
         evidence = json.loads(result.stdout)["observations"]
-        self.assertEqual(evidence, {"release": "migrating", "bootstrap": "completed",
+        self.assertEqual(evidence, {"release": "migrating", "release_run_id": "deadbeef",
+                                    "release_initialize": False, "bootstrap": "completed",
+                                    "recorded_serving_release": False, "extension_id": None,
                                     "migration": "completed", "reset": "completed"})
 
     def test_foreign_retained_job_evidence_is_refused(self):
@@ -155,6 +172,59 @@ class InstallationPreparationTests(unittest.TestCase):
         result = self.observe_command(observations)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("foreign migration Job", result.stderr)
+
+    def test_changed_retained_job_spec_is_refused(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        artifacts = json.loads(first.stdout)
+        mutations = (
+            ("additional volume", lambda job: job["spec"]["template"]["spec"]["volumes"].append(
+                {"name": "foreign", "emptyDir": {}})),
+            ("service account token", lambda job: job["spec"]["template"]["spec"].__setitem__(
+                "automountServiceAccountToken", True)),
+            ("container security context", lambda job: job["spec"]["template"]["spec"]["containers"][0].__setitem__(
+                "securityContext", {"privileged": True})),
+            ("image pull policy", lambda job: job["spec"]["template"]["spec"]["containers"][0].__setitem__(
+                "imagePullPolicy", "Always")),
+            ("retry policy", lambda job: job["spec"].__setitem__("backoffLimit", 6)),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                observations = self.completed_observations(artifacts)
+                mutate(observations["jobs"]["migration"])
+                result = self.observe_command(observations)
+                self.assertNotEqual(result.returncode, 0, f"accepted changed Job {label}")
+                self.assertIn("configuration differs", result.stderr)
+
+    def test_api_defaulted_job_spec_is_still_accepted(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        artifacts = json.loads(first.stdout)
+        observations = self.completed_observations(artifacts)
+        job = observations["jobs"]["migration"]
+        uid = "api-generated-uid"
+        job["metadata"]["uid"] = uid
+        job["spec"]["parallelism"] = 1
+        job["spec"]["completions"] = 1
+        job["spec"]["selector"] = {"matchLabels": {
+            "batch.kubernetes.io/controller-uid": uid,
+            "batch.kubernetes.io/job-name": job["metadata"]["name"],
+        }}
+        pod_template = job["spec"]["template"]
+        pod_template["metadata"]["labels"].update({
+            "batch.kubernetes.io/controller-uid": uid,
+            "batch.kubernetes.io/job-name": job["metadata"]["name"],
+        })
+        pod = pod_template["spec"]
+        pod.update({"serviceAccountName": "default", "dnsPolicy": "ClusterFirst",
+                    "schedulerName": "default-scheduler", "terminationGracePeriodSeconds": 30,
+                    "enableServiceLinks": True, "preemptionPolicy": "PreemptLowerPriority"})
+        pod["containers"][0].update({"terminationMessagePath": "/dev/termination-log",
+                                     "terminationMessagePolicy": "File", "stdin": False,
+                                     "stdinOnce": False, "tty": False})
+        result = self.observe_command(observations)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["observations"]["migration"], "completed")
 
     def test_pending_failed_and_incomplete_observations_are_distinguished(self):
         first = self.run_prepare()
@@ -189,6 +259,35 @@ class InstallationPreparationTests(unittest.TestCase):
         result = self.observe_command(observations)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not match the reviewed run identity", result.stderr)
+
+    def test_changed_installed_release_values_are_refused_by_preparation(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        observations = self.completed_observations(json.loads(first.stdout))
+        observations["release"]["values"]["image"]["repository"] = "example.invalid/foreign"
+        result = self.observe_command(observations)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Installed release values differ", result.stderr)
+
+    def test_recorded_serving_release_exception_is_classified_by_preparation(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        observations = self.completed_observations(json.loads(first.stdout))
+        recorded = self.reviewed_values(phase="serving", run_id="")
+        recorded["image"]["repository"] = "registry.example.test/reviewed-serving-image"
+        recorded["clients"]["extensionRedirect"] = "https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/clipp-relay"
+        values_path = self.root / "recorded-serving-values.json"
+        payload = (json.dumps(recorded, sort_keys=True) + "\n").encode()
+        values_path.write_bytes(payload)
+        digest = __import__("hashlib").sha256(payload).hexdigest()
+        observations["release"]["values"] = recorded
+        observations["release"]["values"]["deployment"].update({"phase": "serving", "runId": ""})
+        result = self.observe_command(observations, ["--recorded-serving-values", str(values_path),
+                                                     "--recorded-serving-values-sha256", digest])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = json.loads(result.stdout)["observations"]
+        self.assertTrue(evidence["recorded_serving_release"])
+        self.assertEqual(evidence["extension_id"], "abcdefghijklmnopabcdefghijklmnop")
 
 
 if __name__ == "__main__":
