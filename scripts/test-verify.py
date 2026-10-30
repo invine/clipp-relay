@@ -30,7 +30,7 @@ class VerificationTests(unittest.TestCase):
             "test-preflight-image-inputs.sh",
         ):
             self.write_command(self.root / "scripts" / suite, "exit 0\n")
-        for suite in ("test-isolated-test-chart.py", "test-install-metadata.py", "test-verify.py"):
+        for suite in ("test-isolated-test-chart.py", "test-prepare-isolated-installation.py", "test-install-metadata.py", "test-verify.py"):
             (self.root / "scripts" / suite).write_text("raise SystemExit(0)\n")
         for tool, body in {
             "go": 'case "$*" in\n version) echo "go version go1.27.1 linux/amd64" ;;\n "env CGO_ENABLED") echo "${FIXTURE_CGO:-1}" ;;\n "env CC") echo cc ;;\n *) if [ "$*" = "${FIXTURE_FAIL:-}" ]; then exit 17; fi ;;\nesac\n',
