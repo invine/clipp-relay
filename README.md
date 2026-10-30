@@ -7,6 +7,9 @@ explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
 Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
+Ordinary owner Portal Session requests share one narrow operation for cookie
+and pepper verification, account refusal policy, stored CSRF proof, and idle
+renewal; database expiry remains authoritative and renewal follows CSRF proof.
 Native authorization and refresh operations declare their persistence
 capabilities at admission; Auth owns each transaction while Fosite callbacks
 share that same transaction for credential reads and writes.

@@ -908,6 +908,7 @@ PY_INSTALL_OBSERVATIONS
     --migration-secret "$db_migration_secret" --ca-secret "$db_ca_secret" \
     --native-secret "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" --install-fingerprint "$install_fingerprint" \
     --observations-file "$observation_file") || die "Retained installation evidence does not match the reviewed artifacts."
+  say "Preparation evidence: release=$(preparation_observation release), bootstrap=$(preparation_observation bootstrap), migration=$(preparation_observation migration), reset=$(preparation_observation reset)."
 }
 
 preparation_observation() {
@@ -1087,17 +1088,12 @@ wait_for_job_completion() {
     state=$(printf '%s' "$job_json" | ruby -rjson -e '
       job = JSON.parse(STDIN.read)
       status = job.fetch("status", {})
-      if status.fetch("failed", 0).to_i > 0 || status.fetch("conditions", []).any? { |c| c["type"] == "Failed" && c["status"] == "True" }
-        puts "failed"
-      elsif status.fetch("succeeded", 0).to_i == 1
-        puts "complete"
-      else
-        puts "pending"
-      end
+      terminal = status.fetch("succeeded", 0).to_i > 0 || status.fetch("failed", 0).to_i > 0 ||
+        status.fetch("conditions", []).any? { |c| %w[Complete Failed].include?(c["type"]) && c["status"] == "True" }
+      puts(terminal ? "finished" : "pending")
     ') || die "Could not read Job $job_name status."
     case "$state" in
-      complete) say "Job completed: $job_name"; return 0 ;;
-      failed) die "Job $job_name failed. Inspect its Pod and logs; the wizard will not create a replacement automatically." ;;
+      finished) say "Job stopped; the preparation operation will verify its retained identity and completion evidence."; return 0 ;;
     esac
     if (( attempt > 0 && attempt % 12 == 0 )); then say "Still waiting for Job $job_name..."; fi
     sleep 5
