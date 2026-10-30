@@ -7,6 +7,9 @@ explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
 Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
+Native authorization and refresh operations declare their persistence
+capabilities at admission; Auth owns each transaction while Fosite callbacks
+share that same transaction for credential reads and writes.
 Owner deletion uses the separate Recovery Journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
 The journal owns append, exact readback, conditional head advancement, lost

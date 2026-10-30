@@ -144,7 +144,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		s.oauthError(w, 503)
 		return
 	}
-	op, e := s.persistence.Start(r.Context())
+	op, e := s.authorization.StartAuthorization(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
@@ -157,12 +157,12 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 	}
 	defer guard.Unlock()
 	binding := s.digest(version, "consent-browser", credential)
-	tx, authorizationTx, e := beginAuthorizationTransaction(op)
+	authorizationTx, e := beginAuthorizationTransaction(op)
 	if e != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	defer tx.Rollback(op.Context())
+	defer authorizationTx.Rollback(op.Context())
 	accountState, e := authorizationTx.LockAccountAuthorization(op.Context(), account)
 	if e != nil {
 		s.oauthError(w, 503)
@@ -195,7 +195,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 			s.oauthError(w, 503)
 			return
 		}
-		if tx.Commit(op.Context()) != nil {
+		if authorizationTx.Commit(op.Context()) != nil {
 			if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
 				markDiagnostic(r, "uncertain", "commit_unconfirmed")
 			}
@@ -208,7 +208,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		s.writeAuthorizationError(w, r, authorizeRequest)
 		return
 	}
-	if tx.Commit(op.Context()) != nil {
+	if authorizationTx.Commit(op.Context()) != nil {
 		if trace := diagnosticFor(r); trace != nil && trace.event == "oauth.authorize" {
 			markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		}
@@ -273,14 +273,14 @@ func (s *Server) writeAuthorizationError(w http.ResponseWriter, r *http.Request,
 // validateConsentSession checks the live Portal Session and current account
 // generation before cancellation consumes the in-memory one-use continuation.
 // The caller holds the per-identity guard, so authorize and cancel serialize.
-func (s *Server) validateConsentSession(w http.ResponseWriter, op persistence.Operation, consent oauthConsent, credential string) bool {
+func (s *Server) validateConsentSession(w http.ResponseWriter, op persistence.AuthorizationOperation, consent oauthConsent, credential string) bool {
 	ctx := op.Context()
-	tx, authorizationTx, err := beginAuthorizationTransaction(op)
+	authorizationTx, err := beginAuthorizationTransaction(op)
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return false
 	}
-	defer tx.Rollback(op.Context())
+	defer authorizationTx.Rollback(op.Context())
 	accountState, err := authorizationTx.LockAccountAuthorization(ctx, consent.account)
 	if errors.Is(err, persistence.ErrInvalidCredential) {
 		s.oauthError(w, http.StatusUnauthorized)
@@ -316,7 +316,7 @@ func (s *Server) validateConsentSession(w http.ResponseWriter, op persistence.Op
 		}
 		return false
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = authorizationTx.Commit(ctx); err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return false
 	}
@@ -364,7 +364,7 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 		s.oauthError(w, 401)
 		return
 	}
-	op, e := s.persistence.Start(r.Context())
+	op, e := s.authorization.StartAuthorization(r.Context())
 	if e != nil {
 		s.oauthError(w, 503)
 		return
@@ -417,13 +417,13 @@ func (s *Server) confirmAuthorization(w http.ResponseWriter, r *http.Request) {
 	}
 	s.issueNativeCode(w, r, op, cookie.Value, version, consent.authorizeRequest, account, consent.generation, consent.intent)
 }
-func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, op persistence.Operation, portalCredential string, portalVersion uint64, authorize fosite.AuthorizeRequester, account string, expectedGeneration int64, intent oauthIntent) {
-	tx, authorizationTx, err := beginAuthorizationTransaction(op)
+func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, op persistence.AuthorizationOperation, portalCredential string, portalVersion uint64, authorize fosite.AuthorizeRequester, account string, expectedGeneration int64, intent oauthIntent) {
+	authorizationTx, err := beginAuthorizationTransaction(op)
 	if err != nil {
 		s.oauthError(w, 503)
 		return
 	}
-	defer tx.Rollback(op.Context())
+	defer authorizationTx.Rollback(op.Context())
 	accountState, err := authorizationTx.LockAccountAuthorization(op.Context(), account)
 	if errors.Is(err, persistence.ErrInvalidCredential) {
 		s.oauthError(w, 401)
@@ -447,7 +447,7 @@ func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, op pers
 		return
 	}
 	if accountState.Status != "Active" {
-		if authorizationTx.RecordCredentialAudit(op.Context(), "credential_blocked", account, intent.client) != nil || tx.Commit(op.Context()) != nil {
+		if authorizationTx.RecordCredentialAudit(op.Context(), "credential_blocked", account, intent.client) != nil || authorizationTx.Commit(op.Context()) != nil {
 			s.oauthError(w, 503)
 			return
 		}
@@ -460,7 +460,7 @@ func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, op pers
 		s.oauthError(w, 400)
 		return
 	}
-	if err = tx.Commit(op.Context()); err != nil {
+	if err = authorizationTx.Commit(op.Context()); err != nil {
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
 		s.oauthError(w, 503)
 		return

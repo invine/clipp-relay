@@ -51,14 +51,23 @@ func (s *Server) SetRelayCredentialHookForTest(hook func()) { s.relayCredentialH
 // SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
 // Production leaves this unset.
 func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
-	s.commitRefresh = commit
-	s.commitAuthorization = commit
+	if commit == nil {
+		s.commitRefresh = nil
+		s.commitAuthorization = nil
+		return
+	}
+	s.commitRefresh = func(ctx context.Context, tx persistence.RefreshTransaction) error { return commit(ctx, tx) }
+	s.commitAuthorization = func(ctx context.Context, tx persistence.AuthorizationTransaction) error { return commit(ctx, tx) }
 }
 
 // SetAuthorizationCommitHookForTest injects storage-neutral commit outcomes for
 // native authorization tests. Production leaves this unset.
 func (s *Server) SetAuthorizationCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
-	s.commitAuthorization = commit
+	if commit == nil {
+		s.commitAuthorization = nil
+		return
+	}
+	s.commitAuthorization = func(ctx context.Context, tx persistence.AuthorizationTransaction) error { return commit(ctx, tx) }
 }
 
 // SetPortalCommitHookForTest injects a lost portal-session commit acknowledgment.
@@ -77,6 +86,8 @@ type Server struct {
 	persistence                        persistence.Work
 	accountRegistration                persistence.AccountRegistrationWork
 	portalSessions                     persistence.PortalSessionWork
+	authorization                      persistence.AuthorizationWork
+	refresh                            persistence.RefreshWork
 	deletions                          persistence.DeletionRepository
 	recovery                           persistence.RecoveryRepository
 	readViews                          persistence.ReadViews
@@ -113,8 +124,8 @@ type Server struct {
 	commitPlanAccess                   func(context.Context, persistence.AccountAccessTransaction) error
 	commitAccountAccess                func(context.Context, persistence.AccountAccessTransaction) error
 	relayCredentialHook                func()
-	commitAuthorization                func(context.Context, persistence.Transaction) error
-	commitRefresh                      func(context.Context, persistence.Transaction) error
+	commitAuthorization                func(context.Context, persistence.AuthorizationTransaction) error
+	commitRefresh                      func(context.Context, persistence.RefreshTransaction) error
 	nativeIssuer                       *issuer.Issuer
 	commitPortal                       func(context.Context, persistence.Transaction) error
 	commitDeletionAdmission            func(context.Context, persistence.DeletionTransaction) error
@@ -395,6 +406,8 @@ type Dependencies struct {
 	Work                persistence.Work
 	AccountRegistration persistence.AccountRegistrationWork
 	PortalSessions      persistence.PortalSessionWork
+	Authorization       persistence.AuthorizationWork
+	Refresh             persistence.RefreshWork
 	Deletions           persistence.DeletionRepository
 	Recovery            persistence.RecoveryRepository
 	ReadViews           persistence.ReadViews
@@ -417,7 +430,7 @@ func New(deps Dependencies, c config.Config, m config.Material, provider Provide
 	}
 	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), provider.KeysURL)
 	googleVerifier := oidc.NewVerifier(googleIssuer, keySet, &oidc.Config{ClientID: m.GoogleClientID, SupportedSigningAlgs: []string{"RS256"}})
-	s := &Server{persistence: deps.Work, accountRegistration: deps.AccountRegistration, portalSessions: deps.PortalSessions, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
+	s := &Server{persistence: deps.Work, accountRegistration: deps.AccountRegistration, portalSessions: deps.PortalSessions, authorization: deps.Authorization, refresh: deps.Refresh, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
