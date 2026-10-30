@@ -9,8 +9,13 @@ Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
 Owner deletion uses the separate Recovery Journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
-Startup qualification and offline recovery share its repository-qualified chain
-proof; offline recovery rechecks the head and ETag before changing restored accounts.
+The journal owns append, exact readback, conditional head advancement, lost
+acknowledgement reconciliation, committed-chain proof, and justified rebasing.
+Auth records each immutable event preparation in the existing deletion operation
+before journal I/O; Auth retains due-work selection, retries, accounting, and final
+deletion. Startup qualification and offline recovery share the same
+repository-qualified chain proof; offline recovery rechecks the head and ETag
+before changing restored accounts.
 Confirmed current-week Recorded Relay Usage follows a fresh Pending registration by keyed
 digest; old account state, plan, credentials, and presentation do not.
 With periodic accounting, deletion first invalidates credentials and physically
