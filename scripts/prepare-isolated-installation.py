@@ -324,6 +324,22 @@ def reviewed_release_values(values_path: pathlib.Path, overlay_path: pathlib.Pat
     return values
 
 
+def release_values_match(observed: dict, reviewed: dict) -> bool:
+    """Compare every reviewed chart value except the separately validated run state."""
+    observed = json.loads(json.dumps(observed))
+    reviewed = json.loads(json.dumps(reviewed))
+    for values in (observed, reviewed):
+        deployment = values.get("deployment")
+        if isinstance(deployment, dict):
+            deployment.pop("phase", None)
+            deployment.pop("runId", None)
+        database = values.get("database")
+        bundled = database.get("bundled") if isinstance(database, dict) else None
+        if isinstance(bundled, dict):
+            bundled.pop("initialize", None)
+    return observed == reviewed
+
+
 def recorded_serving_release(release_values: dict, receipt_path: pathlib.Path | None,
                              receipt_sha256: str | None) -> str | None:
     if receipt_path is None or receipt_sha256 is None:
@@ -397,9 +413,7 @@ def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, 
         if phase == "serving" and (observed_run_id != "" or initialize is not False):
             fail("Installed serving phase does not match the reviewed completion identity")
         expected_values = reviewed_release_values(values_path, overlay_path, phase)
-        compared_keys = ("image", "public", "certificates", "clients", "transports", "database",
-                         "credentials", "journal", "oci", "scheduling")
-        mismatched = any(values.get(key) != expected_values.get(key) for key in compared_keys)
+        mismatched = not release_values_match(values, expected_values)
         if mismatched:
             if phase != "serving":
                 fail("Installed release values differ from the reviewed preparation")

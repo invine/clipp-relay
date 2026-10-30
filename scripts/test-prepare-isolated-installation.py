@@ -269,6 +269,17 @@ class InstallationPreparationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Installed release values differ", result.stderr)
 
+    def test_changes_to_unselected_installed_release_values_are_refused(self):
+        for section in ("listeners", "networkPolicy", "accounting"):
+            with self.subTest(section=section):
+                first = self.run_prepare()
+                self.assertEqual(first.returncode, 0, first.stderr)
+                observations = self.completed_observations(json.loads(first.stdout))
+                observations["release"]["values"][section] = {"changed": True}
+                result = self.observe_command(observations)
+                self.assertNotEqual(result.returncode, 0, f"accepted changed {section} values")
+                self.assertIn("Installed release values differ", result.stderr)
+
     def test_recorded_serving_release_exception_is_classified_by_preparation(self):
         first = self.run_prepare()
         self.assertEqual(first.returncode, 0, first.stderr)
