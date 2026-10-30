@@ -17,6 +17,8 @@ type Work struct{ runtime *database.Runtime }
 var (
 	_ persistence.AccountRegistrationWork = (*Work)(nil)
 	_ persistence.PortalSessionWork       = (*Work)(nil)
+	_ persistence.AuthorizationWork       = (*Work)(nil)
+	_ persistence.RefreshWork             = (*Work)(nil)
 )
 
 func New(runtime *database.Runtime) *Work { return &Work{runtime: runtime} }
@@ -62,6 +64,14 @@ func (w *Work) StartPortalSession(ctx context.Context) (persistence.PortalSessio
 	return w.start(ctx)
 }
 
+func (w *Work) StartAuthorization(ctx context.Context) (persistence.AuthorizationOperation, error) {
+	return w.start(ctx)
+}
+
+func (w *Work) StartRefresh(ctx context.Context) (persistence.RefreshOperation, error) {
+	return w.start(ctx)
+}
+
 type operation struct {
 	runtime *database.Runtime
 	ctx     context.Context
@@ -71,6 +81,8 @@ type operation struct {
 var (
 	_ persistence.AccountRegistrationOperation = (*operation)(nil)
 	_ persistence.PortalSessionOperation       = (*operation)(nil)
+	_ persistence.AuthorizationOperation       = (*operation)(nil)
+	_ persistence.RefreshOperation             = (*operation)(nil)
 )
 
 func (o *operation) Context() context.Context { return o.ctx }
@@ -88,6 +100,22 @@ func (o *operation) BeginAccountRegistration(ctx context.Context) (persistence.A
 }
 
 func (o *operation) BeginPortalSession(ctx context.Context) (persistence.PortalSessionTransaction, error) {
+	tx, err := o.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (o *operation) BeginAuthorization(ctx context.Context) (persistence.AuthorizationTransaction, error) {
+	tx, err := o.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (o *operation) BeginRefresh(ctx context.Context) (persistence.RefreshTransaction, error) {
 	tx, err := o.begin(ctx)
 	if err != nil {
 		return nil, err

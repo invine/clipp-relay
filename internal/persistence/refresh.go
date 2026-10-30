@@ -32,3 +32,16 @@ type RefreshTransaction interface {
 	DeleteGrantAccessTokens(context.Context, string) error
 	ConfirmRefreshGrantRevoked(context.Context, string) (bool, error)
 }
+
+// RefreshOperation declares the persistence required by native refresh and
+// replay reconciliation, sharing one admission lifetime across both scopes.
+type RefreshOperation interface {
+	Context() context.Context
+	Close()
+	BeginRefresh(context.Context) (RefreshTransaction, error)
+}
+
+// RefreshWork admits complete native refresh operations.
+type RefreshWork interface {
+	StartRefresh(context.Context) (RefreshOperation, error)
+}

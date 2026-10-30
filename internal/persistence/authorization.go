@@ -59,6 +59,20 @@ type AuthorizationTransaction interface {
 	StoreRefreshGeneration(context.Context, [32]byte, string, int64) error
 }
 
+// AuthorizationOperation declares the persistence needed by native
+// authorization flows. It retains admission from Start through Close while
+// allowing the workflow to begin its own authoritative transaction.
+type AuthorizationOperation interface {
+	Context() context.Context
+	Close()
+	BeginAuthorization(context.Context) (AuthorizationTransaction, error)
+}
+
+// AuthorizationWork admits complete native authorization operations.
+type AuthorizationWork interface {
+	StartAuthorization(context.Context) (AuthorizationOperation, error)
+}
+
 // PortalAuthorizationSession includes the account fields required to authorize
 // a browser request and refresh the short-lived Portal Session idle deadline.
 type PortalAuthorizationSession struct {

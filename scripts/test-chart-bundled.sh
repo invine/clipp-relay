@@ -5,6 +5,10 @@ chart=charts/clipp-relay
 values=$chart/examples/bundled-test-values.yaml
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+if [[ -z ${CLIPP_RELAY_VALIDATOR:-} ]]; then
+  go build -o "$work/clipp-relay-validator" ./cmd/clipp-relay
+  export CLIPP_RELAY_VALIDATOR="$work/clipp-relay-validator"
+fi
 helm lint "$chart" -f "$values" --namespace relay-portal-test --strict
 for phase in stopped migrating serving; do
   flags=(--set deployment.phase="$phase" --set database.bundled.initialize=false)
