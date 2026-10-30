@@ -9,6 +9,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+var (
+	_ persistence.AccountRegistrationTransaction = (*transaction)(nil)
+	_ persistence.PortalSessionTransaction       = (*transaction)(nil)
+)
+
 func (t *transaction) UpsertRelayAccount(ctx context.Context, input persistence.AccountRegistration) (persistence.RegisteredAccount, error) {
 	var account persistence.RegisteredAccount
 	err := t.tx.QueryRow(ctx, `INSERT INTO public.accounts
