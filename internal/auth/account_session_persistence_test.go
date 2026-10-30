@@ -59,7 +59,9 @@ func portalSessionWorkForTest(tx *accountSessionTx) portalSessionOnlyWork {
 type accountSessionTx struct {
 	session    persistence.PortalSessionOwner
 	lookupErr  error
+	lookups    []uint64
 	touched    bool
+	touchCalls int
 	deleted    bool
 	committed  bool
 	rolledBack bool
@@ -94,10 +96,18 @@ func (*accountSessionTx) ImportRetainedUsage(context.Context, string, persistenc
 func (*accountSessionTx) CreatePortalSession(context.Context, [32]byte, uint64, string, int64, [32]byte) error {
 	return nil
 }
-func (tx *accountSessionTx) PortalSessionForOwner(context.Context, [32]byte, uint64) (persistence.PortalSessionOwner, error) {
-	return tx.session, tx.lookupErr
+func (tx *accountSessionTx) PortalSessionForOwner(_ context.Context, _ [32]byte, version uint64) (persistence.PortalSessionOwner, error) {
+	tx.lookups = append(tx.lookups, version)
+	if tx.lookupErr != nil {
+		return persistence.PortalSessionOwner{}, tx.lookupErr
+	}
+	if tx.session.PepperVersion != version {
+		return persistence.PortalSessionOwner{}, persistence.ErrInvalidCredential
+	}
+	return tx.session, nil
 }
 func (tx *accountSessionTx) TouchPortalSession(context.Context, [32]byte, uint64, string, int64) (bool, error) {
+	tx.touchCalls++
 	return tx.touched, nil
 }
 func (tx *accountSessionTx) DeletePortalSession(context.Context, [32]byte, uint64) (bool, error) {
@@ -123,12 +133,12 @@ func TestPortalSessionValidationUsesRepositoryAndPreservesSessionIdentity(t *tes
 	r := httptest.NewRequest("GET", "/", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
 
-	accountID, gotVersion, status, email, gotCSRF, err := s.session(r)
+	ownerSession, err := s.ownerPortalSession(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accountID != "account-9" || gotVersion != pepperVersion || status != "Active" || email != "owner@example.test" || gotCSRF != csrf {
-		t.Fatalf("portal session projection = %q/%d/%q/%q/%q", accountID, gotVersion, status, email, gotCSRF)
+	if ownerSession.accountID != "account-9" || ownerSession.pepperVersion != pepperVersion || ownerSession.status != "Active" || ownerSession.email != "owner@example.test" || ownerSession.csrf != csrf {
+		t.Fatalf("portal session projection = %q/%d/%q/%q/%q", ownerSession.accountID, ownerSession.pepperVersion, ownerSession.status, ownerSession.email, ownerSession.csrf)
 	}
 	if !tx.committed || tx.rolledBack || !tx.closed {
 		t.Fatalf("session transaction lifecycle: committed=%t rolledBack=%t closed=%t", tx.committed, tx.rolledBack, tx.closed)
@@ -142,12 +152,108 @@ func TestExpiredPortalSessionDoesNotRenewAndReleasesOperation(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
 
-	if _, _, _, _, _, err := s.session(r); !errors.Is(err, errInvalidSession) {
+	if _, err := s.ownerPortalSession(r); !errors.Is(err, errInvalidSession) {
 		t.Fatalf("expired session result = %v, want invalid session", err)
 	}
 	if tx.touched || tx.committed || !tx.rolledBack || !tx.closed {
 		t.Fatalf("expired session lifecycle: touched=%t committed=%t rolledBack=%t closed=%t", tx.touched, tx.committed, tx.rolledBack, tx.closed)
 	}
+}
+
+func TestPortalSessionRefusalDoesNotRenew(t *testing.T) {
+	const pepperVersion = uint64(4)
+	credential := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	pepper := []byte("test pepper with enough entropy")
+	csrf := (&Server{Peppers: map[uint64][]byte{pepperVersion: pepper}}).csrf(pepperVersion, credential)
+
+	t.Run("stored CSRF proof", func(t *testing.T) {
+		tx := &accountSessionTx{
+			session: persistence.PortalSessionOwner{
+				AccountID: "account-9", Subject: "subject", Generation: 7, PepperVersion: pepperVersion,
+				CSRFHash: []byte("wrong proof"),
+			},
+			touched: true,
+		}
+		s := &Server{Peppers: map[uint64][]byte{pepperVersion: pepper}, portalSessions: portalSessionWorkForTest(tx), accountRates: make(map[string]rate)}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
+		if _, err := s.ownerPortalSession(r); err == nil || err.Error() != "csrf" {
+			t.Fatalf("stored CSRF refusal = %v, want csrf error", err)
+		}
+		if tx.touchCalls != 0 || tx.committed || !tx.rolledBack || !tx.closed {
+			t.Fatalf("stored CSRF refusal lifecycle: touches=%d committed=%t rolledBack=%t closed=%t", tx.touchCalls, tx.committed, tx.rolledBack, tx.closed)
+		}
+	})
+
+	t.Run("uncertain account", func(t *testing.T) {
+		tx := &accountSessionTx{
+			session: persistence.PortalSessionOwner{
+				AccountID: "account-9", Subject: "subject", Generation: 7, PepperVersion: pepperVersion,
+				CSRFHash: (&Server{Peppers: map[uint64][]byte{pepperVersion: pepper}}).digest(pepperVersion, "csrf-store", csrf),
+			},
+			touched: true,
+		}
+		s := &Server{Peppers: map[uint64][]byte{pepperVersion: pepper}, portalSessions: portalSessionWorkForTest(tx), accountRates: make(map[string]rate)}
+		s.uncertainAccounts.Store("account-9", uncertainMutation{})
+		r := httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
+		if _, err := s.ownerPortalSession(r); !errors.Is(err, errInvalidSession) {
+			t.Fatalf("uncertain account result = %v, want invalid session", err)
+		}
+		if tx.touchCalls != 0 || tx.committed || !tx.rolledBack || !tx.closed {
+			t.Fatalf("uncertain account lifecycle: touches=%d committed=%t rolledBack=%t closed=%t", tx.touchCalls, tx.committed, tx.rolledBack, tx.closed)
+		}
+	})
+}
+
+func TestOwnerPortalSessionKeepsRotatedPepperAndRateRefusal(t *testing.T) {
+	credential := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	oldPepper := []byte("old test pepper with enough entropy")
+	currentPepper := []byte("current test pepper with enough entropy")
+
+	t.Run("retained pepper", func(t *testing.T) {
+		const oldVersion, currentVersion = uint64(2), uint64(5)
+		s := &Server{Peppers: map[uint64][]byte{oldVersion: oldPepper, currentVersion: currentPepper}, CurrentPepper: currentVersion, accountRates: make(map[string]rate)}
+		csrf := s.csrf(oldVersion, credential)
+		tx := &accountSessionTx{session: persistence.PortalSessionOwner{
+			AccountID: "account-9", Subject: "subject", Generation: 7, PepperVersion: oldVersion,
+			CSRFHash: s.digest(oldVersion, "csrf-store", csrf),
+		}, touched: true}
+		s.portalSessions = portalSessionWorkForTest(tx)
+		r := httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
+		verified, err := s.ownerPortalSession(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if verified.pepperVersion != oldVersion || verified.csrf != csrf || len(tx.lookups) < 1 {
+			t.Fatalf("rotated pepper projection/lookups = %#v / %v", verified, tx.lookups)
+		}
+		if !tx.committed || tx.touchCalls != 1 {
+			t.Fatalf("rotated pepper transaction: committed=%t touches=%d", tx.committed, tx.touchCalls)
+		}
+	})
+
+	t.Run("account rate limit", func(t *testing.T) {
+		const version = uint64(5)
+		s := &Server{Peppers: map[uint64][]byte{version: currentPepper}, CurrentPepper: version, accountRates: make(map[string]rate)}
+		csrf := s.csrf(version, credential)
+		tx := &accountSessionTx{session: persistence.PortalSessionOwner{
+			AccountID: "account-9", Subject: "subject", Generation: 7, PepperVersion: version,
+			CSRFHash: s.digest(version, "csrf-store", csrf),
+		}, touched: true}
+		s.portalSessions = portalSessionWorkForTest(tx)
+		rateKey := base64.RawURLEncoding.EncodeToString(s.digest(version, "account-rate", googleIssuer+"\x00subject"))
+		s.accountRates[rateKey] = rate{tokens: 0, at: time.Now()}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
+		if _, err := s.ownerPortalSession(r); !errors.Is(err, errRateLimit) {
+			t.Fatalf("rate-limited session = %v, want rate limit", err)
+		}
+		if tx.touchCalls != 0 || tx.committed || !tx.rolledBack || !tx.closed {
+			t.Fatalf("rate refusal lifecycle: touches=%d committed=%t rolledBack=%t closed=%t", tx.touchCalls, tx.committed, tx.rolledBack, tx.closed)
+		}
+	})
 }
 
 func TestPortalLogoutDeletesOnlyItsSessionThroughRepository(t *testing.T) {
