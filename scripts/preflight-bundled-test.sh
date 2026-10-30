@@ -57,6 +57,12 @@ ruby -ryaml -e '
   docs = YAML.load_stream(File.read(ARGV[0])).compact
   abort "not bundled mode" unless docs.any? { |d| d["kind"] == "StatefulSet" && d.dig("metadata", "name").end_with?("-postgres") }
 ' "$work/stopped.yaml"
+validator=${CLIPP_RELAY_VALIDATOR:-}
+if [[ -z $validator ]]; then
+  validator="$work/clipp-relay-validator"
+  go build -o "$validator" ./cmd/clipp-relay
+fi
+CLIPP_RELAY_VALIDATOR="$validator" bash scripts/validate-rendered-config.sh "$work/serving.yaml"
 echo "PASS bundled test chart/schema rendered for $release in $namespace: initial/stopped/migrating/serving"
 echo 'PENDING operator: verify relay image digest against the published workflow artifact and node architecture'
 echo 'PENDING operator: verify PostgreSQL 18 Debian image digest, node architecture, and provenance against registry evidence'
