@@ -7,8 +7,28 @@ explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
 Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
-Owner deletion uses a separate OCI deletion journal: a committed conditional
+Ordinary owner Portal Session requests share one narrow operation for cookie
+and pepper verification, account refusal policy, stored CSRF proof, and idle
+renewal; database expiry remains authoritative and renewal follows CSRF proof.
+Native authorization and refresh operations declare their persistence
+capabilities at admission; Auth owns each transaction while Fosite callbacks
+share that same transaction for credential reads and writes.
+Protected administrator and owner account-access workflows also declare their
+persistence capability at admission. Auth retains each commit decision and
+rechecks Portal Session proof and administrator authority after the account
+locks are acquired. OAuth consent reuses the same Portal Session proof policy
+inside its protected transaction, while retaining account-generation checks
+and renewal at the existing consent point; an earlier session observation
+does not authorize work after a wait.
+Owner deletion uses the separate Recovery Journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
+The journal owns append, exact readback, conditional head advancement, lost
+acknowledgement reconciliation, committed-chain proof, and justified rebasing.
+Auth records each immutable event preparation in the existing deletion operation
+before journal I/O; Auth retains due-work selection, retries, accounting, and final
+deletion. Startup qualification and offline recovery share the same
+repository-qualified chain proof; offline recovery rechecks the head and ETag
+before changing restored accounts.
 Confirmed current-week Recorded Relay Usage follows a fresh Pending registration by keyed
 digest; old account state, plan, credentials, and presentation do not.
 With periodic accounting, deletion first invalidates credentials and physically
@@ -27,6 +47,10 @@ is soft: full attributable overrun is recorded, and observations not persisted
 before a crash may be lost. No historical settlement replay or multi-instance
 writer coordination is supported. The accounting failure deadline defaults to
 three seconds and closes affected sessions independently of blocked SQL workers.
+Quota keeps pending observations, the immutable in-flight batch, its confirmed
+receipt, uncertainty and retirement together for each account and week. Each
+window serializes settlement without holding the observation lock during SQL;
+eligibility and policy changes use the same effective-usage calculation.
 The owner profile shows confirmed Recorded Relay Usage and twelve preceding
 weekly totals. Its capacity table distinguishes configured limits from separately
 sampled live counts. Active Login Grants are sampled from PostgreSQL; live Relay
@@ -68,10 +92,19 @@ Bootstrap and role provisioning are explicit operator steps; this binary never
 creates roles or databases.
 
 ```sh
+go run ./cmd/clipp-relay -command validate-config -config /path/to/config.json
 go run ./cmd/clipp-relay -command migrate -config /path/to/config.json
 go run ./cmd/clipp-relay -command reset-auth -config /path/to/migration-config.json
 go run ./cmd/clipp-relay -command serve -config /path/to/config.json
 ```
+
+`validate-config` checks strict JSON, runtime configuration rules, and static
+serving requirements without opening referenced Secret files or connecting to
+the database, journal, or listeners. It requires at least one relay listener
+and a configured Recovery Journal. A successful result means configuration
+acceptance only; it does not establish Secret availability, live schema
+compatibility, external reachability, or operational readiness. Migration,
+reset, and recovery continue to apply their own command-specific requirements.
 
 Provision one stable 32-byte OAuth signing Secret before migration. Fence every
 old writer, apply migrations, then run `reset-auth` with migration credentials

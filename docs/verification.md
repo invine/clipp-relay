@@ -49,6 +49,7 @@ The routine profile runs these checks in order and stops at the first failure:
 | `scripts/test-preflight-image-inputs.sh` | Ruby and a Helm subprocess fixture; checks image-input diagnostics. |
 | `scripts/test-isolated-test-chart.py` | Python, Helm and Ruby; temporary chart preparation and initialization fixtures. |
 | `scripts/test-install-metadata.py` | Python, Helm and Ruby; rendered installation metadata / inspection CLI fixtures. |
+| `scripts/test-prepare-isolated-installation.py` | Python, Helm and Ruby; local chart, migration/reset artifact preparation, validator composition and safe resumption. |
 | `scripts/test-verify.py` | Python, Git, Ruby; public command failure propagation, prerequisite and workflow configuration checks. |
 
 The **race** profile runs `go test -race -count=1 ./...` separately. It requires

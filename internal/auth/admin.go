@@ -21,14 +21,15 @@ import (
 	"clipp-relay/internal/portal"
 )
 
-func beginAdminAccessTransaction(op persistence.Operation) (persistence.AccountAccessTransaction, error) {
-	access, ok := any(op).(interface {
-		BeginAccountAccess(context.Context) (persistence.AccountAccessTransaction, error)
-	})
-	if !ok {
+func beginAccountAccessTransaction(op persistence.AccountAccessOperation) (persistence.AccountAccessTransaction, error) {
+	return op.BeginAccountAccess(op.Context())
+}
+
+func (s *Server) startAccountAccess(ctx context.Context) (persistence.AccountAccessOperation, error) {
+	if s.accountAccess == nil {
 		return nil, persistence.ErrUnavailable
 	}
-	return access.BeginAccountAccess(op.Context())
+	return s.accountAccess.StartAccountAccess(ctx)
 }
 
 var idPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -37,6 +38,7 @@ type adminIdentity struct {
 	id, email, csrf string
 	revision        uint64
 	version         uint64
+	generation      int64
 }
 
 type adminFormErrorKey struct{}
@@ -91,7 +93,7 @@ func uncertainResponse(w http.ResponseWriter) {
 
 func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation bool) (adminIdentity, bool) {
 	var actor adminIdentity
-	id, version, _, _, csrf, err := s.session(r)
+	ownerSession, err := s.ownerPortalSession(r)
 	if err != nil {
 		if errors.Is(err, errInvalidSession) {
 			markDiagnostic(r, "refused", "not_authorized")
@@ -104,6 +106,7 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 		}
 		return actor, false
 	}
+	id, version, csrf := ownerSession.accountID, ownerSession.pepperVersion, ownerSession.csrf
 	policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile)
 	if err != nil {
 		markDiagnostic(r, "refused", "not_authorized")
@@ -115,14 +118,14 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 	if s.beforeAdminDetailsRead != nil {
 		s.beforeAdminDetailsRead()
 	}
-	op, err := s.persistence.Start(r.Context())
+	op, err := s.startAccountAccess(r.Context())
 	if err != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return actor, false
 	}
 	defer op.Close()
-	authTx, err := beginAdminAccessTransaction(op)
+	authTx, err := beginAccountAccessTransaction(op)
 	if err != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
@@ -172,7 +175,7 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 			return actor, false
 		}
 	}
-	actor = adminIdentity{id: id, email: strings.ToLower(strings.TrimSpace(adminSession.Email)), csrf: csrf, revision: policy.Revision, version: version}
+	actor = adminIdentity{id: id, email: strings.ToLower(strings.TrimSpace(adminSession.Email)), csrf: csrf, revision: policy.Revision, version: version, generation: ownerSession.generation}
 	return actor, true
 }
 
@@ -190,6 +193,23 @@ func (s *Server) recheckAdministrator(w http.ResponseWriter, tx persistence.Acco
 	if err != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		return 503
+	}
+	cookie, cookieErr := r.Cookie(sessionCookie)
+	if cookieErr != nil {
+		markDiagnostic(r, "refused", "not_authorized")
+		return 401
+	}
+	if _, err = s.verifyOwnerPortalSessionInTransaction(r.Context(), tx, cookie.Value, actor.id, actor.version, actor.generation); err != nil {
+		switch {
+		case errors.Is(err, errRateLimit):
+			return 429
+		case errors.Is(err, errInvalidSession), errors.Is(err, errInvalidPortalSessionCSRF):
+			markDiagnostic(r, "refused", "not_authorized")
+			return 401
+		default:
+			markDiagnostic(r, "failed", "database_unavailable")
+			return 503
+		}
 	}
 	if !session.Recent {
 		markDiagnostic(r, "refused", "recent_auth_required")
@@ -439,12 +459,12 @@ func planRequestDigest(actorID, name, reason string, bytes, sessions int64) [32]
 }
 
 func (s *Server) planCreateCommitted(ctx context.Context, id string, digest [32]byte) bool {
-	op, err := s.persistence.Start(ctx)
+	op, err := s.startAccountAccess(ctx)
 	if err != nil {
 		return false
 	}
 	defer op.Close()
-	tx, err := beginAdminAccessTransaction(op)
+	tx, err := beginAccountAccessTransaction(op)
 	if err != nil {
 		return false
 	}
@@ -697,13 +717,13 @@ func (s *Server) adminPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	op, e := s.persistence.Start(ctx)
+	op, e := s.startAccountAccess(ctx)
 	if e != nil {
 		unavailable()
 		return
 	}
 	defer op.Close()
-	tx, e := beginAdminAccessTransaction(op)
+	tx, e := beginAccountAccessTransaction(op)
 	if e != nil {
 		unavailable()
 		return
@@ -778,13 +798,13 @@ func (s *Server) adminArchivePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	op, e := s.persistence.Start(ctx)
+	op, e := s.startAccountAccess(ctx)
 	if e != nil {
 		unavailable()
 		return
 	}
 	defer op.Close()
-	tx, e := beginAdminAccessTransaction(op)
+	tx, e := beginAccountAccessTransaction(op)
 	if e != nil {
 		unavailable()
 		return

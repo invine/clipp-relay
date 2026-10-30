@@ -21,8 +21,6 @@ type Quota struct {
 	beforeCommit        func(context.Context, persistence.AccountingTransaction) error
 	afterCommit         func() error
 	periodic            periodicAccounting
-	settlementMu        sync.Mutex
-	settlements         map[settlementKey]*settlementState
 	accounting          persistence.Accounting
 	diagnostics         *diagnostic.Logger
 	clock               clockState
@@ -133,8 +131,8 @@ func (q *Quota) Close() {
 	}
 }
 
-// NewOperationID produces a cryptographically random stable operation identifier.
-func NewOperationID() (string, error) {
+// newOperationID produces a cryptographically random stable operation identifier.
+func newOperationID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err

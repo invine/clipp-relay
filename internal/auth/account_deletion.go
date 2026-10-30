@@ -45,7 +45,7 @@ func (s *Server) admitAccountDeletion(r *http.Request) accountDeletionOutcome {
 	if s.deletionJournal == nil || s.deletionRepository == "" {
 		return failedAccountDeletion(http.StatusServiceUnavailable, "journal_unavailable")
 	}
-	id, version, _, _, csrf, err := s.session(r)
+	ownerSession, err := s.ownerPortalSession(r)
 	if err != nil {
 		switch {
 		case errors.Is(err, errRateLimit):
@@ -56,6 +56,7 @@ func (s *Server) admitAccountDeletion(r *http.Request) accountDeletionOutcome {
 			return failedAccountDeletion(http.StatusUnauthorized, "database_unavailable")
 		}
 	}
+	id, csrf, version := ownerSession.accountID, ownerSession.csrf, ownerSession.pepperVersion
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
 		return refusedAccountDeletion(http.StatusForbidden, "csrf_rejected")
 	}

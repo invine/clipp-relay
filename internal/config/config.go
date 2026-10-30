@@ -391,6 +391,19 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// ValidateServing checks static requirements for the relay serving process.
+// It deliberately does not read referenced Secret files or inspect external
+// database, journal or listener readiness.
+func (c Config) ValidateServing() error {
+	if c.RelayTCP.Listen == "" && c.RelayWebSocket.Listen == "" && c.RelayWebRTC.Listen == "" {
+		return errors.New("serving requires at least one relay listener")
+	}
+	if c.Journal.Region == "" {
+		return errors.New("serving requires a configured Recovery Journal")
+	}
+	return nil
+}
+
 func dnsLabel(s string) bool {
 	return len(s) > 0 && len(s) <= 63 && hostname(s) && !strings.Contains(s, ".")
 }

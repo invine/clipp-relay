@@ -24,8 +24,9 @@ type AccountAuthorization struct {
 // PortalSessionForConsent is the minimal browser-session projection required
 // to approve native-client consent.
 type PortalSessionForConsent struct {
-	Generation int64
-	CSRFHash   []byte
+	AccountID, Subject string
+	Generation         int64
+	CSRFHash           []byte
 }
 
 // AuthorizationCodeOwner is a preliminary identity observation. The caller
@@ -57,6 +58,20 @@ type AuthorizationTransaction interface {
 	DeleteRelayAccessToken(context.Context, [32]byte) error
 	CurrentRefreshGeneration(context.Context, string) (int64, error)
 	StoreRefreshGeneration(context.Context, [32]byte, string, int64) error
+}
+
+// AuthorizationOperation declares the persistence needed by native
+// authorization flows. It retains admission from Start through Close while
+// allowing the workflow to begin its own authoritative transaction.
+type AuthorizationOperation interface {
+	Context() context.Context
+	Close()
+	BeginAuthorization(context.Context) (AuthorizationTransaction, error)
+}
+
+// AuthorizationWork admits complete native authorization operations.
+type AuthorizationWork interface {
+	StartAuthorization(context.Context) (AuthorizationOperation, error)
 }
 
 // PortalAuthorizationSession includes the account fields required to authorize

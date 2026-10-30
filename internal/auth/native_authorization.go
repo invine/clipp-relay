@@ -13,7 +13,7 @@ import (
 // nativeAuthorizationCodeToken performs preliminary identity discovery under
 // operation admission, releases the read transaction before waiting for the
 // account identity guard, then rechecks authority in one credential transaction.
-func (s *Server) commitAuthorizationTx(ctx context.Context, tx persistence.Transaction) error {
+func (s *Server) commitAuthorizationTx(ctx context.Context, tx persistence.AuthorizationTransaction) error {
 	if s.commitAuthorization != nil {
 		return s.commitAuthorization(ctx, tx)
 	}
@@ -21,19 +21,19 @@ func (s *Server) commitAuthorizationTx(ctx context.Context, tx persistence.Trans
 }
 
 func (s *Server) nativeAuthorizationCodeToken(w http.ResponseWriter, r *http.Request, client issuer.ClientType, raw string, digest [32]byte) {
-	op, err := s.persistence.Start(r.Context())
+	op, err := s.authorization.StartAuthorization(r.Context())
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
 	defer op.Close()
 
-	lookupTx, authorizationTx, err := beginAuthorizationTransaction(op)
+	lookupTx, err := beginAuthorizationTransaction(op)
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	owner, err := authorizationTx.AuthorizationCodeOwner(op.Context(), digest)
+	owner, err := lookupTx.AuthorizationCodeOwner(op.Context(), digest)
 	if errors.Is(err, persistence.ErrInvalidCredential) {
 		_ = lookupTx.Rollback(op.Context())
 		s.oauthError(w, http.StatusUnauthorized)
@@ -60,13 +60,13 @@ func (s *Server) nativeAuthorizationCodeToken(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	tx, authorizationTx, err := beginAuthorizationTransaction(op)
+	tx, err := beginAuthorizationTransaction(op)
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
 	defer tx.Rollback(op.Context())
-	account, err := authorizationTx.LockAccountAuthorization(op.Context(), owner.AccountID)
+	account, err := tx.LockAccountAuthorization(op.Context(), owner.AccountID)
 	if errors.Is(err, persistence.ErrInvalidCredential) {
 		s.oauthError(w, http.StatusUnauthorized)
 		return
@@ -80,13 +80,13 @@ func (s *Server) nativeAuthorizationCodeToken(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	activeGrants, err := authorizationTx.CountActiveLoginGrants(op.Context(), owner.AccountID, account.Generation)
+	activeGrants, err := tx.CountActiveLoginGrants(op.Context(), owner.AccountID, account.Generation)
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
 	if activeGrants >= 20 {
-		if err := authorizationTx.RecordCredentialAudit(op.Context(), "grant_cap", owner.AccountID, string(client)); err != nil {
+		if err := tx.RecordCredentialAudit(op.Context(), "grant_cap", owner.AccountID, string(client)); err != nil {
 			s.oauthError(w, http.StatusServiceUnavailable)
 			return
 		}
@@ -100,7 +100,7 @@ func (s *Server) nativeAuthorizationCodeToken(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	requestContext := issuer.InAuthorizationTransaction(op.Context(), authorizationTx, client, raw)
+	requestContext := issuer.InAuthorizationTransaction(op.Context(), tx, client, raw)
 	accessRequest, err := s.nativeIssuer.NewAccessRequest(requestContext, r, &fosite.DefaultSession{})
 	if err != nil {
 		if errors.Is(err, fosite.ErrServerError) {

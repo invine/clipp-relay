@@ -48,10 +48,10 @@ type PortalSessionOwner struct {
 	CSRFHash                          []byte
 }
 
-// AccountTransaction expresses the complete repository operations required by
-// Google registration and Portal Session workflows. All writes participate in
-// the caller-owned transaction.
-type AccountTransaction interface {
+// AccountRegistrationTransaction expresses the persistence required by one
+// complete Google registration. All writes participate in the caller-owned
+// transaction, including creation of the initial Portal Session.
+type AccountRegistrationTransaction interface {
 	Transaction
 	UpsertRelayAccount(context.Context, AccountRegistration) (RegisteredAccount, error)
 	AccountStateAfterUncertain(context.Context, string, string) (AccountStateAfterUncertain, error)
@@ -61,7 +61,40 @@ type AccountTransaction interface {
 	RetainedUsageForIdentity(context.Context, uint64, [32]byte, time.Time) (RetainedUsageRecord, bool, error)
 	ImportRetainedUsage(context.Context, string, RetainedUsageRecord) error
 	CreatePortalSession(context.Context, [32]byte, uint64, string, int64, [32]byte) error
+}
+
+// PortalSessionTransaction is the narrow persistence view used by ordinary
+// Portal Session validation and logout.
+type PortalSessionTransaction interface {
+	Transaction
 	PortalSessionForOwner(context.Context, [32]byte, uint64) (PortalSessionOwner, error)
 	TouchPortalSession(context.Context, [32]byte, uint64, string, int64) (bool, error)
 	DeletePortalSession(context.Context, [32]byte, uint64) (bool, error)
+}
+
+// AccountTransaction is retained for workflows being migrated in later
+// tickets. New callers should request the capability they consume.
+type AccountTransaction interface {
+	AccountRegistrationTransaction
+	PortalSessionTransaction
+}
+
+type AccountRegistrationOperation interface {
+	Context() context.Context
+	BeginAccountRegistration(context.Context) (AccountRegistrationTransaction, error)
+	Close()
+}
+
+type AccountRegistrationWork interface {
+	StartAccountRegistration(context.Context) (AccountRegistrationOperation, error)
+}
+
+type PortalSessionOperation interface {
+	Context() context.Context
+	BeginPortalSession(context.Context) (PortalSessionTransaction, error)
+	Close()
+}
+
+type PortalSessionWork interface {
+	StartPortalSession(context.Context) (PortalSessionOperation, error)
 }

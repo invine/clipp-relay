@@ -52,11 +52,11 @@ func (s *Server) changeAdminAccount(r *http.Request, actor adminIdentity, target
 		s.beforeAccountActionGuard()
 	}
 	if spec.security {
-		preflight, err := s.persistence.Start(r.Context())
+		preflight, err := s.startAccountAccess(r.Context())
 		if err != nil {
 			return failedAdminAccount(http.StatusServiceUnavailable, "database_unavailable")
 		}
-		preflightTx, err := beginAdminAccessTransaction(preflight)
+		preflightTx, err := beginAccountAccessTransaction(preflight)
 		if err != nil {
 			preflight.Close()
 			return failedAdminAccount(http.StatusServiceUnavailable, "database_unavailable")
@@ -143,12 +143,12 @@ func adminGuardFailure(err error) adminAccountOutcome {
 }
 
 func (s *Server) applyAdminAccountMutation(ctx context.Context, r *http.Request, actor adminIdentity, target string, expected int64, action string, spec accountActionSpec, plan string) (outcome adminAccountOutcome) {
-	op, err := s.persistence.Start(ctx)
+	op, err := s.startAccountAccess(ctx)
 	if err != nil {
 		return failedAdminAccount(http.StatusServiceUnavailable, "")
 	}
 	defer op.Close()
-	tx, err := beginAdminAccessTransaction(op)
+	tx, err := beginAccountAccessTransaction(op)
 	if err != nil {
 		return failedAdminAccount(http.StatusServiceUnavailable, "")
 	}
@@ -166,6 +166,19 @@ func (s *Server) applyAdminAccountMutation(ctx context.Context, r *http.Request,
 		return refusedAdminAccount(http.StatusUnauthorized, "not_authorized")
 	}
 	if err != nil {
+		return failedAdminAccount(http.StatusServiceUnavailable, "database_unavailable")
+	}
+	cookie, cookieErr := r.Cookie(sessionCookie)
+	if cookieErr != nil {
+		return refusedAdminAccount(http.StatusUnauthorized, "not_authorized")
+	}
+	if _, err = s.verifyOwnerPortalSessionInTransaction(op.Context(), tx, cookie.Value, actor.id, actor.version, actor.generation); err != nil {
+		if errors.Is(err, errRateLimit) {
+			return refusedAdminAccount(http.StatusTooManyRequests, "rate_limited")
+		}
+		if errors.Is(err, errInvalidSession) || errors.Is(err, errInvalidPortalSessionCSRF) {
+			return refusedAdminAccount(http.StatusUnauthorized, "not_authorized")
+		}
 		return failedAdminAccount(http.StatusServiceUnavailable, "database_unavailable")
 	}
 	if !actorSession.Recent {

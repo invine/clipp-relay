@@ -74,3 +74,10 @@ type AccountAccessOperation interface {
 	BeginAccountAccess(context.Context) (AccountAccessTransaction, error)
 	Close()
 }
+
+// AccountAccessWork admits protected administrator and owner account-access
+// operations. The capability is explicit so these workflows do not discover
+// transaction support after admission.
+type AccountAccessWork interface {
+	StartAccountAccess(context.Context) (AccountAccessOperation, error)
+}

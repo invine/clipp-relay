@@ -59,14 +59,14 @@ func TestOfflineRecoveryPreservesReceiptsInvalidatesCredentialsAndIsIdempotent(t
 	oldCode := authorizeClient(t, s, cookie, "android", c.PublicClients.AndroidRedirect)
 	q := newQuota(db.Pool)
 	defer q.Close()
-	op, _ := quota.NewOperationID()
+	op, _ := testOperationID()
 	if _, err := db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,12345,1,$2,12345)`, id, op); err != nil {
 		t.Fatal(err)
 	}
 	zero := strings.Repeat("0", 64)
 	j := &deletionJournalFixture{head: auth.JournalHead{RepositoryID: "recovery-fixture", CoverageHash: zero, Hash: zero, Format: 1}, etag: "initial", events: map[string][]byte{}}
 	s.SetDeletionJournal(j, "recovery-fixture", 0, zero)
-	run, _ := quota.NewOperationID()
+	run, _ := testOperationID()
 	request := auth.RecoveryRequest{RunID: run, Source: "isolated-backup", Target: c.Database.Name}
 	s.SetRecoveryCommitHookForTest(func(ctx context.Context, tx persistence.RecoveryTransaction) error {
 		if err := tx.Commit(ctx); err != nil {
@@ -174,10 +174,7 @@ func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t
 	}
 	week := time.Now().UTC()
 	week = time.Date(week.Year(), week.Month(), week.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -((int(week.Weekday()) + 6) % 7))
-	op, _ := quota.NewOperationID()
-	if _, err = p.quota.Settle(ctx, quota.Settlement{AccountID: p.account, WeekStart: week, OperationID: op, Sequence: 1, DeltaBytes: 12345}); err != nil {
-		t.Fatal(err)
-	}
+	observeAndConfirm(t, p, 12345)
 	// Snapshot rows to memory as a logical local restore fixture. The independent
 	// journal deliberately remains outside this restored snapshot.
 	backup := map[string][]byte{}
@@ -222,7 +219,7 @@ func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t
 			t.Fatal(err)
 		}
 	}
-	run, _ := quota.NewOperationID()
+	run, _ := testOperationID()
 	request := auth.RecoveryRequest{RunID: run, Source: "predelete-backup", Target: c.Database.Name}
 	// A valid orphan at the committed sequence is independently uploaded but
 	// absent from the head-linked path. It must never erase a surviving UUID.
@@ -252,7 +249,7 @@ func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t
 		t.Fatal(err)
 	}
 	event.AccountID = survivor
-	event.EventID, _ = quota.NewOperationID()
+	event.EventID, _ = testOperationID()
 	event.Hash = ""
 	bare, _ := json.Marshal(event)
 	sum := sha256.Sum256(bare)
@@ -323,7 +320,7 @@ func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t
 	}
 	// A later recovery sees the same old immutable UUID, and cannot erase the new
 	// registration even though its external identity is identical.
-	request.RunID, _ = quota.NewOperationID()
+	request.RunID, _ = testOperationID()
 	if err = offline.RecoverOffline(ctx, request); err != nil {
 		t.Fatal(err)
 	}
@@ -331,8 +328,8 @@ func TestOfflineRecoveryRestoredOldUUIDCannotResurrectOrDebitFreshRegistration(t
 		t.Fatalf("fresh UUID deleted by old journal: %v", err)
 	}
 	_ = fresh
-	if _, err = p.quota.Settle(ctx, quota.Settlement{AccountID: p.account, WeekStart: week, OperationID: op, Sequence: 1, DeltaBytes: 12345}); err != quota.ErrUsageRetired {
-		t.Fatalf("old receipt revived: %v", err)
+	if _, err = p.quota.RecordedUsage(ctx, p.account, week); err != quota.ErrUsageRetired {
+		t.Fatalf("old account usage remained writable: %v", err)
 	}
 }
 

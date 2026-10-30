@@ -106,7 +106,8 @@ ON CONFLICT (account_id,week_start) DO UPDATE SET recorded_bytes=EXCLUDED.record
 	}()
 	defer identity.Shutdown(context.Background())
 	runtime := database.NewRuntime(pool)
-	dependencies := auth.Dependencies{Work: postgres.New(runtime), Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}
+	work := postgres.New(runtime)
+	dependencies := auth.Dependencies{Work: work, AccountRegistration: work, PortalSessions: work, Authorization: work, Refresh: work, AccountAccess: work, Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}
 	portal := auth.New(dependencies, c, m, auth.Provider{AuthorizationURL: "http://127.0.0.1:18444/authorize", TokenURL: "http://127.0.0.1:18444/token", KeysURL: "http://127.0.0.1:18444/keys"})
 	portal.SetDiagnostics(diagnostic.New(os.Stdout))
 	// The fixture has no live relay session manager; install the explicit

@@ -5,37 +5,23 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"clipp-relay/internal/quota"
 )
 
 func TestObservedOwnerAndAdminShowConfirmedUsageAndHistory(t *testing.T) {
 	p := protectedPortalFixture(t)
 	ctx := context.Background()
-	op, err := quota.NewOperationID()
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now().UTC()
 	week := now.AddDate(0, 0, -(int(now.Weekday())+6)%7)
 	week = time.Date(week.Year(), week.Month(), week.Day(), 0, 0, 0, 0, time.UTC)
-	if _, err = p.quota.Settle(ctx, quota.Settlement{AccountID: p.account, WeekStart: week, OperationID: op, Sequence: 1, DeltaBytes: 12345}); err != nil {
+	observeAndConfirm(t, p, 12345)
+	seedRecordedWeek(t, p, week.AddDate(0, 0, -7), 54321)
+	if _, err := p.quota.Eligibility(ctx, p.account); err != nil {
 		t.Fatal(err)
 	}
-	previous, err := quota.NewOperationID()
-	if err != nil {
+	if _, err := p.runtime.Pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=1000 WHERE id=$1`, p.account); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = p.quota.Settle(ctx, quota.Settlement{AccountID: p.account, WeekStart: week.AddDate(0, 0, -7), OperationID: previous, Sequence: 1, DeltaBytes: 54321}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = p.quota.Eligibility(ctx, p.account); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = p.runtime.Pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=1000 WHERE id=$1`, p.account); err != nil {
-		t.Fatal(err)
-	}
-	if err = p.quota.Observe(p.account, 10000); err != nil {
+	if err := p.quota.Observe(p.account, 10000); err != nil {
 		t.Fatal(err)
 	}
 	for _, view := range []struct {

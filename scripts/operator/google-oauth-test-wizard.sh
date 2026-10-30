@@ -830,21 +830,81 @@ release_status() {
     puts(matches.empty? ? "absent" : matches.fetch(0).fetch("status"))
   ' "$CLIPP_TEST_RELEASE"
 }
-release_phase() {
-  helm --kube-context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get values "$CLIPP_TEST_RELEASE" -o json | ruby -rjson -e '
-    values = JSON.parse(STDIN.read)
-    deployment = values.fetch("deployment")
-    database = values.fetch("database").fetch("bundled")
-    puts [deployment.fetch("phase"), deployment.fetch("runId", ""), database.fetch("initialize")].join("|")
-  '
-}
 # Explicitly approved isolated-test profile; canonical chart and values stay intact.
 source_chart_dir="$chart_dir"
-chart_dir=$(mktemp -d $WORK_DIR/clipp-relay-300m-chart.XXXXXX)
-python3 "$CLIPP_TEST_GO_REPO/scripts/prepare-isolated-test-chart.py" "$source_chart_dir" "$chart_dir"
-[[ $? == 0 ]] || die "Could not prepare the approved 300m isolated test chart."
+if [[ -z "$db_run_id" ]]; then
+  db_run_id=$(openssl rand -hex 4) || die "Could not create the local installation run ID."
+  write_env CLIPP_TEST_DB_RUN_ID "$db_run_id"
+fi
+require_match "database run ID" "$db_run_id" '^[a-f0-9]{8}$'
+[[ ${#CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME} -gt 0 ]] || die "Native OAuth signing Secret name is missing."
+deployment_dir="$TEST_DIR/deployment"
+prepared_installation=$(python3 "$CLIPP_TEST_GO_REPO/scripts/prepare-isolated-installation.py" \
+  --repo "$CLIPP_TEST_GO_REPO" --work-dir "$WORK_DIR" --deployment-dir "$deployment_dir" \
+  --source-chart "$source_chart_dir" --values "$CLIPP_TEST_VALUES_FILE" --overlay "$letsencrypt_overlay" \
+  --release "$CLIPP_TEST_RELEASE" --namespace "$CLIPP_TEST_NAMESPACE" --run-id "$db_run_id" \
+  --migration-secret "$db_migration_secret" --ca-secret "$db_ca_secret" \
+  --native-secret "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" --install-fingerprint "$install_fingerprint") || die "Could not prepare and validate the isolated installation artifacts."
+chart_dir=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("chart_dir")' <<< "$prepared_installation") || die "Prepared chart identity is invalid."
+migration_manifest=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("migration_manifest")' <<< "$prepared_installation") || die "Prepared migration identity is invalid."
+reset_manifest=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("reset_manifest")' <<< "$prepared_installation") || die "Prepared reset identity is invalid."
+say "Local chart, migration Job and OAuth-reset Job are prepared and runtime configuration was accepted; no cluster changes were made."
 # The original install fingerprint continues identifying the baseline chart/values.
 # The explicit CPU override is checked in generated and installed Pod specifications.
+
+refresh_preparation_observations() {
+  local values_json='{}' bootstrap_json='' bootstrap_pod_json=''
+  local migration_json='' migration_logs='' reset_json='' reset_logs=''
+  local recorded_serving_args=()
+  if [[ "$CLIPP_TEST_KUBE_CONTEXT" == context-couryw6kqaa && "$CLIPP_TEST_NAMESPACE" == relay-portal-test && "$CLIPP_TEST_RELEASE" == clipp-relay-test ]]; then
+    recorded_serving_args=(--recorded-serving-values "$reviewed_serving_values_file"
+      --recorded-serving-values-sha256 "$reviewed_serving_values_sha256")
+  fi
+  current_release_status=$(release_status) || die "Could not refresh the retained Helm release status."
+  if [[ "$current_release_status" == deployed ]]; then
+    values_json=$(helm --kube-context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get values "$CLIPP_TEST_RELEASE" -o json) || die "Could not collect retained release evidence."
+  fi
+  bootstrap_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$pg_sts_name-bootstrap-$db_run_id" --ignore-not-found -o json) || die "Could not collect bootstrap Job evidence."
+  if [[ -n "$bootstrap_json" ]]; then
+    bootstrap_pod_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get pod "$pg_sts_name-0" --ignore-not-found -o json) || die "Could not collect PostgreSQL Pod evidence."
+  fi
+  migration_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$relay_sts_name-migrate-$db_run_id" --ignore-not-found -o json) || die "Could not collect migration Job evidence."
+  if [[ -n "$migration_json" ]] && printf '%s' "$migration_json" | ruby -rjson -e 'exit(JSON.parse(STDIN.read).dig("status", "succeeded") == 1 ? 0 : 1)'; then
+    migration_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$relay_sts_name-migrate-$db_run_id" -c migrate --tail=100 2>/dev/null || true)
+  fi
+  reset_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$relay_sts_name-reset-auth-$db_run_id" --ignore-not-found -o json) || die "Could not collect OAuth reset Job evidence."
+  if [[ -n "$reset_json" ]] && printf '%s' "$reset_json" | ruby -rjson -e 'exit(JSON.parse(STDIN.read).dig("status", "succeeded") == 1 ? 0 : 1)'; then
+    reset_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$relay_sts_name-reset-auth-$db_run_id" -c reset-auth --tail=100 2>/dev/null || true)
+  fi
+  local observation_file="$WORK_DIR/install-observations.json"
+  python3 - "$observation_file" "$CLIPP_TEST_RELEASE" "$CLIPP_TEST_NAMESPACE" "$current_release_status" \
+    "$values_json" "$bootstrap_json" "$bootstrap_pod_json" "$migration_json" "$migration_logs" "$reset_json" "$reset_logs" <<'PY_INSTALL_OBSERVATIONS' || die "Could not record retained installation evidence."
+import json, pathlib, sys
+def optional(value):
+    return json.loads(value) if value.strip() else None
+release, namespace, status = sys.argv[2:5]
+values, bootstrap, pod, migration, migration_logs, reset, reset_logs = sys.argv[5:]
+data = {
+    "release": {"name": release, "namespace": namespace, "status": status, "values": optional(values) or {}},
+    "bootstrap": {"job": optional(bootstrap), "pod": optional(pod)},
+    "jobs": {"migration": optional(migration), "migration_logs": migration_logs.splitlines(),
+             "reset": optional(reset), "reset_logs": reset_logs.splitlines()},
+}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(data, sort_keys=True) + "\n")
+PY_INSTALL_OBSERVATIONS
+  prepared_installation=$(python3 "$CLIPP_TEST_GO_REPO/scripts/prepare-isolated-installation.py" \
+    --repo "$CLIPP_TEST_GO_REPO" --work-dir "$WORK_DIR" --deployment-dir "$deployment_dir" \
+    --source-chart "$source_chart_dir" --values "$CLIPP_TEST_VALUES_FILE" --overlay "$letsencrypt_overlay" \
+    --release "$CLIPP_TEST_RELEASE" --namespace "$CLIPP_TEST_NAMESPACE" --run-id "$db_run_id" \
+    --migration-secret "$db_migration_secret" --ca-secret "$db_ca_secret" \
+    --native-secret "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" --install-fingerprint "$install_fingerprint" \
+    --observations-file "$observation_file" "${recorded_serving_args[@]}") || die "Retained installation evidence does not match the reviewed artifacts."
+  say "Preparation evidence: release=$(preparation_observation release), bootstrap=$(preparation_observation bootstrap), migration=$(preparation_observation migration), reset=$(preparation_observation reset)."
+}
+
+preparation_observation() {
+  ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("observations").fetch(ARGV.fetch(0))' "$1" <<< "$prepared_installation"
+}
 
 assert_minimum_node_cpu() {
   local requirements
@@ -1019,17 +1079,12 @@ wait_for_job_completion() {
     state=$(printf '%s' "$job_json" | ruby -rjson -e '
       job = JSON.parse(STDIN.read)
       status = job.fetch("status", {})
-      if status.fetch("failed", 0).to_i > 0 || status.fetch("conditions", []).any? { |c| c["type"] == "Failed" && c["status"] == "True" }
-        puts "failed"
-      elsif status.fetch("succeeded", 0).to_i == 1
-        puts "complete"
-      else
-        puts "pending"
-      end
+      terminal = status.fetch("succeeded", 0).to_i > 0 || status.fetch("failed", 0).to_i > 0 ||
+        status.fetch("conditions", []).any? { |c| %w[Complete Failed].include?(c["type"]) && c["status"] == "True" }
+      puts(terminal ? "finished" : "pending")
     ') || die "Could not read Job $job_name status."
     case "$state" in
-      complete) say "Job completed: $job_name"; return 0 ;;
-      failed) die "Job $job_name failed. Inspect its Pod and logs; the wizard will not create a replacement automatically." ;;
+      finished) say "Job stopped; the preparation operation will verify its retained identity and completion evidence."; return 0 ;;
     esac
     if (( attempt > 0 && attempt % 12 == 0 )); then say "Still waiting for Job $job_name..."; fi
     sleep 5
@@ -1037,159 +1092,65 @@ wait_for_job_completion() {
   die "Job $job_name did not finish within $max_seconds seconds. Inspect it before rerunning."
 }
 
-verify_recorded_serving_release() {
-  [[ "$current_phase" == serving && "$CLIPP_TEST_KUBE_CONTEXT" == context-couryw6kqaa && "$CLIPP_TEST_NAMESPACE" == relay-portal-test && "$CLIPP_TEST_RELEASE" == clipp-relay-test ]] || die "Installed release values drifted from the reviewed test configuration. Only the recorded serving deployment can resume with newer values."
-  require_file "$reviewed_serving_values_file"
-  local registered_extension_id
-  registered_extension_id=$(printf '%s' "$installed_values_json" | ruby -rjson -rdigest -e '
-    payload = File.binread(ARGV.fetch(0))
-    abort "recorded serving configuration changed; review its deployment receipt" unless Digest::SHA256.hexdigest(payload) == ARGV.fetch(1)
-    expected = JSON.parse(payload)
-    actual = JSON.parse(STDIN.read)
-    unless actual == expected
-      changed = (actual.keys | expected.keys).select { |key| actual[key] != expected[key] }
-      abort "installed values differ from the recorded serving deployment: #{changed.join(", ")}"
-    end
-    abort "recorded deployment is not serving" unless expected.dig("deployment", "phase") == "serving" && expected.dig("deployment", "runId") == "" && expected.dig("database", "bundled", "initialize") == false
-    callback = expected.dig("clients", "extensionRedirect").to_s.match(%r{\Ahttps://([a-p]{32})\.chromiumapp\.org/clipp-relay\z})
-    abort "recorded Chrome callback is invalid" unless callback
-    puts callback[1]
-  ' "$reviewed_serving_values_file" "$reviewed_serving_values_sha256") || die "Installed release values drifted from the recorded serving configuration."
-  # This changes only the in-process expectations for live checks. The original
-  # private values and fingerprint still identify the completed migration Job.
+apply_preparation_release_expectations() {
+  local recorded_serving registered_extension_id
+  recorded_serving=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("observations").fetch("recorded_serving_release")' <<< "$prepared_installation") || die "Preparation did not return a release classification."
+  [[ "$recorded_serving" == true ]] || return 0
+  registered_extension_id=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("observations").fetch("extension_id")' <<< "$prepared_installation") || die "Preparation did not return the verified extension identity."
   CLIPP_TEST_VALUES_FILE="$reviewed_serving_values_file"
   CLIPP_TEST_EXTENSION_ID="$registered_extension_id"
-  say "Verified the recorded serving deployment: Android callback image, current Chrome callback, and public NLBs. Original migration identity is retained."
+  say "Preparation verified the recorded serving deployment; resuming its reviewed live-check values."
 }
 
 verify_installed_release() {
   [[ "$current_release_status" == deployed && "$saved_fingerprint" == "$install_fingerprint" ]] || die "An existing Helm release has unreviewed status or ownership: $current_release_status."
-  IFS='|' read -r current_phase current_run_id current_initialize <<< "$(release_phase)" || die "Could not inspect installed release phase."
-  [[ "$current_phase" == stopped || "$current_phase" == migrating || "$current_phase" == serving ]] || die "Unexpected installed relay phase."
-  installed_values_json=$(helm --kube-context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get values "$CLIPP_TEST_RELEASE" -o json) || die "Could not read the installed release values."
-  if printf '%s' "$installed_values_json" | ruby -ryaml -rjson -e '
-    actual = JSON.parse(STDIN.read)
-    expected = YAML.safe_load(File.read(ARGV.fetch(0)))
-    overlay = YAML.safe_load(File.read(ARGV.fetch(1)))
-    overlay.each { |key, value| expected[key] = expected.fetch(key, {}).merge(value) }
-    expected.fetch("database").fetch("bundled")["initialize"] = (ARGV.fetch(2) == "stopped")
-    %w[image public certificates clients transports database credentials journal oci scheduling].each do |key|
-      exit 1 unless actual[key] == expected[key]
-    end
-  ' "$CLIPP_TEST_VALUES_FILE" "$letsencrypt_overlay" "$current_phase"; then
-    :
-  else
-    verify_recorded_serving_release
-  fi
+  refresh_preparation_observations
+  current_phase=$(preparation_observation release)
+  current_run_id=$(preparation_observation release_run_id)
+  current_initialize=$(preparation_observation release_initialize)
+  [[ "$current_phase" == stopped || "$current_phase" == migrating || "$current_phase" == serving ]] || die "Preparation rejected the retained Helm release phase."
+  apply_preparation_release_expectations
   if [[ "$current_phase" == serving ]]; then
     [[ -z "$current_run_id" && "$current_initialize" == false ]] || die "Serving release retains a migration run ID or first-initialization flag."
   fi
   say "Resuming reviewed release in $current_phase phase."
 }
 verify_completed_bootstrap() {
-  [[ -n "$db_run_id" ]] || die "The saved database run ID is missing; cannot verify the earlier bootstrap."
-  bootstrap_job="$pg_sts_name-bootstrap-$db_run_id"
-  [[ "$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$bootstrap_job" -o jsonpath='{.status.succeeded}')" == 1 ]] || die "The retained PostgreSQL bootstrap Job is not complete."
-  kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get pod "$pg_sts_name-0" -o json | ruby -rjson -e '
-    pod = JSON.parse(STDIN.read)
-    init = pod.dig("spec", "initContainers").find { |c| c["name"] == "initialize" }
-    value = init.fetch("env").find { |e| e["name"] == "CLIPP_INITIALIZE" }
-    abort "serving PostgreSQL Pod still permits first initialization" unless value.fetch("value") == "false"
-  ' || die "PostgreSQL Pod did not adopt the safe serving template."
+  refresh_preparation_observations
+  [[ "$(preparation_observation bootstrap)" == completed ]] || die "Preparation did not verify the retained PostgreSQL bootstrap Job and safe Pod template."
   say "Verified the retained PostgreSQL bootstrap Job."
 }
 verify_completed_migration() {
-migration_job_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$migration_job" -o json) || die "Completed migration Job is missing."
-printf '%s' "$migration_job_json" | ruby -rjson -e '
-  job = JSON.parse(STDIN.read)
-  abort "migration Job belongs to another setup" unless job.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint") == ARGV.fetch(0)
-  abort "migration Job did not succeed exactly once" unless job.dig("status", "succeeded") == 1
-  container = job.dig("spec", "template", "spec", "containers", 0)
-  abort "migration Job CPU request differs from the approved 300m" unless container.dig("resources", "requests", "cpu") == "300m"
-  abort "migration Job image or command changed" unless container["image"] == ARGV.fetch(1) && container["args"] == ["-command", "migrate", "-config", "/etc/clipp/config.json"]
-  volumes = job.dig("spec", "template", "spec", "volumes")
-  abort "migration Job Secret mounts changed" unless volumes.find { |v| v["name"] == "db" }.dig("secret", "secretName") == ARGV.fetch(2) && volumes.find { |v| v["name"] == "db-ca" }.dig("secret", "secretName") == ARGV.fetch(3)
-' "$install_fingerprint" "$(ruby -ryaml -e 'v=YAML.safe_load(File.read(ARGV[0])); i=v.fetch("image"); puts "#{i.fetch("repository")}@#{i.fetch("digest")}"' "$migration_values_file")" "$db_migration_secret" "$db_ca_secret" || die "Completed migration Job identity differs from the reviewed chart."
-migration_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$migration_job" -c migrate --tail=100) || die "Could not verify the completed migration log."
-printf '%s\n' "$migration_logs" | ruby -rjson -e '
-  records = STDIN.each_line.map { |line| JSON.parse(line) rescue nil }.compact
-  abort "migration revision 16 completion record missing" unless records.any? { |r| r["event"] == "service.startup" && r["outcome"] == "success" && r["schema_revision"] == 16 }
-' || die "Migration completion or schema revision could not be verified."
+refresh_preparation_observations
+[[ "$(preparation_observation migration)" == completed ]] || die "Preparation did not verify a completed migration Job and revision 16 record."
 say "The migration Job completed and reported schema revision 16."
 }
 
 verify_completed_native_reset() {
-  reset_job_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$reset_job" -o json) || die "Completed native OAuth reset Job is missing."
-  printf '%s' "$reset_job_json" | ruby -rjson -e '
-    job = JSON.parse(STDIN.read)
-    abort "reset Job belongs to another setup" unless job.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint") == ARGV.fetch(0)
-    abort "reset Job did not succeed exactly once" unless job.dig("status", "succeeded") == 1
-    container = job.dig("spec", "template", "spec", "containers", 0)
-    abort "reset Job image or command changed" unless container["image"] == ARGV.fetch(1) && container["args"] == ["-command", "reset-auth", "-config", "/etc/clipp/config.json"]
-    volumes = job.dig("spec", "template", "spec", "volumes")
-    native = volumes.find { |v| v["name"] == "native-oauth" }
-    abort "reset Job signing Secret differs" unless native&.dig("secret", "secretName") == ARGV.fetch(2)
-  ' "$install_fingerprint" "$(ruby -rjson -e 'j=JSON.parse(STDIN.read); puts j.dig("spec","template","spec","containers",0,"image")' <<< "$migration_job_json")" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" || die "Completed native OAuth reset Job identity differs from the reviewed configuration."
-  reset_logs=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" logs "job/$reset_job" -c reset-auth --tail=100) || die "Could not verify the completed native OAuth reset log."
-  printf '%s\n' "$reset_logs" | ruby -rjson -e '
-    records = STDIN.each_line.map { |line| JSON.parse(line) rescue nil }.compact
-    abort "native OAuth reset completion record missing" unless records.any? { |r| r["event"] == "service.startup" && r["outcome"] == "success" && r["schema_revision"] == 16 }
-  ' || die "Native OAuth reset completion could not be verified."
+  refresh_preparation_observations
+  [[ "$(preparation_observation reset)" == completed ]] || die "Preparation did not verify a completed native OAuth reset Job and revision 16 record."
   say "The native OAuth reset Job completed and reported schema revision 16."
 }
 
 run_native_reset_job() {
   reset_job="$relay_sts_name-reset-auth-$db_run_id"
   [[ -n "$db_run_id" && ${#reset_job} -le 63 ]] || die "Saved reset run ID is missing or Job name is too long."
-  deployment_dir="$TEST_DIR/deployment"
-  [[ ! -L "$deployment_dir" ]] || die "Deployment working directory cannot be a symbolic link."
-  mkdir -p "$deployment_dir"
-  chmod 700 "$deployment_dir"
-  migration_manifest="$deployment_dir/$migration_job.json"
-  [[ ! -L "$migration_manifest" && -s "$migration_manifest" ]] || die "The reviewed migration Job manifest is unavailable for reset preparation."
-  reset_manifest="$deployment_dir/$reset_job.json"
-  [[ ! -L "$reset_manifest" ]] || die "Reset manifest path cannot be a symbolic link."
-  generated_reset_manifest=$(mktemp "$deployment_dir/.reset.XXXXXX")
-  chmod 600 "$generated_reset_manifest"
-  python3 - "$migration_manifest" "$generated_reset_manifest" "$reset_job" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" <<'PY_RESET_MANIFEST' || die "Could not prepare the reset Job."
-import json, sys
-source, target, name, secret = sys.argv[1:]
-with open(source, encoding='utf-8') as f:
-    job = json.load(f)
-job['metadata']['name'] = name
-job['spec']['template']['spec']['containers'][0]['name'] = 'reset-auth'
-job['spec']['template']['spec']['containers'][0]['args'] = ['-command', 'reset-auth', '-config', '/etc/clipp/config.json']
-job['spec']['template']['spec']['containers'][0]['volumeMounts'].append({'name':'native-oauth','mountPath':'/run/secrets/native-oauth','readOnly':True})
-job['spec']['template']['spec']['volumes'].append({'name':'native-oauth','secret':{'secretName':secret,'items':[{'key':'signing-key','path':'signing-key'}]}})
-with open(target, 'x', encoding='utf-8') as f:
-    json.dump(job, f, indent=2)
-    f.write('\n')
-PY_RESET_MANIFEST
-  if [[ -e "$reset_manifest" ]]; then
-    cmp -s "$generated_reset_manifest" "$reset_manifest" || die "Saved reset Job differs from the reviewed configuration."
-    rm "$generated_reset_manifest"
-  else
-    mv "$generated_reset_manifest" "$reset_manifest" || die "Could not save the reset Job manifest."
-  fi
-  reset_job_name=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$reset_job" --ignore-not-found -o name) || die "Could not inspect the reset Job name."
-  if [[ -z "$reset_job_name" ]]; then
+  [[ "$reset_manifest" == "$deployment_dir/$reset_job.json" ]] || die "Prepared reset Job path differs from the saved installation identity."
+  [[ ! -L "$reset_manifest" && -s "$reset_manifest" ]] || die "Prepared reset Job manifest is unavailable."
+  refresh_preparation_observations
+  reset_state=$(preparation_observation reset)
+  case "$reset_state" in
+  missing)
     say "The reset Job uses the migration identity and the dedicated native signing Secret; it does not mount Google, admin or pepper material."
     confirm "Create and run native OAuth credential reset Job $reset_job in this test namespace?" || die "Serving transition was not started."
     kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create -f "$reset_manifest" || die "Reset Job creation failed; inspect the namespace before retrying."
-  else
-    existing_reset=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$reset_job" -o json) || die "Existing reset Job is unavailable."
-    printf '%s' "$existing_reset" | ruby -rjson -e '
-      actual = JSON.parse(STDIN.read)
-      expected = JSON.parse(File.read(ARGV.fetch(0)))
-      abort "existing reset Job belongs to another setup" unless actual.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint") == expected.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint")
-      a = actual.dig("spec", "template", "spec")
-      e = expected.dig("spec", "template", "spec")
-      abort "existing reset Job image or command differs" unless a.dig("containers", 0, "image") == e.dig("containers", 0, "image") && a.dig("containers", 0, "args") == e.dig("containers", 0, "args")
-      abort "existing reset Job Secret references differ" unless %w[db db-ca native-oauth].all? { |name| a.fetch("volumes").find { |v| v["name"] == name }.dig("secret", "secretName") == e.fetch("volumes").find { |v| v["name"] == name }.dig("secret", "secretName") }
-      abort "existing reset Job failed" if actual.dig("status", "failed").to_i > 0
-    ' "$reset_manifest" || die "Existing reset Job cannot be reused."
+    ;;
+  pending|incomplete|completed)
     say "Reusing the same reviewed reset Job; no second Job was created."
-  fi
+    ;;
+  failed) die "Preparation reports that the retained reset Job failed." ;;
+  *) die "Preparation returned an unsupported reset Job state: $reset_state" ;;
+  esac
   wait_for_job_completion "$reset_job" 2400
   verify_completed_native_reset
 }
@@ -1294,76 +1255,22 @@ if [[ "$current_phase" == serving ]]; then
   say "The release is already serving; verifying its retained migration Job before live checks."
 else
   assert_old_relay_absent
-  deployment_dir="$TEST_DIR/deployment"
-  [[ ! -L "$deployment_dir" ]] || die "Deployment working directory cannot be a symbolic link."
-  mkdir -p "$deployment_dir"
-  chmod 700 "$deployment_dir"
-  migration_manifest="$deployment_dir/$migration_job.json"
-  [[ ! -L "$migration_manifest" ]] || die "Migration manifest path cannot be a symbolic link."
-  generated_manifest=$(mktemp "$deployment_dir/.migration.XXXXXX")
-  chmod 600 "$generated_manifest"
-    helm template "$CLIPP_TEST_RELEASE" "$chart_dir" -n "$CLIPP_TEST_NAMESPACE" -f "$CLIPP_TEST_VALUES_FILE" -f "$letsencrypt_overlay" --set deployment.phase=migrating --set-string deployment.runId="$db_run_id" --set database.bundled.initialize=false | ruby -ryaml -rjson -e '
-      release, namespace, job_name, migration_secret, ca_secret, fingerprint = ARGV
-      docs = YAML.load_stream(STDIN.read).compact
-      name = "#{release}-clipp-relay"
-      sts = docs.find { |d| d["kind"] == "StatefulSet" && d.dig("metadata", "name") == name }
-      abort "rendered relay StatefulSet missing" unless sts
-      pod = sts.dig("spec", "template", "spec")
-      base = pod.fetch("containers").find { |c| c["name"] == "relay" }
-      abort "rendered relay container missing" unless base
-      migration_resources = Marshal.load(Marshal.dump(base.fetch("resources")))
-      migration_resources.fetch("requests")["cpu"] = "300m"
-      volumes = pod.fetch("volumes")
-      config = volumes.find { |v| v["name"] == "config" }
-      ca = volumes.find { |v| v["name"] == "db-ca" }
-      abort "rendered config or CA mount missing" unless config && ca && ca.dig("secret", "secretName") == ca_secret
-      mounts = base.fetch("volumeMounts").select { |m| %w[config db db-ca].include?(m["name"]) }
-      abort "migration mount paths differ from the relay contract" unless mounts.map { |m| m["name"] }.sort == %w[config db db-ca] && mounts.find { |m| m["name"] == "db" }["mountPath"] == "/run/secrets/db"
-      db = {"name" => "db", "secret" => {"secretName" => migration_secret, "items" => [{"key" => "username", "path" => "username"}, {"key" => "password", "path" => "password"}]}}
-      job = {
-        "apiVersion" => "batch/v1", "kind" => "Job",
-        "metadata" => {"name" => job_name, "namespace" => namespace,
-          "labels" => {"app.kubernetes.io/name" => "clipp-relay-migration", "app.kubernetes.io/instance" => release},
-          "annotations" => {"clipp-relay-test/install-fingerprint" => fingerprint}},
-        "spec" => {"backoffLimit" => 0, "activeDeadlineSeconds" => 2400,
-          "template" => {"metadata" => {"labels" => {"app.kubernetes.io/name" => "clipp-relay-migration", "app.kubernetes.io/instance" => release}},
-            "spec" => {"automountServiceAccountToken" => false, "restartPolicy" => "Never",
-              "securityContext" => pod.fetch("securityContext"), "nodeSelector" => pod.fetch("nodeSelector", {}),
-              "tolerations" => pod.fetch("tolerations", []),
-              "containers" => [{"name" => "migrate", "image" => base.fetch("image"), "imagePullPolicy" => base.fetch("imagePullPolicy"),
-                "args" => ["-command", "migrate", "-config", "/etc/clipp/config.json"],
-                "securityContext" => base.fetch("securityContext"), "resources" => migration_resources, "volumeMounts" => mounts}],
-              "volumes" => [config, db, ca]}}}
-      }
-      puts JSON.pretty_generate(job)
-    ' "$CLIPP_TEST_RELEASE" "$CLIPP_TEST_NAMESPACE" "$migration_job" "$db_migration_secret" "$db_ca_secret" "$install_fingerprint" > "$generated_manifest" || die "Could not build the migration-only Job from the rendered chart."
-  if [[ -e "$migration_manifest" ]]; then
-    cmp -s "$generated_manifest" "$migration_manifest" || die "Saved migration manifest differs from the current reviewed chart."
-    rm "$generated_manifest"
-  else
-    mv "$generated_manifest" "$migration_manifest" || die "Could not save the migration manifest."
-  fi
-  [[ ! -L "$migration_manifest" && -s "$migration_manifest" ]] || die "Migration Job manifest is not a regular nonempty file."
-  migration_job_name=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$migration_job" --ignore-not-found -o name) || die "Could not inspect the migration Job name."
-  if [[ -z "$migration_job_name" ]]; then
+  [[ "$migration_manifest" == "$deployment_dir/$migration_job.json" ]] || die "Prepared migration Job path differs from the saved installation identity."
+  [[ ! -L "$migration_manifest" && -s "$migration_manifest" ]] || die "Prepared migration Job manifest is unavailable."
+  refresh_preparation_observations
+  migration_state=$(preparation_observation migration)
+  case "$migration_state" in
+  missing)
     say "The Job requests 300m CPU, uses the pinned relay image and chart ConfigMap, and mounts only the migration login and database CA."
     confirm "Create and run application schema migration Job $migration_job in this test namespace?" || die "Serving transition was not started."
     kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" create -f "$migration_manifest" || die "Migration Job creation failed; inspect the namespace before retrying."
-  else
-    migration_job_json=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$migration_job" -o json) || die "Existing migration Job is unavailable."
-    printf '%s' "$migration_job_json" | ruby -rjson -e '
-      actual = JSON.parse(STDIN.read)
-      expected = JSON.parse(File.read(ARGV.fetch(0)))
-      abort "existing migration Job belongs to another setup" unless actual.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint") == expected.dig("metadata", "annotations", "clipp-relay-test/install-fingerprint")
-      a = actual.dig("spec", "template", "spec")
-      e = expected.dig("spec", "template", "spec")
-      abort "existing migration Job image or command differs" unless a.dig("containers", 0, "image") == e.dig("containers", 0, "image") && a.dig("containers", 0, "args") == e.dig("containers", 0, "args")
-      abort "existing migration Job resource budget differs" unless a.dig("containers", 0, "resources") == e.dig("containers", 0, "resources")
-      abort "existing migration Job Secret references differ" unless %w[db db-ca].all? { |name| a.fetch("volumes").find { |v| v["name"] == name }.dig("secret", "secretName") == e.fetch("volumes").find { |v| v["name"] == name }.dig("secret", "secretName") }
-      abort "existing migration Job failed" if actual.dig("status", "failed").to_i > 0
-    ' "$migration_manifest" || die "Existing migration Job cannot be reused."
+    ;;
+  pending|incomplete|completed)
     say "Reusing the same reviewed migration Job; no second Job was created."
-  fi
+    ;;
+  failed) die "Preparation reports that the retained migration Job failed." ;;
+  *) die "Preparation returned an unsupported migration Job state: $migration_state" ;;
+  esac
 fi
 wait_for_job_completion "$migration_job" 2400
 verify_completed_migration

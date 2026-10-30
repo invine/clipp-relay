@@ -51,14 +51,23 @@ func (s *Server) SetRelayCredentialHookForTest(hook func()) { s.relayCredentialH
 // SetCredentialCommitHookForTest injects a lost credential commit acknowledgment.
 // Production leaves this unset.
 func (s *Server) SetCredentialCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
-	s.commitRefresh = commit
-	s.commitAuthorization = commit
+	if commit == nil {
+		s.commitRefresh = nil
+		s.commitAuthorization = nil
+		return
+	}
+	s.commitRefresh = func(ctx context.Context, tx persistence.RefreshTransaction) error { return commit(ctx, tx) }
+	s.commitAuthorization = func(ctx context.Context, tx persistence.AuthorizationTransaction) error { return commit(ctx, tx) }
 }
 
 // SetAuthorizationCommitHookForTest injects storage-neutral commit outcomes for
 // native authorization tests. Production leaves this unset.
 func (s *Server) SetAuthorizationCommitHookForTest(commit func(context.Context, persistence.Transaction) error) {
-	s.commitAuthorization = commit
+	if commit == nil {
+		s.commitAuthorization = nil
+		return
+	}
+	s.commitAuthorization = func(ctx context.Context, tx persistence.AuthorizationTransaction) error { return commit(ctx, tx) }
 }
 
 // SetPortalCommitHookForTest injects a lost portal-session commit acknowledgment.
@@ -75,6 +84,11 @@ type Server struct {
 	diagnostics                        *diagnostic.Logger
 	transitions                        *diagnostic.Transitions
 	persistence                        persistence.Work
+	accountRegistration                persistence.AccountRegistrationWork
+	portalSessions                     persistence.PortalSessionWork
+	authorization                      persistence.AuthorizationWork
+	refresh                            persistence.RefreshWork
+	accountAccess                      persistence.AccountAccessWork
 	deletions                          persistence.DeletionRepository
 	recovery                           persistence.RecoveryRepository
 	readViews                          persistence.ReadViews
@@ -111,8 +125,8 @@ type Server struct {
 	commitPlanAccess                   func(context.Context, persistence.AccountAccessTransaction) error
 	commitAccountAccess                func(context.Context, persistence.AccountAccessTransaction) error
 	relayCredentialHook                func()
-	commitAuthorization                func(context.Context, persistence.Transaction) error
-	commitRefresh                      func(context.Context, persistence.Transaction) error
+	commitAuthorization                func(context.Context, persistence.AuthorizationTransaction) error
+	commitRefresh                      func(context.Context, persistence.RefreshTransaction) error
 	nativeIssuer                       *issuer.Issuer
 	commitPortal                       func(context.Context, persistence.Transaction) error
 	commitDeletionAdmission            func(context.Context, persistence.DeletionTransaction) error
@@ -390,11 +404,16 @@ type uncertainMutation struct {
 // Dependencies are selected by startup composition. Functional Auth has no
 // PostgreSQL constructor or driver handle.
 type Dependencies struct {
-	Work        persistence.Work
-	Deletions   persistence.DeletionRepository
-	Recovery    persistence.RecoveryRepository
-	ReadViews   persistence.ReadViews
-	Maintenance persistence.Maintenance
+	Work                persistence.Work
+	AccountRegistration persistence.AccountRegistrationWork
+	PortalSessions      persistence.PortalSessionWork
+	Authorization       persistence.AuthorizationWork
+	Refresh             persistence.RefreshWork
+	AccountAccess       persistence.AccountAccessWork
+	Deletions           persistence.DeletionRepository
+	Recovery            persistence.RecoveryRepository
+	ReadViews           persistence.ReadViews
+	Maintenance         persistence.Maintenance
 }
 
 func New(deps Dependencies, c config.Config, m config.Material, provider Provider) *Server {
@@ -413,7 +432,7 @@ func New(deps Dependencies, c config.Config, m config.Material, provider Provide
 	}
 	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), provider.KeysURL)
 	googleVerifier := oidc.NewVerifier(googleIssuer, keySet, &oidc.Config{ClientID: m.GoogleClientID, SupportedSigningAlgs: []string{"RS256"}})
-	s := &Server{persistence: deps.Work, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
+	s := &Server{persistence: deps.Work, accountRegistration: deps.AccountRegistration, portalSessions: deps.PortalSessions, authorization: deps.Authorization, refresh: deps.Refresh, accountAccess: deps.AccountAccess, deletions: deps.Deletions, recovery: deps.Recovery, readViews: deps.ReadViews, maintenance: deps.Maintenance, Origin: c.PortalOrigin, ClientID: m.GoogleClientID, ClientSecret: m.GoogleClientSecret, AndroidRedirect: c.PublicClients.AndroidRedirect, ExtensionRedirect: c.PublicClients.ExtensionRedirect, AdminAllowlistFile: c.Secrets.AdminAllowlistFile, Peppers: m.Peppers, CurrentPepper: m.CurrentPepper, provider: provider, client: client, providerSlots: make(chan struct{}, 8), googleOAuth: googleOAuth, googleVerifier: googleVerifier, flows: map[string]flow{}, consents: map[string]oauthConsent{}, fences: make(map[[32]byte]identityFence), accountRates: make(map[string]rate), cleanupAccountCursors: make([]string, cleanupOperationCount)}
 	if _, err := rand.Read(s.fenceKey[:]); err != nil {
 		panic("identity fence key unavailable")
 	}
@@ -751,7 +770,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := s.identityKey(claims.Subject)
-	op, e := s.persistence.Start(ctx)
+	op, e := s.accountRegistration.StartAccountRegistration(ctx)
 	if e != nil {
 		fail(w, 503)
 		return
@@ -796,13 +815,13 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	tx, accountTx, e := beginAccountTransaction(op)
+	tx, e := beginAccountTransaction(op)
 	if e != nil {
 		fail(w, 503)
 		return
 	}
 	defer tx.Rollback(ctx)
-	registered, e := accountTx.UpsertRelayAccount(ctx, persistence.AccountRegistration{
+	registered, e := tx.UpsertRelayAccount(ctx, persistence.AccountRegistration{
 		ID: account, Issuer: googleIssuer, Subject: claims.Subject, Email: claims.Email,
 		EmailVerified: claims.EmailVerified, HostedDomain: claims.HostedDomain,
 	})
@@ -816,7 +835,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		if expected, ok := pending.(uncertainDeletion); ok {
 			deletionOperationID = expected.operationID
 		}
-		state, stateErr := accountTx.AccountStateAfterUncertain(ctx, accountID, deletionOperationID)
+		state, stateErr := tx.AccountStateAfterUncertain(ctx, accountID, deletionOperationID)
 		if stateErr != nil {
 			fail(w, 503)
 			return
@@ -840,17 +859,17 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.uncertainAccounts.Delete(accountID)
 	}
 	if registered.Created {
-		if e = s.importRetainedUsage(ctx, accountTx, accountID, claims.Subject); e != nil {
+		if e = s.importRetainedUsage(ctx, tx, accountID, claims.Subject); e != nil {
 			fail(w, 503)
 			return
 		}
-		if e = accountTx.RecordAccountCreated(ctx, auditID, accountID); e != nil {
+		if e = tx.RecordAccountCreated(ctx, auditID, accountID); e != nil {
 			fail(w, 503)
 			return
 		}
 	}
 	csrf := s.csrf(s.CurrentPepper, credential)
-	if e = accountTx.CreatePortalSession(ctx, digest32(s.digest(s.CurrentPepper, "portal-session", credential)), s.CurrentPepper, accountID, generation, digest32(s.digest(s.CurrentPepper, "csrf-store", csrf))); e != nil {
+	if e = tx.CreatePortalSession(ctx, digest32(s.digest(s.CurrentPepper, "portal-session", credential)), s.CurrentPepper, accountID, generation, digest32(s.digest(s.CurrentPepper, "csrf-store", csrf))); e != nil {
 		fail(w, 503)
 		return
 	}
@@ -969,66 +988,6 @@ func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error
 		IssuedAt:      claims.IssuedAt,
 	}, nil
 }
-func (s *Server) session(r *http.Request) (string, uint64, string, string, string, error) {
-	c, e := r.Cookie(sessionCookie)
-	if e != nil || len(c.Value) != 43 {
-		return "", 0, "", "", "", errInvalidSession
-	}
-	op, e := s.persistence.Start(r.Context())
-	if e != nil {
-		return "", 0, "", "", "", e
-	}
-	defer op.Close()
-	tx, accountTx, e := beginAccountTransaction(op)
-	if e != nil {
-		return "", 0, "", "", "", e
-	}
-	finished := false
-	defer func() {
-		if !finished {
-			_ = tx.Rollback(op.Context())
-		}
-	}()
-	for version := range s.Peppers {
-		digest := digest32(s.digest(version, "portal-session", c.Value))
-		stored, err := accountTx.PortalSessionForOwner(op.Context(), digest, version)
-		if errors.Is(err, persistence.ErrInvalidCredential) {
-			continue
-		}
-		if err != nil {
-			return "", 0, "", "", "", err
-		}
-		if _, uncertain := s.uncertainAccounts.Load(stored.AccountID); uncertain {
-			return "", 0, "", "", "", errInvalidSession
-		}
-		if !s.allowAccount(stored.Subject) {
-			return "", 0, "", "", "", errRateLimit
-		}
-		token := s.csrf(stored.PepperVersion, c.Value)
-		if subtle.ConstantTimeCompare(stored.CSRFHash, s.digest(stored.PepperVersion, "csrf-store", token)) != 1 {
-			return "", 0, "", "", "", errors.New("csrf")
-		}
-		touched, err := accountTx.TouchPortalSession(op.Context(), digest, version, stored.AccountID, stored.Generation)
-		if err != nil {
-			return "", 0, "", "", "", err
-		}
-		if !touched {
-			return "", 0, "", "", "", errInvalidSession
-		}
-		if err = tx.Commit(op.Context()); err != nil {
-			finished = true
-			return "", 0, "", "", "", err
-		}
-		finished = true
-		return stored.AccountID, version, stored.Status, stored.Email, token, nil
-	}
-	if e = tx.Rollback(op.Context()); e != nil {
-		finished = true
-		return "", 0, "", "", "", e
-	}
-	finished = true
-	return "", 0, "", "", "", errInvalidSession
-}
 
 type quotaHistory = portal.QuotaHistoryEntry
 
@@ -1037,7 +996,8 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	id, version, _, _, csrf, e := s.session(r)
+	ownerSession, e := s.ownerPortalSession(r)
+	id, version, csrf := ownerSession.accountID, ownerSession.pepperVersion, ownerSession.csrf
 	if errors.Is(e, errRateLimit) {
 		fail(w, 429)
 		return
@@ -1169,7 +1129,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	_, version, _, _, csrf, e := s.session(r)
+	ownerSession, e := s.ownerPortalSession(r)
+	version, csrf := ownerSession.pepperVersion, ownerSession.csrf
 	if errors.Is(e, errRateLimit) {
 		fail(w, 429)
 		return
@@ -1189,7 +1150,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, _ := r.Cookie(sessionCookie)
-	op, e := s.persistence.Start(r.Context())
+	op, e := s.portalSessions.StartPortalSession(r.Context())
 	if e != nil {
 		// The single-statement commit acknowledgement does not prove rollback.
 		markDiagnostic(r, "uncertain", "commit_unconfirmed")
@@ -1197,14 +1158,14 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer op.Close()
-	tx, accountTx, e := beginAccountTransaction(op)
+	tx, e := op.BeginPortalSession(op.Context())
 	if e != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return
 	}
 	defer tx.Rollback(op.Context())
-	if _, e = accountTx.DeletePortalSession(op.Context(), digest32(s.digest(version, "portal-session", c.Value)), version); e != nil {
+	if _, e = tx.DeletePortalSession(op.Context(), digest32(s.digest(version, "portal-session", c.Value)), version); e != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		fail(w, 503)
 		return

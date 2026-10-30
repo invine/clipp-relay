@@ -44,10 +44,7 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 			now := time.Now().UTC()
 			week := now.AddDate(0, 0, -(int(now.Weekday())+6)%7)
 			week = time.Date(week.Year(), week.Month(), week.Day(), 0, 0, 0, 0, time.UTC)
-			previousOp, _ := quota.NewOperationID()
-			if _, err := p.quota.Settle(context.Background(), quota.Settlement{AccountID: p.account, WeekStart: week.AddDate(0, 0, -7), OperationID: previousOp, Sequence: 1, DeltaBytes: 98765}); err != nil {
-				t.Fatal(err)
-			}
+			seedRecordedWeek(t, p, week.AddDate(0, 0, -7), 98765)
 			if tc.lost {
 				p.auth.SetDeletionFinalizeCommitHookForTest(func(ctx context.Context, tx persistence.DeletionTransaction) error {
 					if err := tx.Commit(ctx); err != nil {
@@ -144,10 +141,6 @@ func TestObservedDeletionFlushesAndImportsConfirmedUsage(t *testing.T) {
 			repeated, e := p.quota.RecordedUsage(context.Background(), id, week)
 			if e != nil || repeated.RecordedBytes != tc.expected || repeated.Sequence != 0 {
 				t.Fatalf("repeated import %+v %v", repeated, e)
-			}
-			op, _ := quota.NewOperationID()
-			if _, err := p.quota.Settle(context.Background(), quota.Settlement{AccountID: p.account, WeekStart: week, OperationID: op, Sequence: 2, DeltaBytes: 99}); err != quota.ErrUsageRetired {
-				t.Fatalf("late settlement=%v", err)
 			}
 			if err := p.quota.Observe(p.account, 1); err == nil {
 				t.Fatal("deleted accounting state retained")

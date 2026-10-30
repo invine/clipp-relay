@@ -77,6 +77,25 @@ bash scripts/preflight-external.sh charts/clipp-relay/examples/external-values.y
 GOPROXY=off GOCACHE=/private/tmp/clipp-go-cache go test -count=1 ./...
 ```
 
+Both preflight scripts render the serving phase, extract its `ConfigMap` runtime
+JSON and pass it to the Go binary's `validate-config` command. Chart fixtures do
+the same for watched transports, explicit address overrides and disabled TCP/UDP
+transports; an incomplete WebRTC Direct multiaddress fails runtime validation.
+This validates configuration syntax and static serving requirements using the
+runtime's rules. It does not read mounted Secret files or prove live schema,
+database, journal, listener or cluster readiness.
+
+To validate a custom render locally, build the validator from this checkout and
+run the same extraction helper used by preflight:
+
+```sh
+go build -o /private/tmp/clipp-relay-validator ./cmd/clipp-relay
+helm template isolated charts/clipp-relay -n clipp-isolated \
+  -f charts/clipp-relay/examples/external-values.yaml > /private/tmp/clipp-relay-render.yaml
+CLIPP_RELAY_VALIDATOR=/private/tmp/clipp-relay-validator \
+  bash scripts/validate-rendered-config.sh /private/tmp/clipp-relay-render.yaml
+```
+
 The preflight makes no cluster changes. Without a context it reports required external checks as pending. Any optional `kubectl` inspection only reads namespace, named Secret and ClusterIssuer metadata, and IngressClass. It does not read Secret data. It does not imply that TLS, IAM, network policy, F5, OCI, database roles, node limits or traffic behavior have been proven.
 
 ## Authorized isolated installation procedure

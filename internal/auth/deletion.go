@@ -10,25 +10,18 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/portal"
+	"clipp-relay/internal/recoveryjournal"
 )
 
-// DeletionJournal is the serving identity's complete storage authority. Its
-// implementation must create immutable events and replace only the head with
-// an If-Match precondition. It may list bounded event pages for verification,
-// but has no delete, overwrite, or backup operation.
-type DeletionJournal interface {
-	ReadHead(context.Context) (JournalHead, string, error)
-	CreateEvent(context.Context, string, []byte) error
-	ReadEvent(context.Context, string) ([]byte, error)
-	ReplaceHead(context.Context, string, JournalHead) error
-	ListEvents(context.Context, string) ([]string, string, error)
-}
+// DeletionJournal and JournalHead remain compatibility names for the shared
+// Recovery Journal storage contract.
+type DeletionJournal = recoveryjournal.Store
+type JournalHead = recoveryjournal.Head
 
 // SetDeletionFinalizeCommitHookForTest simulates lost finalization responses
 // after PostgreSQL has committed; serving code leaves this unset.
@@ -40,29 +33,8 @@ func (s *Server) SetDeletionAdmissionCommitHookForTest(commit func(context.Conte
 	s.commitDeletionAdmission = commit
 }
 
-type JournalHead struct {
-	RepositoryID          string `json:"repository_id"`
-	CoverageFloor         int64  `json:"coverage_floor"`
-	CoverageHash          string `json:"coverage_hash"`
-	Sequence              int64  `json:"sequence"`
-	Hash                  string `json:"hash"`
-	MaintenanceGeneration int64  `json:"maintenance_generation"`
-	Format                int    `json:"format"`
-}
-
-type deletionEvent struct {
-	Format       int       `json:"format"`
-	AccountID    string    `json:"account_id"`
-	EventID      string    `json:"event_id"`
-	Sequence     int64     `json:"sequence"`
-	PreviousHash string    `json:"previous_hash"`
-	AdmittedAt   time.Time `json:"admitted_at"`
-	Hash         string    `json:"hash"`
-}
-
 type uncertainDeletion struct{ operationID string }
 
-var errJournalTargetUncommitted = errors.New("journal target event not committed")
 var errDeletionJournalDiagnostic = errors.New("deletion journal failed")
 var errDeletionFinalizationUnconfirmed = errors.New("deletion finalization uncertain")
 var errDeletionPreparationUnconfirmed = errors.New("deletion preparation uncertain")
@@ -89,15 +61,6 @@ func (s *Server) SetDeletionJournal(j DeletionJournal, repository string, floor 
 	s.deletionRepository = repository
 	s.deletionFloor = floor
 	s.deletionFloorHash = floorHash
-}
-
-func (s *Server) qualifiedHead(h JournalHead) bool {
-	if s.deletionJournal == nil || s.deletionRepository == "" || s.deletionFloor < 0 || h.RepositoryID != s.deletionRepository || h.CoverageFloor != s.deletionFloor || h.CoverageHash != s.deletionFloorHash || h.Sequence < h.CoverageFloor || h.MaintenanceGeneration < 0 || h.Format != 1 {
-		return false
-	}
-	b, e := hex.DecodeString(h.Hash)
-	floor, floorErr := hex.DecodeString(h.CoverageHash)
-	return e == nil && len(b) == 32 && floorErr == nil && len(floor) == 32 && (h.Sequence != h.CoverageFloor || h.Hash == h.CoverageHash)
 }
 
 func (s *Server) deleteOwner(w http.ResponseWriter, r *http.Request) {
@@ -149,22 +112,14 @@ func (s *Server) nextDeletion(ctx context.Context) (pendingDeletion, error) {
 	return pendingDeletion{ID: row.ID, Account: row.AccountID, Admitted: row.AdmittedAt, Sequence: row.EventSequence, Hash: row.EventHash, Data: row.EventData, Generation: row.JournalGeneration, Attempts: row.Attempts}, nil
 }
 
+func (s *Server) journal() *recoveryjournal.Journal {
+	return recoveryjournal.New(s.deletionJournal, s.deletionRepository, s.deletionFloor, s.deletionFloorHash)
+}
+
 func (s *Server) readHead(ctx context.Context) (result JournalHead, resultETag string, resultErr error) {
 	started := time.Now()
 	defer func() { s.transitions.Dependency("dependency.deletion_journal", resultErr, ctx, time.Since(started)) }()
-	if s.deletionJournal == nil {
-		return JournalHead{}, "", errors.New("journal unavailable")
-	}
-	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	h, etag, err := s.deletionJournal.ReadHead(bounded)
-	if err != nil || !s.qualifiedHead(h) || etag == "" {
-		return JournalHead{}, "", errors.New("journal head unavailable or unqualified")
-	}
-	if b, _ := json.Marshal(h); len(b) > 16<<10 {
-		return JournalHead{}, "", errors.New("journal head too large")
-	}
-	return h, etag, nil
+	return s.journal().ReadHead(ctx)
 }
 
 // ValidateDeletionJournal is a startup gate for an explicitly configured
@@ -187,181 +142,64 @@ func (s *Server) verifyRecordedChain(ctx context.Context, head JournalHead, targ
 	return err
 }
 
-type deletionProof struct {
-	account  string
-	parent   *deletionProof
-	included bool
-}
-
 func (s *Server) committedDeletionAccounts(ctx context.Context, head JournalHead, targetSeq int64, targetHash string, collect bool) ([]string, error) {
-	if head.Sequence == head.CoverageFloor {
-		if targetSeq != 0 {
-			return nil, errJournalTargetUncommitted
-		}
-		return nil, nil
-	}
-	expected := head.CoverageFloor + 1
-	reachable := map[string]*deletionProof{head.CoverageHash: {}}
-	current := map[string]*deletionProof{}
-	cursor := ""
-	lastName := ""
-scan:
-	for {
-		bounded, stop := context.WithTimeout(ctx, 5*time.Second)
-		names, next, err := s.deletionJournal.ListEvents(bounded, cursor)
-		stop()
-		if err != nil || len(names) > 250 {
-			return nil, errors.New("journal coverage unavailable")
-		}
-		for _, name := range names {
-			if !strings.HasPrefix(name, "journal/events/") || name <= lastName {
-				return nil, errors.New("journal event name invalid")
-			}
-			lastName = name
-			key := strings.TrimPrefix(name, "journal/")
-			var sequence int64
-			if _, err := fmt.Sscanf(strings.TrimPrefix(key, "events/"), "%020d-", &sequence); err != nil {
-				return nil, errors.New("journal event sequence invalid")
-			}
-			if sequence <= head.CoverageFloor {
-				continue
-			}
-			if sequence > head.Sequence {
-				break scan
-			}
-			if sequence > expected {
-				if sequence != expected+1 || len(current) == 0 {
-					return nil, errors.New("journal coverage gap or conflict")
-				}
-				reachable, current = current, map[string]*deletionProof{}
-				expected = sequence
-			}
-			if sequence != expected {
-				return nil, errors.New("journal coverage gap or conflict")
-			}
-			bounded, stop := context.WithTimeout(ctx, 5*time.Second)
-			data, readErr := s.deletionJournal.ReadEvent(bounded, key)
-			stop()
-			if readErr != nil || len(data) > 4<<10 {
-				continue
-			}
-			var event deletionEvent
-			if json.Unmarshal(data, &event) != nil || event.Format != 1 || event.Sequence != sequence || key != fmt.Sprintf("events/%020d-%s", sequence, event.EventID) {
-				continue
-			}
-			bare := event
-			bare.Hash = ""
-			encoded, _ := json.Marshal(bare)
-			digest := sha256.Sum256(encoded)
-			if event.Hash != hex.EncodeToString(digest[:]) {
-				continue
-			}
-			if included, ok := reachable[event.PreviousHash]; ok {
-				node := &deletionProof{included: included.included || sequence == targetSeq && event.Hash == targetHash}
-				if collect {
-					node.account = event.AccountID
-					node.parent = included
-				}
-				current[event.Hash] = node
-				if len(current) > 2048 {
-					return nil, errors.New("journal event fanout exceeds bound")
-				}
-			}
-		}
-		if next == "" {
-			break
-		}
-		if next <= cursor {
-			return nil, errors.New("journal cursor did not advance")
-		}
-		cursor = next
-	}
-	included, ok := current[head.Hash]
-	if !ok || expected != head.Sequence {
-		return nil, errors.New("journal head hash not covered")
-	}
-	if targetSeq != 0 && !included.included {
-		return nil, errJournalTargetUncommitted
-	}
-	accounts := []string{}
-	for node := included; node != nil; node = node.parent {
-		if node.account != "" {
-			accounts = append(accounts, node.account)
-		}
-	}
-	return accounts, nil
+	return s.journal().Verify(ctx, head, targetSeq, targetHash, collect)
 }
 
-func (s *Server) eventFor(ctx context.Context, x pendingDeletion, h JournalHead) (deletionEvent, []byte, error) {
+func recordedDeletionEvent(x pendingDeletion, generation int64) (recoveryjournal.PreparedEvent, error) {
+	if x.Sequence == nil || x.Generation == nil || *x.Generation != generation || len(x.Data) > 4<<10 {
+		return recoveryjournal.PreparedEvent{}, errors.New("prepared deletion event inconsistent")
+	}
+	var event recoveryjournal.Event
+	if err := json.Unmarshal(x.Data, &event); err != nil || event.Format != 1 || event.AccountID != x.Account || event.EventID != x.ID || event.Sequence != *x.Sequence || event.Hash != hex.EncodeToString(x.Hash) {
+		return recoveryjournal.PreparedEvent{}, errors.New("prepared deletion event inconsistent")
+	}
+	prepared := recoveryjournal.PreparedEvent{Event: event, Data: x.Data}
+	if err := recoveryjournal.ValidatePrepared(prepared); err != nil {
+		return recoveryjournal.PreparedEvent{}, err
+	}
+	return prepared, nil
+}
+
+// prepareDeletionEvent persists the immutable operation preparation before
+// Append begins upload or head I/O. On a proven lost sequence it conditionally
+// replaces that preparation in the same existing deletion-operation row.
+func (s *Server) prepareDeletionEvent(ctx context.Context, x pendingDeletion, head JournalHead, prior *recoveryjournal.PreparedEvent) (recoveryjournal.PreparedEvent, error) {
+	if prior != nil {
+		recorded, err := recordedDeletionEvent(x, head.MaintenanceGeneration)
+		if err != nil || recorded.Event != prior.Event || !bytes.Equal(recorded.Data, prior.Data) {
+			return recoveryjournal.PreparedEvent{}, errors.New("deletion event preparation changed")
+		}
+		prepared, err := recoveryjournal.NewEvent(x.Account, x.ID, x.Admitted, head)
+		if err != nil {
+			return recoveryjournal.PreparedEvent{}, err
+		}
+		digest, _ := hex.DecodeString(prepared.Event.Hash)
+		updated, err := s.deletions.PrepareDeletionEvent(ctx, persistence.DeletionEventPreparation{OperationID: x.ID, Sequence: prepared.Event.Sequence, Hash: digest, Data: prepared.Data, Generation: head.MaintenanceGeneration, ExpectedSequence: x.Sequence, ExpectedHash: x.Hash, ExpectedGeneration: x.Generation})
+		if err != nil {
+			return recoveryjournal.PreparedEvent{}, deletionPrepareError(err)
+		}
+		if !updated {
+			return recoveryjournal.PreparedEvent{}, errors.New("deletion event rebase uncertain")
+		}
+		return prepared, nil
+	}
 	if x.Sequence != nil {
-		var event deletionEvent
-		if json.Unmarshal(x.Data, &event) != nil || len(x.Data) > 4<<10 || event.Format != 1 || event.AccountID != x.Account || event.EventID != x.ID || event.Sequence != *x.Sequence || event.Hash != hex.EncodeToString(x.Hash) || x.Generation == nil || h.MaintenanceGeneration != *x.Generation {
-			return event, nil, errors.New("prepared deletion event inconsistent")
-		}
-		unhashed := event
-		unhashed.Hash = ""
-		encoded, _ := json.Marshal(unhashed)
-		sum := sha256.Sum256(encoded)
-		if event.Hash != hex.EncodeToString(sum[:]) {
-			return event, nil, errors.New("prepared deletion event hash invalid")
-		}
-		return event, x.Data, nil
+		return recordedDeletionEvent(x, head.MaintenanceGeneration)
 	}
-	if h.Sequence == int64(^uint64(0)>>1) {
-		return deletionEvent{}, nil, errors.New("journal sequence exhausted")
-	}
-	event, data, digest := buildDeletionEvent(x, h)
-	if len(data) > 4<<10 {
-		return event, nil, errors.New("deletion event too large")
-	}
-	updated, err := s.deletions.PrepareDeletionEvent(ctx, persistence.DeletionEventPreparation{OperationID: x.ID, Sequence: event.Sequence, Hash: digest[:], Data: data, Generation: h.MaintenanceGeneration})
+	prepared, err := recoveryjournal.NewEvent(x.Account, x.ID, x.Admitted, head)
 	if err != nil {
-		return event, nil, deletionPrepareError(err)
+		return recoveryjournal.PreparedEvent{}, err
+	}
+	digest, _ := hex.DecodeString(prepared.Event.Hash)
+	updated, err := s.deletions.PrepareDeletionEvent(ctx, persistence.DeletionEventPreparation{OperationID: x.ID, Sequence: prepared.Event.Sequence, Hash: digest, Data: prepared.Data, Generation: head.MaintenanceGeneration})
+	if err != nil {
+		return recoveryjournal.PreparedEvent{}, deletionPrepareError(err)
 	}
 	if !updated {
-		return event, nil, errors.New("deletion event preparation uncertain")
+		return recoveryjournal.PreparedEvent{}, errors.New("deletion event preparation uncertain")
 	}
-	return event, data, nil
-}
-
-func buildDeletionEvent(x pendingDeletion, h JournalHead) (deletionEvent, []byte, [32]byte) {
-	event := deletionEvent{Format: 1, AccountID: x.Account, EventID: x.ID, Sequence: h.Sequence + 1, PreviousHash: h.Hash, AdmittedAt: x.Admitted.UTC()}
-	bare, _ := json.Marshal(event)
-	digest := sha256.Sum256(bare)
-	event.Hash = hex.EncodeToString(digest[:])
-	data, _ := json.Marshal(event)
-	return event, data, digest
-}
-
-// A failed conditional head replacement may leave an immutable orphan upload.
-// Once a later committed head proves that sequence belongs to another event,
-// the same durable deletion operation can prepare a new event on that head.
-func (s *Server) rebaseDeletionEvent(ctx context.Context, x pendingDeletion, h JournalHead) (deletionEvent, []byte, error) {
-	if x.Sequence == nil || x.Generation == nil || *x.Generation != h.MaintenanceGeneration || h.Sequence == int64(^uint64(0)>>1) {
-		return deletionEvent{}, nil, errors.New("deletion event cannot rebase")
-	}
-	event, data, digest := buildDeletionEvent(x, h)
-	if len(data) > 4<<10 {
-		return deletionEvent{}, nil, errors.New("deletion event too large")
-	}
-	updated, err := s.deletions.PrepareDeletionEvent(ctx, persistence.DeletionEventPreparation{OperationID: x.ID, Sequence: event.Sequence, Hash: digest[:], Data: data, Generation: h.MaintenanceGeneration, ExpectedSequence: x.Sequence, ExpectedHash: x.Hash, ExpectedGeneration: x.Generation})
-	if err != nil {
-		return deletionEvent{}, nil, deletionPrepareError(err)
-	}
-	if !updated {
-		return deletionEvent{}, nil, errors.New("deletion event rebase uncertain")
-	}
-	return event, data, nil
-}
-
-func (s *Server) proveEvent(ctx context.Context, key string, data []byte) error {
-	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	existing, err := s.deletionJournal.ReadEvent(bounded, key)
-	if err != nil || len(existing) > 4<<10 || !bytes.Equal(existing, data) {
-		return errors.New("deletion event absent or conflicting")
-	}
-	return nil
+	return prepared, nil
 }
 
 // ReconcileOneDeletion handles one due operation. The mutex is the single
@@ -461,52 +299,14 @@ func retrySeconds(id string, attempt int) float64 {
 }
 
 func (s *Server) reconcileDeletion(ctx context.Context, x pendingDeletion) error {
-	head, etag, err := s.readHead(ctx)
+	_, err := s.journal().Append(ctx, nil, func(prepareCtx context.Context, head JournalHead, prior *recoveryjournal.PreparedEvent) (recoveryjournal.PreparedEvent, error) {
+		return s.prepareDeletionEvent(prepareCtx, x, head, prior)
+	})
 	if err != nil {
-		return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
-	}
-	event, data, err := s.eventFor(ctx, x, head)
-	if err != nil {
-		return err
-	}
-	if head.Sequence >= event.Sequence {
-		err = s.verifyRecordedChain(ctx, head, event.Sequence, event.Hash)
-		if err == nil {
-			if err = s.proveEvent(ctx, fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID), data); err != nil {
-				return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
-			}
-			return s.finalizeDeletion(ctx, x)
-		}
-		if !errors.Is(err, errJournalTargetUncommitted) {
-			return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
-		}
-		event, data, err = s.rebaseDeletionEvent(ctx, x, head)
-		if err != nil {
+		if errors.Is(err, errDeletionPreparationUnconfirmed) || errors.Is(err, errDeletionDatabaseDiagnostic) {
 			return err
 		}
-	}
-	if head.Sequence != event.Sequence-1 || head.Hash != event.PreviousHash || (x.Generation != nil && head.MaintenanceGeneration != *x.Generation) {
-		return fmt.Errorf("%w: journal chain or maintenance generation changed", errDeletionJournalDiagnostic)
-	}
-	key := fmt.Sprintf("events/%020d-%s", event.Sequence, event.EventID)
-	bounded, stop := context.WithTimeout(ctx, 5*time.Second)
-	_ = s.deletionJournal.CreateEvent(bounded, key, data)
-	stop()
-	if err = s.proveEvent(ctx, key, data); err != nil {
 		return fmt.Errorf("%w: %v", errDeletionJournalDiagnostic, err)
-	}
-	next := head
-	next.Sequence = event.Sequence
-	next.Hash = event.Hash
-	bounded, stop = context.WithTimeout(ctx, 5*time.Second)
-	replaceErr := s.deletionJournal.ReplaceHead(bounded, etag, next)
-	stop()
-	actual, _, readErr := s.readHead(ctx)
-	if readErr != nil || actual.Sequence != next.Sequence || actual.Hash != next.Hash || actual.MaintenanceGeneration != next.MaintenanceGeneration || actual.RepositoryID != next.RepositoryID || actual.CoverageFloor != next.CoverageFloor {
-		if replaceErr != nil {
-			return fmt.Errorf("%w: journal head acknowledgement unresolved", errDeletionJournalDiagnostic)
-		}
-		return fmt.Errorf("%w: journal head proof failed", errDeletionJournalDiagnostic)
 	}
 	return s.finalizeDeletion(ctx, x)
 }

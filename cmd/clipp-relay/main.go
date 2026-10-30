@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,19 +37,31 @@ func run() int {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: reason})
 		return 1
 	}
-	command := flag.String("command", "", "migrate, reset-auth, recover or serve")
+	command := flag.String("command", "", "validate-config, migrate, reset-auth, recover or serve")
 	path := flag.String("config", "", "absolute path to versioned non-secret configuration (accounting_failure_deadline defaults to 3s, minimum 1s; restart to change)")
 	recoveryRun := flag.String("recovery-run", "", "stable UUID identifying one offline recovery")
 	recoverySource := flag.String("recovery-source", "", "immutable source backup identity")
 	recoveryTarget := flag.String("recovery-target", "", "explicit isolated restored database name")
 	flag.Parse()
-	if flag.NArg() != 0 || *path == "" || (*command != "migrate" && *command != "reset-auth" && *command != "recover" && *command != "serve") {
+	if flag.NArg() != 0 || *path == "" || (*command != "validate-config" && *command != "migrate" && *command != "reset-auth" && *command != "recover" && *command != "serve") {
 		logger.Emit(diagnostic.Event{Event: "service.startup", Outcome: "failed", Reason: "configuration_rejected"})
 		return 2
 	}
 	c, err := config.Load(*path)
 	if err != nil {
 		return fail("configuration_rejected")
+	}
+	if *command == "validate-config" {
+		if err = c.ValidateServing(); err != nil {
+			return fail("configuration_rejected")
+		}
+		fmt.Fprintln(os.Stdout, "configuration accepted; this does not establish secret availability, compatible live schema, external reachability, or operational readiness")
+		return 0
+	}
+	if *command == "serve" {
+		if err = c.ValidateServing(); err != nil {
+			return fail("configuration_rejected")
+		}
 	}
 	maintenance := *command != "serve"
 	var material config.Material
@@ -138,9 +151,6 @@ func run() int {
 	if unix.Getrlimit(unix.RLIMIT_NOFILE, &rlimit) != nil || rlimit.Cur < 16384 {
 		return fail("resource_limit")
 	}
-	if c.RelayTCP.Listen == "" && c.RelayWebSocket.Listen == "" && c.RelayWebRTC.Listen == "" {
-		return fail("configuration_rejected")
-	}
 	srv := service.New()
 	db := database.NewRuntime(pool)
 	db.SetTransitions(dependencies)
@@ -163,9 +173,6 @@ func run() int {
 		observed, err := portal.SampleCleanupSignals(ctx)
 		return service.CleanupSample{OldestSeconds: observed.OldestAge.Seconds(), Warning: observed.Warning, Critical: observed.Critical, Breach: observed.Breach, Completed: observed.Completed, Failed: observed.Failed, BreachEpisodes: observed.BreachEpisodes}, err
 	})
-	if c.Journal.Region == "" {
-		return fail("configuration_rejected")
-	}
 	{
 		journal, journalErr := auth.NewOCIJournal(auth.OCIJournalOptions{
 			Endpoint:  "https://objectstorage." + c.Journal.Region + ".oraclecloud.com",
@@ -301,8 +308,9 @@ func run() int {
 }
 
 func composeAuthPersistence(runtime *database.Runtime) auth.Dependencies {
+	work := postgres.New(runtime)
 	return auth.Dependencies{
-		Work: postgres.New(runtime), Deletions: postgres.NewDeletions(runtime),
+		Work: work, AccountRegistration: work, PortalSessions: work, Authorization: work, Refresh: work, AccountAccess: work, Deletions: postgres.NewDeletions(runtime),
 		Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime),
 		Maintenance: postgres.NewMaintenance(runtime),
 	}
