@@ -293,13 +293,15 @@ label input, label select, .quantity-input { margin-top: 6px; }
   .admin-grid.mobile-detail .accounts-pane, .admin-grid.mobile-detail ~ .plans-pane { display: none; }
   .admin-grid.mobile-detail { display: block; }
   .admin-grid.mobile-detail .account-editor { min-height: 60vh; }
-  .review-link { display: inline-flex; min-height: 44px; align-items: center; padding: 0 8px; }
+  .review-link { display: inline-flex; min-height: 44px; align-items: center; padding: 0 4px; white-space: nowrap; }
   .accounts-pane .table-scroll { overflow: visible; }
   .accounts-pane table { width: 100%; min-width: 0; table-layout: fixed; }
   .accounts-pane th:nth-child(3), .accounts-pane td:nth-child(3), .accounts-pane th:nth-child(4), .accounts-pane td:nth-child(4) { display: none; }
-  .accounts-pane th:first-child, .accounts-pane td:first-child { width: 50%; overflow-wrap: anywhere; }
-  .accounts-pane th:nth-child(2), .accounts-pane td:nth-child(2) { width: 25%; }
-  .accounts-pane th:last-child, .accounts-pane td:last-child { width: 25%; }
+  .accounts-pane th:first-child, .accounts-pane td:first-child { width: 46%; overflow-wrap: anywhere; }
+  .accounts-pane th:nth-child(2), .accounts-pane td:nth-child(2) { width: 32%; }
+  .accounts-pane th:last-child, .accounts-pane td:last-child { width: 22%; }
+  .accounts-pane td:nth-child(2) .badge { max-width: 100%; box-sizing: border-box; padding: 4px 8px; font-size: 12px; white-space: normal; }
+  .accounts-pane td:last-child { text-align: right; }
   .accounts-pane td { padding: 11px 5px; }
   .admin-filters { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, .9fr); align-items: end; gap: 8px; }
   .admin-filters button { justify-self: start; }
