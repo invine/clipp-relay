@@ -19,6 +19,7 @@ var (
 	_ persistence.PortalSessionWork       = (*Work)(nil)
 	_ persistence.AuthorizationWork       = (*Work)(nil)
 	_ persistence.RefreshWork             = (*Work)(nil)
+	_ persistence.AccountAccessWork       = (*Work)(nil)
 )
 
 func New(runtime *database.Runtime) *Work { return &Work{runtime: runtime} }
@@ -72,6 +73,10 @@ func (w *Work) StartRefresh(ctx context.Context) (persistence.RefreshOperation, 
 	return w.start(ctx)
 }
 
+func (w *Work) StartAccountAccess(ctx context.Context) (persistence.AccountAccessOperation, error) {
+	return w.start(ctx)
+}
+
 type operation struct {
 	runtime *database.Runtime
 	ctx     context.Context
@@ -83,6 +88,7 @@ var (
 	_ persistence.PortalSessionOperation       = (*operation)(nil)
 	_ persistence.AuthorizationOperation       = (*operation)(nil)
 	_ persistence.RefreshOperation             = (*operation)(nil)
+	_ persistence.AccountAccessOperation       = (*operation)(nil)
 )
 
 func (o *operation) Context() context.Context { return o.ctx }
