@@ -220,6 +220,8 @@ def normalized_job_spec(observed: dict, expected: dict) -> dict:
     for key in ("parallelism", "completions"):
         if key not in expected_spec and actual.get(key) == 1:
             actual.pop(key, None)
+    if "completionMode" not in expected_spec and actual.get("completionMode") == "NonIndexed":
+        actual.pop("completionMode", None)
     if "podReplacementPolicy" not in expected_spec and actual.get("podReplacementPolicy") == "TerminatingOrFailed":
         actual.pop("podReplacementPolicy", None)
 

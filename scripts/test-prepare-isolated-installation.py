@@ -249,6 +249,7 @@ class InstallationPreparationTests(unittest.TestCase):
         job["metadata"]["uid"] = uid
         job["spec"]["parallelism"] = 1
         job["spec"]["completions"] = 1
+        job["spec"]["completionMode"] = "NonIndexed"
         job["spec"]["selector"] = {"matchLabels": {
             "batch.kubernetes.io/controller-uid": uid,
             "batch.kubernetes.io/job-name": job["metadata"]["name"],
