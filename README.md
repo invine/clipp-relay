@@ -70,10 +70,19 @@ Bootstrap and role provisioning are explicit operator steps; this binary never
 creates roles or databases.
 
 ```sh
+go run ./cmd/clipp-relay -command validate-config -config /path/to/config.json
 go run ./cmd/clipp-relay -command migrate -config /path/to/config.json
 go run ./cmd/clipp-relay -command reset-auth -config /path/to/migration-config.json
 go run ./cmd/clipp-relay -command serve -config /path/to/config.json
 ```
+
+`validate-config` checks strict JSON, runtime configuration rules, and static
+serving requirements without opening referenced Secret files or connecting to
+the database, journal, or listeners. It requires at least one relay listener
+and a configured Recovery Journal. A successful result means configuration
+acceptance only; it does not establish Secret availability, live schema
+compatibility, external reachability, or operational readiness. Migration,
+reset, and recovery continue to apply their own command-specific requirements.
 
 Provision one stable 32-byte OAuth signing Secret before migration. Fence every
 old writer, apply migrations, then run `reset-auth` with migration credentials
