@@ -988,66 +988,6 @@ func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error
 		IssuedAt:      claims.IssuedAt,
 	}, nil
 }
-func (s *Server) session(r *http.Request) (string, uint64, string, string, string, error) {
-	c, e := r.Cookie(sessionCookie)
-	if e != nil || len(c.Value) != 43 {
-		return "", 0, "", "", "", errInvalidSession
-	}
-	op, e := s.portalSessions.StartPortalSession(r.Context())
-	if e != nil {
-		return "", 0, "", "", "", e
-	}
-	defer op.Close()
-	tx, e := op.BeginPortalSession(op.Context())
-	if e != nil {
-		return "", 0, "", "", "", e
-	}
-	finished := false
-	defer func() {
-		if !finished {
-			_ = tx.Rollback(op.Context())
-		}
-	}()
-	for version := range s.Peppers {
-		digest := digest32(s.digest(version, "portal-session", c.Value))
-		stored, err := tx.PortalSessionForOwner(op.Context(), digest, version)
-		if errors.Is(err, persistence.ErrInvalidCredential) {
-			continue
-		}
-		if err != nil {
-			return "", 0, "", "", "", err
-		}
-		if _, uncertain := s.uncertainAccounts.Load(stored.AccountID); uncertain {
-			return "", 0, "", "", "", errInvalidSession
-		}
-		if !s.allowAccount(stored.Subject) {
-			return "", 0, "", "", "", errRateLimit
-		}
-		token := s.csrf(stored.PepperVersion, c.Value)
-		if subtle.ConstantTimeCompare(stored.CSRFHash, s.digest(stored.PepperVersion, "csrf-store", token)) != 1 {
-			return "", 0, "", "", "", errors.New("csrf")
-		}
-		touched, err := tx.TouchPortalSession(op.Context(), digest, version, stored.AccountID, stored.Generation)
-		if err != nil {
-			return "", 0, "", "", "", err
-		}
-		if !touched {
-			return "", 0, "", "", "", errInvalidSession
-		}
-		if err = tx.Commit(op.Context()); err != nil {
-			finished = true
-			return "", 0, "", "", "", err
-		}
-		finished = true
-		return stored.AccountID, version, stored.Status, stored.Email, token, nil
-	}
-	if e = tx.Rollback(op.Context()); e != nil {
-		finished = true
-		return "", 0, "", "", "", e
-	}
-	finished = true
-	return "", 0, "", "", "", errInvalidSession
-}
 
 type quotaHistory = portal.QuotaHistoryEntry
 
@@ -1056,7 +996,8 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	id, version, _, _, csrf, e := s.session(r)
+	ownerSession, e := s.ownerPortalSession(r)
+	id, version, csrf := ownerSession.accountID, ownerSession.pepperVersion, ownerSession.csrf
 	if errors.Is(e, errRateLimit) {
 		fail(w, 429)
 		return
@@ -1188,7 +1129,8 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400)
 		return
 	}
-	_, version, _, _, csrf, e := s.session(r)
+	ownerSession, e := s.ownerPortalSession(r)
+	version, csrf := ownerSession.pepperVersion, ownerSession.csrf
 	if errors.Is(e, errRateLimit) {
 		fail(w, 429)
 		return

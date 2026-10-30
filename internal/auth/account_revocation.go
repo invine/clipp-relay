@@ -40,7 +40,7 @@ func failedAccountRevocation(status int, reason string) accountRevocationOutcome
 // retires logical session permission under Auth protection, releases every
 // guard, and only then asks Relay to start physical cleanup.
 func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
-	id, version, _, _, csrf, err := s.session(r)
+	ownerSession, err := s.ownerPortalSession(r)
 	if err != nil {
 		switch {
 		case errors.Is(err, errRateLimit):
@@ -53,6 +53,7 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 			return failedAccountRevocation(http.StatusUnauthorized, "database_unavailable")
 		}
 	}
+	id, version, csrf := ownerSession.accountID, ownerSession.pepperVersion, ownerSession.csrf
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(csrf)) != 1 {
 		return refusedAccountRevocation(http.StatusForbidden, "csrf_rejected")
 	}

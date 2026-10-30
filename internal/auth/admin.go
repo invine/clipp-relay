@@ -92,7 +92,7 @@ func uncertainResponse(w http.ResponseWriter) {
 
 func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation bool) (adminIdentity, bool) {
 	var actor adminIdentity
-	id, version, _, _, csrf, err := s.session(r)
+	ownerSession, err := s.ownerPortalSession(r)
 	if err != nil {
 		if errors.Is(err, errInvalidSession) {
 			markDiagnostic(r, "refused", "not_authorized")
@@ -105,6 +105,7 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 		}
 		return actor, false
 	}
+	id, version, csrf := ownerSession.accountID, ownerSession.pepperVersion, ownerSession.csrf
 	policy, err := config.LoadAdminAllowlist(s.AdminAllowlistFile)
 	if err != nil {
 		markDiagnostic(r, "refused", "not_authorized")
