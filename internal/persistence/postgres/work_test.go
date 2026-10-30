@@ -42,3 +42,27 @@ func TestOperationPreservesParentCancellationAsTemporaryFailure(t *testing.T) {
 		t.Fatalf("canceled operation result = %v, want classified unavailability and cancellation", err)
 	}
 }
+
+func TestAuthorizationAndRefreshOperationsShareAdmission(t *testing.T) {
+	work := postgres.New(database.NewRuntime(nil))
+	operations := make([]persistence.AuthorizationOperation, 64)
+	var err error
+	for i := range operations {
+		operations[i], err = work.StartAuthorization(context.Background())
+		if err != nil {
+			t.Fatalf("start authorization %d: %v", i, err)
+		}
+	}
+	if _, err = work.StartRefresh(context.Background()); !errors.Is(err, persistence.ErrWorkUnavailable) {
+		t.Fatalf("refresh operation while authorization is admitted = %v, want shared admission exhaustion", err)
+	}
+	operations[0].Close()
+	refresh, err := work.StartRefresh(context.Background())
+	if err != nil {
+		t.Fatalf("refresh operation after authorization closes: %v", err)
+	}
+	refresh.Close()
+	for _, operation := range operations[1:] {
+		operation.Close()
+	}
+}

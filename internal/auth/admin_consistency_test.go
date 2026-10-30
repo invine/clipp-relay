@@ -130,7 +130,7 @@ func adminFixture(t *testing.T) (*Server, *http.Cookie, *database.Runtime, strin
 	t.Cleanup(pool.Close)
 	runtime := database.NewRuntime(pool)
 	work := postgres.New(runtime)
-	s := New(Dependencies{Work: work, AccountRegistration: work, PortalSessions: work, Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}, c, m, Provider{})
+	s := New(Dependencies{Work: work, AccountRegistration: work, PortalSessions: work, Authorization: work, Refresh: work, Deletions: postgres.NewDeletions(runtime), Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime), Maintenance: postgres.NewMaintenance(runtime)}, c, m, Provider{})
 	if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 		t.Fatal(err)
 	}
