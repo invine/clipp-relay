@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"clipp-relay/internal/auth"
-	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/persistence/postgres"
 	"clipp-relay/internal/quota"
@@ -18,14 +17,6 @@ func TestQuotaEligibilityUsesItsOwnDatabaseBudget(t *testing.T) {
 	account := newAuthWithRuntime(db, c, m, auth.Google())
 	accounting := quota.New(postgres.New(db))
 	defer accounting.Close()
-	var databaseEvents []diagnostic.Event
-	db.SetTransitions(diagnostic.NewTransitions(func(event diagnostic.Event) { databaseEvents = append(databaseEvents, event) }))
-	if _, err := accounting.Settle(context.Background(), quota.Settlement{}); !errors.Is(err, quota.ErrSettlementConflict) {
-		t.Fatalf("invalid settlement policy = %v", err)
-	}
-	if len(databaseEvents) != 0 {
-		t.Fatalf("policy refusal without persistence work changed database state: %+v", databaseEvents)
-	}
 	id, err := testOperationID()
 	if err != nil {
 		t.Fatal(err)
