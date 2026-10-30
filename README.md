@@ -7,8 +7,10 @@ explicit PostgreSQL migration, fail-closed startup checks, PostgreSQL-backed
 Relay Accounts and Portal Sessions, registered public-client OAuth with Relay
 Access Tokens, separate public and private HTTP listeners, bearer discovery,
 exact-connection Relay Sessions, and stock HOP/STOP forwarding.
-Owner deletion uses a separate OCI deletion journal: a committed conditional
+Owner deletion uses the separate Recovery Journal: a committed conditional
 head and exact immutable event content must be proven before identity detaches.
+Startup qualification and offline recovery share its repository-qualified chain
+proof; offline recovery rechecks the head and ETag before changing restored accounts.
 Confirmed current-week Recorded Relay Usage follows a fresh Pending registration by keyed
 digest; old account state, plan, credentials, and presentation do not.
 With periodic accounting, deletion first invalidates credentials and physically
