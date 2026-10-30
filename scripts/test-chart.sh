@@ -8,6 +8,9 @@ trap 'rm -rf "$work"' EXIT
 
 helm lint "$chart" -f "$example" --strict
 helm template isolated "$chart" -n clipp-isolated -f "$example" > "$work/serving.yaml"
+go build -o "$work/clipp-relay-validator" ./cmd/clipp-relay
+export CLIPP_RELAY_VALIDATOR="$work/clipp-relay-validator"
+CLIPP_RELAY_VALIDATOR="$work/clipp-relay-validator" bash scripts/validate-rendered-config.sh "$work/serving.yaml"
 grep -q 'kind: StatefulSet' "$work/serving.yaml"
 grep -q 'replicas: 1' "$work/serving.yaml"
 grep -q 'kind: NetworkPolicy' "$work/serving.yaml"
@@ -86,12 +89,20 @@ grep -q 'ingressClassName: "f5.nginx"' "$work/dotted-class.yaml"
 
 helm template isolated "$chart" -n clipp-isolated -f "$example" \
   --set 'transports.tcp.addresses[0]=/dns4/tcp.example.test/tcp/4001' \
-  --set 'transports.udp.addresses[0]=/dns4/udp.example.test/udp/4003' \
+  --set 'transports.udp.addresses[0]=/dns4/udp.example.test/udp/4003/webrtc-direct' \
   --set-json 'networkPolicy.apiCidrs=[]' > "$work/overrides.yaml"
+CLIPP_RELAY_VALIDATOR="$work/clipp-relay-validator" bash scripts/validate-rendered-config.sh "$work/overrides.yaml"
+helm template isolated "$chart" -n clipp-isolated -f "$example" \
+  --set 'transports.udp.addresses[0]=/dns4/udp.example.test/udp/4003' > "$work/incomplete-udp.yaml"
+if CLIPP_RELAY_VALIDATOR="$work/clipp-relay-validator" bash scripts/validate-rendered-config.sh "$work/incomplete-udp.yaml" > "$work/incomplete-udp-validation.log" 2>&1; then
+  echo 'runtime accepted an incomplete rendered WebRTC Direct address' >&2
+  exit 1
+fi
 helm template isolated "$chart" -n clipp-isolated -f "$example" \
   --set transports.tcp.enabled=false --set transports.udp.enabled=false \
   --set oci.subnetOcid= --set oci.frontendNsgOcid= --set oci.backendNsgOcid= \
   --set-json 'networkPolicy.apiCidrs=[]' > "$work/wss-only.yaml"
+CLIPP_RELAY_VALIDATOR="$work/clipp-relay-validator" bash scripts/validate-rendered-config.sh "$work/wss-only.yaml"
 ! grep -q 'type: LoadBalancer' "$work/wss-only.yaml"
 ! grep -q 'kind: Role$' "$work/wss-only.yaml"
 ! grep -q 'kind: Role$' "$work/overrides.yaml"
@@ -106,6 +117,16 @@ fi
 bash scripts/preflight-external.sh "$example" isolated-other clipp-other > "$work/preflight.log"
 grep -q 'isolated-other' "$work/preflight.log"
 grep -q 'clipp-other' "$work/preflight.log"
+cat > "$work/incomplete-udp-values.yaml" <<'YAML'
+transports:
+  udp:
+    addresses:
+      - /dns4/udp.example.test/udp/4003
+YAML
+if CLIPP_RELAY_VALIDATOR="$work/clipp-relay-validator" bash scripts/preflight-external.sh "$example" invalid-udp clipp-isolated '' "$work/incomplete-udp-values.yaml" > "$work/incomplete-udp-preflight.log" 2>&1; then
+  echo 'operator preflight accepted incomplete rendered WebRTC Direct address' >&2
+  exit 1
+fi
 
 cp "$example" "$work/managed-cert-values.yaml"
 cat >> "$work/managed-cert-values.yaml" <<'YAML'
