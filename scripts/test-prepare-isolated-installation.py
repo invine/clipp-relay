@@ -58,17 +58,34 @@ class InstallationPreparationTests(unittest.TestCase):
         values["database"]["bundled"]["initialize"] = phase == "stopped"
         return values
 
+    def rendered_bootstrap_job(self):
+        rendered = subprocess.check_output([
+            "helm", "template", "isolated", str(CHART), "-n", "relay-portal-test",
+            "-f", str(CHART / "examples/bundled-test-values.yaml"),
+            "-f", str(CHART / "examples/letsencrypt-values.yaml"),
+            "--set", "deployment.phase=migrating", "--set-string", "deployment.runId=deadbeef",
+            "--set", "database.bundled.initialize=false",
+        ], text=True)
+        source = "require 'yaml'; require 'json'; puts JSON.generate(YAML.load_stream(STDIN.read).compact)"
+        documents = json.loads(subprocess.check_output(
+            ["ruby", "-ryaml", "-rjson", "-e", source], input=rendered, text=True))
+        return next(doc for doc in documents if doc.get("kind") == "Job" and
+                    doc.get("metadata", {}).get("name", "").endswith("-bootstrap-deadbeef"))
+
     def completed_observations(self, artifacts):
         migration = json.loads(pathlib.Path(artifacts["migration_manifest"]).read_text())
         reset = json.loads(pathlib.Path(artifacts["reset_manifest"]).read_text())
         success_log = [{"event": "service.startup", "outcome": "success", "schema_revision": 16}]
-        bootstrap = {"metadata": {"name": "isolated-clipp-relay-postgres-bootstrap-deadbeef",
-                                   "namespace": "relay-portal-test"},
-                    "status": {"succeeded": 1}}
+        bootstrap = self.rendered_bootstrap_job() | {"status": {"succeeded": 1}}
+        bootstrap["metadata"]["namespace"] = "relay-portal-test"
+        postgres_pod = {"metadata": {"name": "isolated-clipp-relay-postgres-0",
+                                      "namespace": "relay-portal-test"},
+                       "spec": {"initContainers": [{"name": "initialize", "env": [
+                           {"name": "CLIPP_INITIALIZE", "value": "false"}]}]}}
         return {
             "release": {"name": "isolated", "namespace": "relay-portal-test", "status": "deployed",
                         "values": self.reviewed_values()},
-            "bootstrap": {"job": bootstrap, "pod_initialize": False},
+            "bootstrap": {"job": bootstrap, "pod": postgres_pod},
             "jobs": {"migration": migration | {"status": {"succeeded": 1}},
                      "migration_logs": success_log,
                      "reset": reset | {"status": {"succeeded": 1}},
@@ -163,6 +180,32 @@ class InstallationPreparationTests(unittest.TestCase):
                                     "release_initialize": False, "bootstrap": "completed",
                                     "recorded_serving_release": False, "extension_id": None,
                                     "migration": "completed", "reset": "completed"})
+
+    def test_changed_retained_bootstrap_job_identity_or_spec_is_refused(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        artifacts = json.loads(first.stdout)
+        mutations = (
+            ("labels", lambda job: job["metadata"].setdefault("labels", {}).__setitem__("foreign", "true")),
+            ("annotations", lambda job: job["metadata"]["annotations"].__setitem__("foreign", "true")),
+            ("full spec", lambda job: job["spec"]["template"]["spec"].__setitem__("automountServiceAccountToken", True)),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                observations = self.completed_observations(artifacts)
+                mutate(observations["bootstrap"]["job"])
+                result = self.observe_command(observations)
+                self.assertNotEqual(result.returncode, 0, f"accepted changed bootstrap Job {label}")
+
+    def test_bootstrap_initialization_is_read_from_raw_pod_observation(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        observations = self.completed_observations(json.loads(first.stdout))
+        observations["bootstrap"]["pod"]["spec"]["initContainers"][0]["env"][0]["value"] = "true"
+        result = self.observe_command(observations)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = json.loads(result.stdout)["observations"]
+        self.assertEqual(evidence["bootstrap"], "incomplete")
 
     def test_foreign_retained_job_evidence_is_refused(self):
         first = self.run_prepare()
