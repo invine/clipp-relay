@@ -38,6 +38,7 @@ type adminIdentity struct {
 	id, email, csrf string
 	revision        uint64
 	version         uint64
+	generation      int64
 }
 
 type adminFormErrorKey struct{}
@@ -174,7 +175,7 @@ func (s *Server) administrator(w http.ResponseWriter, r *http.Request, mutation 
 			return actor, false
 		}
 	}
-	actor = adminIdentity{id: id, email: strings.ToLower(strings.TrimSpace(adminSession.Email)), csrf: csrf, revision: policy.Revision, version: version}
+	actor = adminIdentity{id: id, email: strings.ToLower(strings.TrimSpace(adminSession.Email)), csrf: csrf, revision: policy.Revision, version: version, generation: ownerSession.generation}
 	return actor, true
 }
 
@@ -192,6 +193,23 @@ func (s *Server) recheckAdministrator(w http.ResponseWriter, tx persistence.Acco
 	if err != nil {
 		markDiagnostic(r, "failed", "database_unavailable")
 		return 503
+	}
+	cookie, cookieErr := r.Cookie(sessionCookie)
+	if cookieErr != nil {
+		markDiagnostic(r, "refused", "not_authorized")
+		return 401
+	}
+	if _, err = s.verifyOwnerPortalSessionInTransaction(r.Context(), tx, cookie.Value, actor.id, actor.version, actor.generation); err != nil {
+		switch {
+		case errors.Is(err, errRateLimit):
+			return 429
+		case errors.Is(err, errInvalidSession), errors.Is(err, errInvalidPortalSessionCSRF):
+			markDiagnostic(r, "refused", "not_authorized")
+			return 401
+		default:
+			markDiagnostic(r, "failed", "database_unavailable")
+			return 503
+		}
 	}
 	if !session.Recent {
 		markDiagnostic(r, "refused", "recent_auth_required")

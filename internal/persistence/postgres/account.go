@@ -146,7 +146,7 @@ func (t *transaction) PortalSessionForOwner(ctx context.Context, digest [32]byte
 		WHERE ps.credential_digest=$1 AND ps.pepper_version=$2
 		AND ps.idle_expires_at>clock_timestamp() AND ps.absolute_expires_at>clock_timestamp()
 		AND ps.credential_generation=a.credential_generation
-		AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days')`, digest[:], version).
+		AND (a.status<>'Pending' OR a.last_portal_login_at>=clock_timestamp()-interval '90 days') FOR UPDATE OF ps`, digest[:], version).
 		Scan(&session.AccountID, &session.Status, &session.Email, &session.Subject, &session.Generation, &session.PepperVersion, &session.CSRFHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return persistence.PortalSessionOwner{}, persistence.ErrInvalidCredential

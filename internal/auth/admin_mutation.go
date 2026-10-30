@@ -168,6 +168,19 @@ func (s *Server) applyAdminAccountMutation(ctx context.Context, r *http.Request,
 	if err != nil {
 		return failedAdminAccount(http.StatusServiceUnavailable, "database_unavailable")
 	}
+	cookie, cookieErr := r.Cookie(sessionCookie)
+	if cookieErr != nil {
+		return refusedAdminAccount(http.StatusUnauthorized, "not_authorized")
+	}
+	if _, err = s.verifyOwnerPortalSessionInTransaction(op.Context(), tx, cookie.Value, actor.id, actor.version, actor.generation); err != nil {
+		if errors.Is(err, errRateLimit) {
+			return refusedAdminAccount(http.StatusTooManyRequests, "rate_limited")
+		}
+		if errors.Is(err, errInvalidSession) || errors.Is(err, errInvalidPortalSessionCSRF) {
+			return refusedAdminAccount(http.StatusUnauthorized, "not_authorized")
+		}
+		return failedAdminAccount(http.StatusServiceUnavailable, "database_unavailable")
+	}
 	if !actorSession.Recent {
 		return refusedAdminAccount(http.StatusUnauthorized, "recent_auth_required")
 	}
