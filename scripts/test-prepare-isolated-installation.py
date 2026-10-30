@@ -37,6 +37,29 @@ class InstallationPreparationTests(unittest.TestCase):
                 "--native-secret", "clipp-native-oauth-v1", "--install-fingerprint", "a" * 64,
                 "--relay-binary", str(self.validator)]
 
+    def observe_command(self, observations):
+        path = self.root / "observations.json"
+        path.write_text(json.dumps(observations))
+        return subprocess.run(self.command() + ["--observations-file", str(path)], capture_output=True, text=True)
+
+    def completed_observations(self, artifacts):
+        migration = json.loads(pathlib.Path(artifacts["migration_manifest"]).read_text())
+        reset = json.loads(pathlib.Path(artifacts["reset_manifest"]).read_text())
+        success_log = [{"event": "service.startup", "outcome": "success", "schema_revision": 16}]
+        bootstrap = {"metadata": {"name": "isolated-clipp-relay-postgres-bootstrap-deadbeef",
+                                   "namespace": "relay-portal-test"},
+                    "status": {"succeeded": 1}}
+        return {
+            "release": {"name": "isolated", "namespace": "relay-portal-test", "status": "deployed",
+                        "values": {"deployment": {"phase": "migrating", "runId": "deadbeef"},
+                                   "database": {"bundled": {"initialize": False}}}},
+            "bootstrap": {"job": bootstrap, "pod_initialize": False},
+            "jobs": {"migration": migration | {"status": {"succeeded": 1}},
+                     "migration_logs": success_log,
+                     "reset": reset | {"status": {"succeeded": 1}},
+                     "reset_logs": success_log},
+        }
+
     def run_prepare(self):
         return subprocess.run(self.command(), capture_output=True, text=True)
 
@@ -113,6 +136,59 @@ class InstallationPreparationTests(unittest.TestCase):
         result = self.run_prepare()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("symbolic link", result.stderr)
+
+    def test_preparation_interprets_completed_retained_evidence(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        artifacts = json.loads(first.stdout)
+        result = self.observe_command(self.completed_observations(artifacts))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = json.loads(result.stdout)["observations"]
+        self.assertEqual(evidence, {"release": "migrating", "bootstrap": "completed",
+                                    "migration": "completed", "reset": "completed"})
+
+    def test_foreign_retained_job_evidence_is_refused(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        observations = self.completed_observations(json.loads(first.stdout))
+        observations["jobs"]["migration"]["metadata"]["annotations"]["clipp-relay-test/install-fingerprint"] = "foreign"
+        result = self.observe_command(observations)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("foreign migration Job", result.stderr)
+
+    def test_pending_failed_and_incomplete_observations_are_distinguished(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        artifacts = json.loads(first.stdout)
+        for job_status, logs, expected in (
+            ({"active": 1}, [], "pending"),
+            ({"failed": 1}, [], "failed"),
+            ({"succeeded": 1}, [], "incomplete"),
+        ):
+            observations = self.completed_observations(artifacts)
+            observations["jobs"]["migration"]["status"] = job_status
+            observations["jobs"]["migration_logs"] = logs
+            result = self.observe_command(observations)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["observations"]["migration"], expected)
+
+    def test_mismatched_release_namespace_is_refused(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        observations = self.completed_observations(json.loads(first.stdout))
+        observations["release"]["namespace"] = "foreign-namespace"
+        result = self.observe_command(observations)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different release or namespace", result.stderr)
+
+    def test_mismatched_release_run_identity_is_refused(self):
+        first = self.run_prepare()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        observations = self.completed_observations(json.loads(first.stdout))
+        observations["release"]["values"]["deployment"]["runId"] = "cafebabe"
+        result = self.observe_command(observations)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match the reviewed run identity", result.stderr)
 
 
 if __name__ == "__main__":

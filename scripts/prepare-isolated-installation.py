@@ -199,6 +199,126 @@ def build_migration_job(documents: list[dict], release: str, namespace: str, job
                     "volumes": [config, db, ca]}}}}
 
 
+def job_observation(name: str, observed: dict | None, expected: dict, logs: list[str | dict]) -> str:
+    if observed is None:
+        return "missing"
+    if not isinstance(observed, dict) or not isinstance(logs, list):
+        fail(f"{name.capitalize()} Job observations have an invalid shape")
+    metadata = observed.get("metadata", {})
+    expected_metadata = expected["metadata"]
+    if metadata.get("name") != expected_metadata["name"] or metadata.get("namespace") != expected_metadata["namespace"]:
+        fail(f"Refusing foreign {name} Job evidence")
+    annotations = metadata.get("annotations", {})
+    if annotations.get("clipp-relay-test/install-fingerprint") != expected_metadata["annotations"]["clipp-relay-test/install-fingerprint"]:
+        fail(f"Refusing foreign {name} Job evidence")
+    expected_container = expected["spec"]["template"]["spec"]["containers"][0]
+    actual_pod = observed.get("spec", {}).get("template", {}).get("spec", {})
+    actual_container = next((container for container in actual_pod.get("containers", [])
+                             if container.get("name") == expected_container["name"]), {})
+    if (actual_container.get("image") != expected_container.get("image") or
+            actual_container.get("args") != expected_container.get("args") or
+            actual_container.get("resources") != expected_container.get("resources")):
+        fail(f"Retained {name} Job configuration differs from the reviewed artifact")
+    expected_secrets = {volume["name"]: volume.get("secret", {}).get("secretName")
+                        for volume in expected["spec"]["template"]["spec"].get("volumes", [])
+                        if volume.get("secret")}
+    actual_secrets = {volume["name"]: volume.get("secret", {}).get("secretName")
+                      for volume in actual_pod.get("volumes", []) if volume.get("secret")}
+    if any(actual_secrets.get(name) != secret for name, secret in expected_secrets.items()):
+        fail(f"Retained {name} Job Secret references differ from the reviewed artifact")
+    status = observed.get("status", {})
+    if not isinstance(status, dict):
+        fail(f"{name.capitalize()} Job status evidence is invalid")
+    if status.get("failed", 0) > 0:
+        return "failed"
+    if status.get("succeeded") != 1:
+        return "pending" if status.get("active", 0) > 0 or not status else "incomplete"
+    records: list[dict] = []
+    for line in logs:
+        if isinstance(line, dict):
+            records.append(line)
+        elif isinstance(line, str):
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    complete = any(record.get("event") == "service.startup" and record.get("outcome") == "success" and
+                   record.get("schema_revision") == 16 for record in records)
+    return "completed" if complete else "incomplete"
+
+
+def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, run_id: str,
+                           migration: dict, reset: dict) -> dict:
+    try:
+        observations = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"Installation observations are unreadable: {error}")
+    if not isinstance(observations, dict):
+        fail("Installation observations must be a JSON object")
+    release_observation = observations.get("release", {})
+    if not isinstance(release_observation, dict):
+        fail("Helm release observations have an invalid shape")
+    if release_observation.get("name") != release or release_observation.get("namespace") != namespace:
+        fail("Refusing Helm release evidence for a different release or namespace")
+    release_status = release_observation.get("status")
+    if release_status == "absent":
+        release_state = "absent"
+    elif isinstance(release_status, str) and release_status.startswith("pending"):
+        release_state = "pending"
+    elif release_status == "failed":
+        release_state = "failed"
+    elif release_status == "deployed":
+        values = release_observation.get("values", {})
+        if not isinstance(values, dict):
+            fail("Installed release values evidence has an invalid shape")
+        deployment = values.get("deployment", {})
+        database_values = values.get("database", {})
+        if not isinstance(deployment, dict) or not isinstance(database_values, dict):
+            fail("Installed release phase evidence has an invalid shape")
+        database = database_values.get("bundled", {})
+        if not isinstance(database, dict):
+            fail("Installed database initialization evidence has an invalid shape")
+        phase = deployment.get("phase")
+        observed_run_id = deployment.get("runId", "")
+        initialize = database.get("initialize")
+        if phase not in {"stopped", "migrating", "serving"}:
+            fail("Installed release has an unsupported phase")
+        if phase == "migrating" and (observed_run_id != run_id or initialize is not False):
+            fail("Installed migration phase does not match the reviewed run identity")
+        if phase == "serving" and (observed_run_id != "" or initialize is not False):
+            fail("Installed serving phase does not match the reviewed completion identity")
+        release_state = phase
+    else:
+        fail("Installed release status is missing or unsupported")
+
+    bootstrap = observations.get("bootstrap", {})
+    if not isinstance(bootstrap, dict):
+        fail("PostgreSQL bootstrap observations have an invalid shape")
+    bootstrap_job = bootstrap.get("job")
+    bootstrap_state = "missing"
+    if bootstrap_job is not None:
+        expected_name = f"{release}-clipp-relay-postgres-bootstrap-{run_id}"
+        metadata = bootstrap_job.get("metadata", {})
+        if metadata.get("name") != expected_name or metadata.get("namespace") != namespace:
+            fail("Refusing foreign PostgreSQL bootstrap Job evidence")
+        status = bootstrap_job.get("status", {})
+        if status.get("failed", 0) > 0:
+            bootstrap_state = "failed"
+        elif status.get("succeeded") == 1 and bootstrap.get("pod_initialize") is False:
+            bootstrap_state = "completed"
+        elif status.get("active", 0) > 0:
+            bootstrap_state = "pending"
+        else:
+            bootstrap_state = "incomplete"
+
+    jobs = observations.get("jobs", {})
+    if not isinstance(jobs, dict):
+        fail("Application Job observations have an invalid shape")
+    return {"release": release_state, "bootstrap": bootstrap_state,
+            "migration": job_observation("migration", jobs.get("migration"), migration, jobs.get("migration_logs", [])),
+            "reset": job_observation("reset", jobs.get("reset"), reset, jobs.get("reset_logs", []))}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="absolute relay repository root")
@@ -215,6 +335,7 @@ def main() -> None:
     parser.add_argument("--native-secret", required=True)
     parser.add_argument("--install-fingerprint", required=True)
     parser.add_argument("--relay-binary", help="built clipp-relay binary; defaults to go run")
+    parser.add_argument("--observations-file", help="optional JSON snapshot of retained release and Job evidence")
     args = parser.parse_args()
 
     for label, value in (("release", args.release), ("namespace", args.namespace),
@@ -317,9 +438,14 @@ def main() -> None:
         (migration_path, (json.dumps(migration, indent=2) + "\n").encode()),
         (reset_path, (json.dumps(reset, indent=2) + "\n").encode()),
     ])
-    print(json.dumps({"chart_dir": str(chart), "migration_manifest": str(migration_path),
+    result = {"chart_dir": str(chart), "migration_manifest": str(migration_path),
                       "reset_manifest": str(reset_path), "input_fingerprint": input_fingerprint,
-                      "runtime_configuration": "accepted"}, sort_keys=True))
+                      "runtime_configuration": "accepted"}
+    if args.observations_file:
+        result["observations"] = interpret_observations(pathlib.Path(args.observations_file),
+            release=args.release, namespace=args.namespace, run_id=args.run_id,
+            migration=migration, reset=reset)
+    print(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":
