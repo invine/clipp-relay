@@ -14,6 +14,11 @@ import (
 
 type Work struct{ runtime *database.Runtime }
 
+var (
+	_ persistence.AccountRegistrationWork = (*Work)(nil)
+	_ persistence.PortalSessionWork       = (*Work)(nil)
+)
+
 func New(runtime *database.Runtime) *Work { return &Work{runtime: runtime} }
 
 // beginOwnedTransaction shares operation admission and transaction lifetime for
@@ -32,6 +37,10 @@ func beginOwnedTransaction(ctx context.Context, runtime *database.Runtime) (pers
 }
 
 func (w *Work) Start(parent context.Context) (persistence.Operation, error) {
+	return w.start(parent)
+}
+
+func (w *Work) start(parent context.Context) (*operation, error) {
 	ctx, release, err := w.runtime.StartUnit(parent)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -45,15 +54,48 @@ func (w *Work) Start(parent context.Context) (persistence.Operation, error) {
 	return &operation{runtime: w.runtime, ctx: ctx, release: release}, nil
 }
 
+func (w *Work) StartAccountRegistration(ctx context.Context) (persistence.AccountRegistrationOperation, error) {
+	return w.start(ctx)
+}
+
+func (w *Work) StartPortalSession(ctx context.Context) (persistence.PortalSessionOperation, error) {
+	return w.start(ctx)
+}
+
 type operation struct {
 	runtime *database.Runtime
 	ctx     context.Context
 	release func()
 }
 
+var (
+	_ persistence.AccountRegistrationOperation = (*operation)(nil)
+	_ persistence.PortalSessionOperation       = (*operation)(nil)
+)
+
 func (o *operation) Context() context.Context { return o.ctx }
 func (o *operation) Close()                   { o.release() }
 func (o *operation) Begin(ctx context.Context) (persistence.Transaction, error) {
+	return o.begin(ctx)
+}
+
+func (o *operation) BeginAccountRegistration(ctx context.Context) (persistence.AccountRegistrationTransaction, error) {
+	tx, err := o.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (o *operation) BeginPortalSession(ctx context.Context) (persistence.PortalSessionTransaction, error) {
+	tx, err := o.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (o *operation) begin(ctx context.Context) (*transaction, error) {
 	if err := o.ctx.Err(); err != nil {
 		return nil, unavailable(err)
 	}

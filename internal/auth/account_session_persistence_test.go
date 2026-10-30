@@ -28,6 +28,34 @@ func (o accountSessionOperation) Begin(context.Context) (persistence.Transaction
 	return o.tx, nil
 }
 
+type portalSessionOnlyWork struct {
+	tx    persistence.PortalSessionTransaction
+	close func()
+}
+
+func (w portalSessionOnlyWork) StartPortalSession(context.Context) (persistence.PortalSessionOperation, error) {
+	return portalSessionOnlyOperation{tx: w.tx, close: w.close}, nil
+}
+
+type portalSessionOnlyOperation struct {
+	tx    persistence.PortalSessionTransaction
+	close func()
+}
+
+func (o portalSessionOnlyOperation) Context() context.Context { return context.Background() }
+func (o portalSessionOnlyOperation) Close() {
+	if o.close != nil {
+		o.close()
+	}
+}
+func (o portalSessionOnlyOperation) BeginPortalSession(context.Context) (persistence.PortalSessionTransaction, error) {
+	return o.tx, nil
+}
+
+func portalSessionWorkForTest(tx *accountSessionTx) portalSessionOnlyWork {
+	return portalSessionOnlyWork{tx: tx, close: func() { tx.closed = true }}
+}
+
 type accountSessionTx struct {
 	session    persistence.PortalSessionOwner
 	lookupErr  error
@@ -91,7 +119,7 @@ func TestPortalSessionValidationUsesRepositoryAndPreservesSessionIdentity(t *tes
 		},
 		touched: true,
 	}
-	s.persistence = accountSessionWork{tx: tx}
+	s.portalSessions = portalSessionWorkForTest(tx)
 	r := httptest.NewRequest("GET", "/", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
 
@@ -110,7 +138,7 @@ func TestPortalSessionValidationUsesRepositoryAndPreservesSessionIdentity(t *tes
 func TestExpiredPortalSessionDoesNotRenewAndReleasesOperation(t *testing.T) {
 	credential := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	tx := &accountSessionTx{lookupErr: persistence.ErrInvalidCredential}
-	s := &Server{Peppers: map[uint64][]byte{1: []byte("test pepper")}, persistence: accountSessionWork{tx: tx}}
+	s := &Server{Peppers: map[uint64][]byte{1: []byte("test pepper")}, portalSessions: portalSessionWorkForTest(tx)}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: credential})
 
@@ -136,7 +164,7 @@ func TestPortalLogoutDeletesOnlyItsSessionThroughRepository(t *testing.T) {
 		},
 		touched: true,
 	}
-	s.persistence = accountSessionWork{tx: tx}
+	s.portalSessions = portalSessionWorkForTest(tx)
 	r := httptest.NewRequest("POST", "/auth/logout", strings.NewReader("csrf="+url.QueryEscape(csrf)))
 	r.Header.Set("Origin", s.Origin)
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
