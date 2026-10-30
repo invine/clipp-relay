@@ -308,8 +308,9 @@ func run() int {
 }
 
 func composeAuthPersistence(runtime *database.Runtime) auth.Dependencies {
+	work := postgres.New(runtime)
 	return auth.Dependencies{
-		Work: postgres.New(runtime), Deletions: postgres.NewDeletions(runtime),
+		Work: work, AccountRegistration: work, PortalSessions: work, Deletions: postgres.NewDeletions(runtime),
 		Recovery: postgres.NewRecovery(runtime), ReadViews: postgres.NewReadViews(runtime),
 		Maintenance: postgres.NewMaintenance(runtime),
 	}
