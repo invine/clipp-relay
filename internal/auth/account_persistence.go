@@ -7,20 +7,15 @@ import (
 	"clipp-relay/internal/persistence"
 )
 
-func beginAccountTransaction(op persistence.Operation) (persistence.Transaction, persistence.AccountTransaction, error) {
-	tx, err := op.Begin(op.Context())
+func beginAccountTransaction(op persistence.AccountRegistrationOperation) (persistence.AccountRegistrationTransaction, error) {
+	tx, err := op.BeginAccountRegistration(op.Context())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	accountTx, ok := tx.(persistence.AccountTransaction)
-	if !ok {
-		_ = tx.Rollback(op.Context())
-		return nil, nil, errors.New("account repositories are unavailable")
-	}
-	return tx, accountTx, nil
+	return tx, nil
 }
 
-func (s *Server) importRetainedUsage(ctx context.Context, tx persistence.AccountTransaction, accountID, subject string) error {
+func (s *Server) importRetainedUsage(ctx context.Context, tx persistence.AccountRegistrationTransaction, accountID, subject string) error {
 	week, err := tx.CurrentRetainedUsageWeek(ctx)
 	if err != nil {
 		return err
@@ -63,9 +58,9 @@ func (s *Server) commitPortalTransaction(ctx context.Context, tx persistence.Tra
 	return tx.Commit(ctx)
 }
 
-func (s *Server) persistGoogleLogin(op persistence.Operation, claims identity, candidateID, auditID, credential string) (string, int64, error) {
+func (s *Server) persistGoogleLogin(op persistence.AccountRegistrationOperation, claims identity, candidateID, auditID, credential string) (string, int64, error) {
 	ctx := op.Context()
-	tx, accountTx, err := beginAccountTransaction(op)
+	tx, err := beginAccountTransaction(op)
 	if err != nil {
 		return "", 0, err
 	}
@@ -75,7 +70,7 @@ func (s *Server) persistGoogleLogin(op persistence.Operation, claims identity, c
 			_ = tx.Rollback(ctx)
 		}
 	}()
-	registered, err := accountTx.UpsertRelayAccount(ctx, persistence.AccountRegistration{
+	registered, err := tx.UpsertRelayAccount(ctx, persistence.AccountRegistration{
 		ID: candidateID, Issuer: googleIssuer, Subject: claims.Subject, Email: claims.Email,
 		EmailVerified: claims.EmailVerified, HostedDomain: claims.HostedDomain,
 	})
@@ -87,7 +82,7 @@ func (s *Server) persistGoogleLogin(op persistence.Operation, claims identity, c
 		if expected, ok := pending.(uncertainDeletion); ok {
 			deletionOperationID = expected.operationID
 		}
-		state, err := accountTx.AccountStateAfterUncertain(ctx, registered.ID, deletionOperationID)
+		state, err := tx.AccountStateAfterUncertain(ctx, registered.ID, deletionOperationID)
 		if err != nil {
 			return "", 0, err
 		}
@@ -106,15 +101,15 @@ func (s *Server) persistGoogleLogin(op persistence.Operation, claims identity, c
 		s.uncertainAccounts.Delete(registered.ID)
 	}
 	if registered.Created {
-		if err = s.importRetainedUsage(ctx, accountTx, registered.ID, claims.Subject); err != nil {
+		if err = s.importRetainedUsage(ctx, tx, registered.ID, claims.Subject); err != nil {
 			return "", 0, err
 		}
-		if err = accountTx.RecordAccountCreated(ctx, auditID, registered.ID); err != nil {
+		if err = tx.RecordAccountCreated(ctx, auditID, registered.ID); err != nil {
 			return "", 0, err
 		}
 	}
 	csrf := s.csrf(s.CurrentPepper, credential)
-	if err = accountTx.CreatePortalSession(ctx, digest32(s.digest(s.CurrentPepper, "portal-session", credential)), s.CurrentPepper, registered.ID, registered.Generation, digest32(s.digest(s.CurrentPepper, "csrf-store", csrf))); err != nil {
+	if err = tx.CreatePortalSession(ctx, digest32(s.digest(s.CurrentPepper, "portal-session", credential)), s.CurrentPepper, registered.ID, registered.Generation, digest32(s.digest(s.CurrentPepper, "csrf-store", csrf))); err != nil {
 		return "", 0, err
 	}
 	err = s.commitPortalTransaction(ctx, tx)

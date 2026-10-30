@@ -87,14 +87,16 @@ func deletionAdmissionServerFixture(subject string, admitErr error) (*Server, *h
 		consents:      make(map[string]oauthConsent),
 	}
 	csrf := s.csrf(pepperVersion, credential)
-	s.persistence = accountSessionWork{tx: &accountSessionTx{
+	sessionTx := &accountSessionTx{
 		session: persistence.PortalSessionOwner{
 			AccountID: "account-07", Status: "Active", Subject: subject,
 			Generation: 1, PepperVersion: pepperVersion,
 			CSRFHash: s.digest(pepperVersion, "csrf-store", csrf),
 		},
 		touched: true,
-	}}
+	}
+	s.persistence = accountSessionWork{tx: sessionTx}
+	s.portalSessions = portalSessionOnlyWork{tx: sessionTx}
 	s.SetAccountChangedForTest(func(AccountChange) string { return "" })
 	s.deletions = deletionAdmissionRepositoryFixture{tx: deletionAdmissionTxFixture{
 		ownerSubject: subject,
