@@ -24,8 +24,9 @@ type AccountAuthorization struct {
 // PortalSessionForConsent is the minimal browser-session projection required
 // to approve native-client consent.
 type PortalSessionForConsent struct {
-	Generation int64
-	CSRFHash   []byte
+	AccountID, Subject string
+	Generation         int64
+	CSRFHash           []byte
 }
 
 // AuthorizationCodeOwner is a preliminary identity observation. The caller

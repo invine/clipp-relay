@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"crypto/subtle"
 	"errors"
 	"net/http"
 
@@ -26,11 +25,14 @@ type authorizationPortalSession struct {
 // It validates CSRF before extending the idle deadline, matching session().
 func (s *Server) authorizationPortalSession(r *http.Request) (authorizationPortalSession, error) {
 	cookie, err := r.Cookie(sessionCookie)
-	if err != nil || len(cookie.Value) != 43 {
+	if err != nil {
 		return authorizationPortalSession{}, errInvalidSession
 	}
-	for version := range s.Peppers {
-		digest := digest32(s.digest(version, "portal-session", cookie.Value))
+	credentials, err := s.portalSessionCredentials(cookie.Value)
+	if err != nil {
+		return authorizationPortalSession{}, err
+	}
+	for _, credential := range credentials {
 		op, err := s.authorization.StartAuthorization(r.Context())
 		if err != nil {
 			return authorizationPortalSession{}, err
@@ -41,7 +43,7 @@ func (s *Server) authorizationPortalSession(r *http.Request) (authorizationPorta
 			return authorizationPortalSession{}, err
 		}
 		defer tx.Rollback(op.Context())
-		stored, err := tx.PortalSessionForAuthorization(op.Context(), digest, version)
+		stored, err := tx.PortalSessionForAuthorization(op.Context(), credential.digest, credential.version)
 		if errors.Is(err, persistence.ErrInvalidCredential) {
 			_ = tx.Rollback(op.Context())
 			op.Close()
@@ -52,21 +54,14 @@ func (s *Server) authorizationPortalSession(r *http.Request) (authorizationPorta
 			op.Close()
 			return authorizationPortalSession{}, err
 		}
-		if _, uncertain := s.uncertainAccounts.Load(stored.AccountID); uncertain {
+		csrf, err := s.verifyPortalSessionProof(credential, portalSessionProof{
+			accountID: stored.AccountID, subject: stored.Subject,
+			version: stored.PepperVersion, csrfHash: stored.CSRFHash,
+		}, true)
+		if err != nil {
 			_ = tx.Rollback(op.Context())
 			op.Close()
-			return authorizationPortalSession{}, errInvalidSession
-		}
-		if !s.allowAccount(stored.Subject) {
-			_ = tx.Rollback(op.Context())
-			op.Close()
-			return authorizationPortalSession{}, errRateLimit
-		}
-		csrf := s.csrf(stored.PepperVersion, cookie.Value)
-		if subtle.ConstantTimeCompare(stored.CSRFHash, s.digest(stored.PepperVersion, "csrf-store", csrf)) != 1 {
-			_ = tx.Rollback(op.Context())
-			op.Close()
-			return authorizationPortalSession{}, errors.New("csrf")
+			return authorizationPortalSession{}, err
 		}
 		if err = tx.Commit(op.Context()); err != nil {
 			op.Close()
@@ -75,7 +70,7 @@ func (s *Server) authorizationPortalSession(r *http.Request) (authorizationPorta
 		op.Close()
 		return authorizationPortalSession{
 			account: stored.AccountID,
-			subject: stored.Subject, csrf: csrf, version: stored.PepperVersion,
+			subject: stored.Subject, csrf: csrf, version: credential.version,
 			email: stored.Email, emailVerified: stored.EmailVerified,
 		}, nil
 	}

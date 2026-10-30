@@ -168,17 +168,14 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		s.oauthError(w, 503)
 		return
 	}
-	portalSession, e := authorizationTx.LockPortalSessionForConsent(op.Context(), digest32(s.digest(version, "portal-session", credential)), version, account, accountState.Generation)
-	if errors.Is(e, persistence.ErrInvalidCredential) {
-		s.oauthError(w, 401)
-		return
-	}
-	if e != nil {
-		s.oauthError(w, 503)
-		return
-	}
-	if portalSession.Generation != accountState.Generation || subtle.ConstantTimeCompare(portalSession.CSRFHash, s.digest(version, "csrf-store", s.csrf(version, credential))) != 1 {
-		s.oauthError(w, 401)
+	if _, e = s.verifyConsentPortalSessionInTransaction(op.Context(), authorizationTx, credential, account, version, accountState.Generation); e != nil {
+		if errors.Is(e, errRateLimit) {
+			s.oauthError(w, http.StatusTooManyRequests)
+		} else if errors.Is(e, persistence.ErrInvalidCredential) || errors.Is(e, errInvalidSession) || errors.Is(e, errInvalidPortalSessionCSRF) {
+			s.oauthError(w, http.StatusUnauthorized)
+		} else {
+			s.oauthError(w, http.StatusServiceUnavailable)
+		}
 		return
 	}
 	touched, e := authorizationTx.TouchPortalSession(op.Context(), digest32(s.digest(version, "portal-session", credential)), version, account, accountState.Generation)
@@ -294,17 +291,14 @@ func (s *Server) validateConsentSession(w http.ResponseWriter, op persistence.Au
 		s.oauthError(w, http.StatusUnauthorized)
 		return false
 	}
-	portalSession, err := authorizationTx.LockPortalSessionForConsent(ctx, digest32(s.digest(consent.version, "portal-session", credential)), consent.version, consent.account, accountState.Generation)
-	if errors.Is(err, persistence.ErrInvalidCredential) {
-		s.oauthError(w, http.StatusUnauthorized)
-		return false
-	}
-	if err != nil {
-		s.oauthError(w, http.StatusServiceUnavailable)
-		return false
-	}
-	if portalSession.Generation != accountState.Generation || subtle.ConstantTimeCompare(portalSession.CSRFHash, s.digest(consent.version, "csrf-store", s.csrf(consent.version, credential))) != 1 {
-		s.oauthError(w, http.StatusUnauthorized)
+	if _, err = s.verifyConsentPortalSessionInTransaction(ctx, authorizationTx, credential, consent.account, consent.version, accountState.Generation); err != nil {
+		if errors.Is(err, errRateLimit) {
+			s.oauthError(w, http.StatusTooManyRequests)
+		} else if errors.Is(err, persistence.ErrInvalidCredential) || errors.Is(err, errInvalidSession) || errors.Is(err, errInvalidPortalSessionCSRF) {
+			s.oauthError(w, http.StatusUnauthorized)
+		} else {
+			s.oauthError(w, http.StatusServiceUnavailable)
+		}
 		return false
 	}
 	touched, err := authorizationTx.TouchPortalSession(ctx, digest32(s.digest(consent.version, "portal-session", credential)), consent.version, consent.account, accountState.Generation)
@@ -435,6 +429,16 @@ func (s *Server) issueNativeCode(w http.ResponseWriter, r *http.Request, op pers
 	}
 	if accountState.Generation != expectedGeneration {
 		s.oauthError(w, 401)
+		return
+	}
+	if _, err = s.verifyConsentPortalSessionInTransaction(op.Context(), authorizationTx, portalCredential, account, portalVersion, accountState.Generation); err != nil {
+		if errors.Is(err, errRateLimit) {
+			s.oauthError(w, http.StatusTooManyRequests)
+		} else if errors.Is(err, persistence.ErrInvalidCredential) || errors.Is(err, errInvalidSession) || errors.Is(err, errInvalidPortalSessionCSRF) {
+			s.oauthError(w, http.StatusUnauthorized)
+		} else {
+			s.oauthError(w, http.StatusServiceUnavailable)
+		}
 		return
 	}
 	touched, err := authorizationTx.TouchPortalSession(op.Context(), digest32(s.digest(portalVersion, "portal-session", portalCredential)), portalVersion, account, accountState.Generation)
