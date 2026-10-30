@@ -11,20 +11,11 @@ import (
 	"github.com/ory/fosite"
 )
 
-func beginRefreshTransaction(op persistence.Operation) (persistence.Transaction, persistence.RefreshTransaction, error) {
-	tx, err := op.Begin(op.Context())
-	if err != nil {
-		return nil, nil, err
-	}
-	rt, ok := tx.(persistence.RefreshTransaction)
-	if !ok {
-		_ = tx.Rollback(context.Background())
-		return nil, nil, persistence.ErrUnavailable
-	}
-	return tx, rt, nil
+func beginRefreshTransaction(op persistence.RefreshOperation) (persistence.RefreshTransaction, error) {
+	return op.BeginRefresh(op.Context())
 }
 
-func (s *Server) commitRefreshTx(ctx context.Context, tx persistence.Transaction) error {
+func (s *Server) commitRefreshTx(ctx context.Context, tx persistence.RefreshTransaction) error {
 	if s.commitRefresh != nil {
 		return s.commitRefresh(ctx, tx)
 	}
@@ -32,7 +23,7 @@ func (s *Server) commitRefreshTx(ctx context.Context, tx persistence.Transaction
 }
 
 func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, client issuer.ClientType, raw string, digest [32]byte) {
-	op, err := s.persistence.Start(r.Context())
+	op, err := s.refresh.StartRefresh(r.Context())
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
@@ -43,12 +34,12 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 			op.Close()
 		}
 	}()
-	lookupTx, lookup, err := beginRefreshTransaction(op)
+	lookupTx, err := beginRefreshTransaction(op)
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
 	}
-	owner, err := lookup.RefreshOwner(op.Context(), digest)
+	owner, err := lookupTx.RefreshOwner(op.Context(), digest)
 	if errors.Is(err, persistence.ErrInvalidCredential) {
 		_ = lookupTx.Rollback(op.Context())
 		s.oauthError(w, http.StatusUnauthorized)
@@ -79,7 +70,7 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 		s.oauthError(w, http.StatusTooManyRequests)
 		return
 	}
-	tx, refreshTx, err := beginRefreshTransaction(op)
+	tx, err := beginRefreshTransaction(op)
 	if err != nil {
 		s.oauthError(w, http.StatusServiceUnavailable)
 		return
@@ -90,7 +81,7 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 			_ = tx.Rollback(op.Context())
 		}
 	}()
-	account, err := refreshTx.LockAccountAuthorization(op.Context(), owner.AccountID)
+	account, err := tx.LockAccountAuthorization(op.Context(), owner.AccountID)
 	if errors.Is(err, persistence.ErrInvalidCredential) {
 		s.oauthError(w, http.StatusUnauthorized)
 		return
@@ -104,7 +95,7 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 		return
 	}
 
-	ctx := issuer.InRefreshTransaction(op.Context(), refreshTx, client, raw)
+	ctx := issuer.InRefreshTransaction(op.Context(), tx, client, raw)
 	request, err := s.nativeIssuer.NewAccessRequest(ctx, r, &fosite.DefaultSession{})
 	if err != nil {
 		if !issuer.ReplayCanCommit(ctx) {
@@ -177,17 +168,17 @@ func (s *Server) nativeRefreshToken(w http.ResponseWriter, r *http.Request, clie
 func (s *Server) confirmRefreshRevocation(grantID string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	op, err := s.persistence.Start(ctx)
+	op, err := s.refresh.StartRefresh(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer op.Close()
-	tx, refreshTx, err := beginRefreshTransaction(op)
+	tx, err := beginRefreshTransaction(op)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	revoked, err := refreshTx.ConfirmRefreshGrantRevoked(op.Context(), grantID)
+	revoked, err := tx.ConfirmRefreshGrantRevoked(op.Context(), grantID)
 	if err != nil {
 		return false, err
 	}

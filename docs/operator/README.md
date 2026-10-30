@@ -15,14 +15,24 @@ handling, and configures both explicit Certificates for in-place HTTP-01 with
 temporary TLS. PostgreSQL retains its 400m request. Production/default resource
 budgets are unchanged. Preparation alone makes no cluster mutation.
 
+The wizard calls `scripts/prepare-isolated-installation.py` to own the complete
+local installation bundle: the isolated chart, migration Job, and native OAuth
+reset Job. The operation renders the serving configuration and runs the relay's
+`validate-config` command before returning artifact paths. It creates output
+files atomically, reuses exact matching artifacts, and refuses changed, foreign,
+nonempty, or symlinked targets. It does not read Secret contents, inspect or
+change a cluster, or advance the wizard's live-operation gates.
+
 ```sh
 python3 scripts/test-isolated-test-chart.py
+python3 scripts/test-prepare-isolated-installation.py
 python3 scripts/prepare-isolated-test-chart.py charts/clipp-relay /path/to/empty-test-chart
 bash scripts/operator/google-oauth-test-wizard.sh --help
 ```
 
-The generated application migration Job remains in the wizard and requests 300m.
-Both chart StatefulSets use OnDelete, so the wizard verifies Ready replicas,
+The preparation command creates the migration and reset Job manifests locally;
+the wizard retains prompts and live execution gates. The migration Job requests
+300m. Both chart StatefulSets use OnDelete, so the wizard verifies Ready replicas,
 owner UID and the running Pod revision instead of calling rollout status.
 Credentials, real private Helm values, profiles, and diagnostic captures remain
 outside source control. Capacity qualification is deferred. Completion of the

@@ -21,14 +21,6 @@ type authorizationPortalSession struct {
 	version                uint64
 }
 
-func authorizationTransaction(tx persistence.Transaction) (persistence.AuthorizationTransaction, error) {
-	authorizationTx, ok := tx.(persistence.AuthorizationTransaction)
-	if !ok {
-		return nil, errors.New("authorization repositories are unavailable")
-	}
-	return authorizationTx, nil
-}
-
 // authorizationPortalSession performs the small Portal Session read used by
 // native authorization through an admitted, transaction-scoped projection.
 // It validates CSRF before extending the idle deadline, matching session().
@@ -39,23 +31,17 @@ func (s *Server) authorizationPortalSession(r *http.Request) (authorizationPorta
 	}
 	for version := range s.Peppers {
 		digest := digest32(s.digest(version, "portal-session", cookie.Value))
-		op, err := s.persistence.Start(r.Context())
+		op, err := s.authorization.StartAuthorization(r.Context())
 		if err != nil {
 			return authorizationPortalSession{}, err
 		}
-		tx, err := op.Begin(op.Context())
+		tx, err := op.BeginAuthorization(op.Context())
 		if err != nil {
 			op.Close()
 			return authorizationPortalSession{}, err
 		}
 		defer tx.Rollback(op.Context())
-		authorizationTx, err := authorizationTransaction(tx)
-		if err != nil {
-			_ = tx.Rollback(op.Context())
-			op.Close()
-			return authorizationPortalSession{}, err
-		}
-		stored, err := authorizationTx.PortalSessionForAuthorization(op.Context(), digest, version)
+		stored, err := tx.PortalSessionForAuthorization(op.Context(), digest, version)
 		if errors.Is(err, persistence.ErrInvalidCredential) {
 			_ = tx.Rollback(op.Context())
 			op.Close()
@@ -96,15 +82,10 @@ func (s *Server) authorizationPortalSession(r *http.Request) (authorizationPorta
 	return authorizationPortalSession{}, errInvalidSession
 }
 
-func beginAuthorizationTransaction(op persistence.Operation) (persistence.Transaction, persistence.AuthorizationTransaction, error) {
-	tx, err := op.Begin(op.Context())
+func beginAuthorizationTransaction(op persistence.AuthorizationOperation) (persistence.AuthorizationTransaction, error) {
+	tx, err := op.BeginAuthorization(op.Context())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	authorizationTx, err := authorizationTransaction(tx)
-	if err != nil {
-		_ = tx.Rollback(op.Context())
-		return nil, nil, err
-	}
-	return tx, authorizationTx, nil
+	return tx, nil
 }

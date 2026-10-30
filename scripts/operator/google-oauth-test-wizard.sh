@@ -840,9 +840,23 @@ release_phase() {
 }
 # Explicitly approved isolated-test profile; canonical chart and values stay intact.
 source_chart_dir="$chart_dir"
-chart_dir=$(mktemp -d $WORK_DIR/clipp-relay-300m-chart.XXXXXX)
-python3 "$CLIPP_TEST_GO_REPO/scripts/prepare-isolated-test-chart.py" "$source_chart_dir" "$chart_dir"
-[[ $? == 0 ]] || die "Could not prepare the approved 300m isolated test chart."
+if [[ -z "$db_run_id" ]]; then
+  db_run_id=$(openssl rand -hex 4) || die "Could not create the local installation run ID."
+  write_env CLIPP_TEST_DB_RUN_ID "$db_run_id"
+fi
+require_match "database run ID" "$db_run_id" '^[a-f0-9]{8}$'
+[[ ${#CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME} -gt 0 ]] || die "Native OAuth signing Secret name is missing."
+deployment_dir="$TEST_DIR/deployment"
+prepared_installation=$(python3 "$CLIPP_TEST_GO_REPO/scripts/prepare-isolated-installation.py" \
+  --repo "$CLIPP_TEST_GO_REPO" --work-dir "$WORK_DIR" --deployment-dir "$deployment_dir" \
+  --source-chart "$source_chart_dir" --values "$CLIPP_TEST_VALUES_FILE" --overlay "$letsencrypt_overlay" \
+  --release "$CLIPP_TEST_RELEASE" --namespace "$CLIPP_TEST_NAMESPACE" --run-id "$db_run_id" \
+  --migration-secret "$db_migration_secret" --ca-secret "$db_ca_secret" \
+  --native-secret "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" --install-fingerprint "$install_fingerprint") || die "Could not prepare and validate the isolated installation artifacts."
+chart_dir=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("chart_dir")' <<< "$prepared_installation") || die "Prepared chart identity is invalid."
+migration_manifest=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("migration_manifest")' <<< "$prepared_installation") || die "Prepared migration identity is invalid."
+reset_manifest=$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("reset_manifest")' <<< "$prepared_installation") || die "Prepared reset identity is invalid."
+say "Local chart, migration Job and OAuth-reset Job are prepared and runtime configuration was accepted; no cluster changes were made."
 # The original install fingerprint continues identifying the baseline chart/values.
 # The explicit CPU override is checked in generated and installed Pod specifications.
 
@@ -1141,36 +1155,8 @@ verify_completed_native_reset() {
 run_native_reset_job() {
   reset_job="$relay_sts_name-reset-auth-$db_run_id"
   [[ -n "$db_run_id" && ${#reset_job} -le 63 ]] || die "Saved reset run ID is missing or Job name is too long."
-  deployment_dir="$TEST_DIR/deployment"
-  [[ ! -L "$deployment_dir" ]] || die "Deployment working directory cannot be a symbolic link."
-  mkdir -p "$deployment_dir"
-  chmod 700 "$deployment_dir"
-  migration_manifest="$deployment_dir/$migration_job.json"
-  [[ ! -L "$migration_manifest" && -s "$migration_manifest" ]] || die "The reviewed migration Job manifest is unavailable for reset preparation."
-  reset_manifest="$deployment_dir/$reset_job.json"
-  [[ ! -L "$reset_manifest" ]] || die "Reset manifest path cannot be a symbolic link."
-  generated_reset_manifest=$(mktemp "$deployment_dir/.reset.XXXXXX")
-  chmod 600 "$generated_reset_manifest"
-  python3 - "$migration_manifest" "$generated_reset_manifest" "$reset_job" "$CLIPP_TEST_NATIVE_SIGNING_SECRET_NAME" <<'PY_RESET_MANIFEST' || die "Could not prepare the reset Job."
-import json, sys
-source, target, name, secret = sys.argv[1:]
-with open(source, encoding='utf-8') as f:
-    job = json.load(f)
-job['metadata']['name'] = name
-job['spec']['template']['spec']['containers'][0]['name'] = 'reset-auth'
-job['spec']['template']['spec']['containers'][0]['args'] = ['-command', 'reset-auth', '-config', '/etc/clipp/config.json']
-job['spec']['template']['spec']['containers'][0]['volumeMounts'].append({'name':'native-oauth','mountPath':'/run/secrets/native-oauth','readOnly':True})
-job['spec']['template']['spec']['volumes'].append({'name':'native-oauth','secret':{'secretName':secret,'items':[{'key':'signing-key','path':'signing-key'}]}})
-with open(target, 'x', encoding='utf-8') as f:
-    json.dump(job, f, indent=2)
-    f.write('\n')
-PY_RESET_MANIFEST
-  if [[ -e "$reset_manifest" ]]; then
-    cmp -s "$generated_reset_manifest" "$reset_manifest" || die "Saved reset Job differs from the reviewed configuration."
-    rm "$generated_reset_manifest"
-  else
-    mv "$generated_reset_manifest" "$reset_manifest" || die "Could not save the reset Job manifest."
-  fi
+  [[ "$reset_manifest" == "$deployment_dir/$reset_job.json" ]] || die "Prepared reset Job path differs from the saved installation identity."
+  [[ ! -L "$reset_manifest" && -s "$reset_manifest" ]] || die "Prepared reset Job manifest is unavailable."
   reset_job_name=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$reset_job" --ignore-not-found -o name) || die "Could not inspect the reset Job name."
   if [[ -z "$reset_job_name" ]]; then
     say "The reset Job uses the migration identity and the dedicated native signing Secret; it does not mount Google, admin or pepper material."
@@ -1294,56 +1280,8 @@ if [[ "$current_phase" == serving ]]; then
   say "The release is already serving; verifying its retained migration Job before live checks."
 else
   assert_old_relay_absent
-  deployment_dir="$TEST_DIR/deployment"
-  [[ ! -L "$deployment_dir" ]] || die "Deployment working directory cannot be a symbolic link."
-  mkdir -p "$deployment_dir"
-  chmod 700 "$deployment_dir"
-  migration_manifest="$deployment_dir/$migration_job.json"
-  [[ ! -L "$migration_manifest" ]] || die "Migration manifest path cannot be a symbolic link."
-  generated_manifest=$(mktemp "$deployment_dir/.migration.XXXXXX")
-  chmod 600 "$generated_manifest"
-    helm template "$CLIPP_TEST_RELEASE" "$chart_dir" -n "$CLIPP_TEST_NAMESPACE" -f "$CLIPP_TEST_VALUES_FILE" -f "$letsencrypt_overlay" --set deployment.phase=migrating --set-string deployment.runId="$db_run_id" --set database.bundled.initialize=false | ruby -ryaml -rjson -e '
-      release, namespace, job_name, migration_secret, ca_secret, fingerprint = ARGV
-      docs = YAML.load_stream(STDIN.read).compact
-      name = "#{release}-clipp-relay"
-      sts = docs.find { |d| d["kind"] == "StatefulSet" && d.dig("metadata", "name") == name }
-      abort "rendered relay StatefulSet missing" unless sts
-      pod = sts.dig("spec", "template", "spec")
-      base = pod.fetch("containers").find { |c| c["name"] == "relay" }
-      abort "rendered relay container missing" unless base
-      migration_resources = Marshal.load(Marshal.dump(base.fetch("resources")))
-      migration_resources.fetch("requests")["cpu"] = "300m"
-      volumes = pod.fetch("volumes")
-      config = volumes.find { |v| v["name"] == "config" }
-      ca = volumes.find { |v| v["name"] == "db-ca" }
-      abort "rendered config or CA mount missing" unless config && ca && ca.dig("secret", "secretName") == ca_secret
-      mounts = base.fetch("volumeMounts").select { |m| %w[config db db-ca].include?(m["name"]) }
-      abort "migration mount paths differ from the relay contract" unless mounts.map { |m| m["name"] }.sort == %w[config db db-ca] && mounts.find { |m| m["name"] == "db" }["mountPath"] == "/run/secrets/db"
-      db = {"name" => "db", "secret" => {"secretName" => migration_secret, "items" => [{"key" => "username", "path" => "username"}, {"key" => "password", "path" => "password"}]}}
-      job = {
-        "apiVersion" => "batch/v1", "kind" => "Job",
-        "metadata" => {"name" => job_name, "namespace" => namespace,
-          "labels" => {"app.kubernetes.io/name" => "clipp-relay-migration", "app.kubernetes.io/instance" => release},
-          "annotations" => {"clipp-relay-test/install-fingerprint" => fingerprint}},
-        "spec" => {"backoffLimit" => 0, "activeDeadlineSeconds" => 2400,
-          "template" => {"metadata" => {"labels" => {"app.kubernetes.io/name" => "clipp-relay-migration", "app.kubernetes.io/instance" => release}},
-            "spec" => {"automountServiceAccountToken" => false, "restartPolicy" => "Never",
-              "securityContext" => pod.fetch("securityContext"), "nodeSelector" => pod.fetch("nodeSelector", {}),
-              "tolerations" => pod.fetch("tolerations", []),
-              "containers" => [{"name" => "migrate", "image" => base.fetch("image"), "imagePullPolicy" => base.fetch("imagePullPolicy"),
-                "args" => ["-command", "migrate", "-config", "/etc/clipp/config.json"],
-                "securityContext" => base.fetch("securityContext"), "resources" => migration_resources, "volumeMounts" => mounts}],
-              "volumes" => [config, db, ca]}}}
-      }
-      puts JSON.pretty_generate(job)
-    ' "$CLIPP_TEST_RELEASE" "$CLIPP_TEST_NAMESPACE" "$migration_job" "$db_migration_secret" "$db_ca_secret" "$install_fingerprint" > "$generated_manifest" || die "Could not build the migration-only Job from the rendered chart."
-  if [[ -e "$migration_manifest" ]]; then
-    cmp -s "$generated_manifest" "$migration_manifest" || die "Saved migration manifest differs from the current reviewed chart."
-    rm "$generated_manifest"
-  else
-    mv "$generated_manifest" "$migration_manifest" || die "Could not save the migration manifest."
-  fi
-  [[ ! -L "$migration_manifest" && -s "$migration_manifest" ]] || die "Migration Job manifest is not a regular nonempty file."
+  [[ "$migration_manifest" == "$deployment_dir/$migration_job.json" ]] || die "Prepared migration Job path differs from the saved installation identity."
+  [[ ! -L "$migration_manifest" && -s "$migration_manifest" ]] || die "Prepared migration Job manifest is unavailable."
   migration_job_name=$(kubectl --context "$CLIPP_TEST_KUBE_CONTEXT" -n "$CLIPP_TEST_NAMESPACE" get job "$migration_job" --ignore-not-found -o name) || die "Could not inspect the migration Job name."
   if [[ -z "$migration_job_name" ]]; then
     say "The Job requests 300m CPU, uses the pinned relay image and chart ConfigMap, and mounts only the migration login and database CA."
