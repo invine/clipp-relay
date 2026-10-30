@@ -367,7 +367,7 @@ def recorded_serving_release(release_values: dict, receipt_path: pathlib.Path | 
 
 
 def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, run_id: str,
-                           migration: dict, reset: dict, values_path: pathlib.Path,
+                           bootstrap_expected: dict, migration: dict, reset: dict, values_path: pathlib.Path,
                            overlay_path: pathlib.Path, recorded_values_path: pathlib.Path | None,
                            recorded_values_sha256: str | None) -> dict:
     try:
@@ -433,14 +433,34 @@ def interpret_observations(path: pathlib.Path, *, release: str, namespace: str, 
     bootstrap_job = bootstrap.get("job")
     bootstrap_state = "missing"
     if bootstrap_job is not None:
-        expected_name = f"{release}-clipp-relay-postgres-bootstrap-{run_id}"
         metadata = bootstrap_job.get("metadata", {})
-        if metadata.get("name") != expected_name or metadata.get("namespace") != namespace:
+        expected_metadata = bootstrap_expected.get("metadata", {})
+        if (metadata.get("name") != expected_metadata.get("name") or
+                metadata.get("namespace") != namespace):
             fail("Refusing foreign PostgreSQL bootstrap Job evidence")
+        if (metadata.get("labels", {}) != expected_metadata.get("labels", {}) or
+                metadata.get("annotations", {}) != expected_metadata.get("annotations", {})):
+            fail("Refusing changed PostgreSQL bootstrap Job identity")
+        if normalized_job_spec(bootstrap_job, bootstrap_expected) != bootstrap_expected.get("spec"):
+            fail("Retained PostgreSQL bootstrap Job configuration differs from the reviewed chart")
         status = bootstrap_job.get("status", {})
+        pod = bootstrap.get("pod")
+        pod_initialize = None
+        if pod is not None:
+            if not isinstance(pod, dict):
+                fail("PostgreSQL Pod observations have an invalid shape")
+            pod_metadata = pod.get("metadata", {})
+            expected_pod_name = f"{release}-clipp-relay-postgres-0"
+            if pod_metadata.get("name") != expected_pod_name or pod_metadata.get("namespace") != namespace:
+                fail("Refusing foreign PostgreSQL Pod initialization evidence")
+            init = next((item for item in pod.get("spec", {}).get("initContainers", [])
+                         if item.get("name") == "initialize"), None)
+            value = next((item.get("value") for item in (init or {}).get("env", [])
+                          if item.get("name") == "CLIPP_INITIALIZE"), None)
+            pod_initialize = {"true": True, "false": False}.get(value)
         if status.get("failed", 0) > 0:
             bootstrap_state = "failed"
-        elif status.get("succeeded") == 1 and bootstrap.get("pod_initialize") is False:
+        elif status.get("succeeded") == 1 and pod_initialize is False:
             bootstrap_state = "completed"
         elif status.get("active", 0) > 0:
             bootstrap_state = "pending"
@@ -567,6 +587,11 @@ def main() -> None:
         fail("Serving and migration runtime configuration differ; review the rendered installation")
     migration = build_migration_job(migration_docs, args.release, args.namespace, migration_name,
                                     args.migration_secret, args.ca_secret, args.install_fingerprint)
+    bootstrap_expected = next((doc for doc in migration_docs if doc.get("kind") == "Job" and
+                               doc.get("metadata", {}).get("name") ==
+                               f"{args.release}-clipp-relay-postgres-bootstrap-{args.run_id}"), None)
+    if bootstrap_expected is None:
+        fail("Rendered PostgreSQL bootstrap Job is missing")
     reset = json.loads(json.dumps(migration))
     reset["metadata"]["name"] = reset_name
     container = reset["spec"]["template"]["spec"]["containers"][0]
@@ -588,7 +613,8 @@ def main() -> None:
     if args.observations_file:
         result["observations"] = interpret_observations(pathlib.Path(args.observations_file),
             release=args.release, namespace=args.namespace, run_id=args.run_id,
-            migration=migration, reset=reset, values_path=values, overlay_path=overlay,
+            bootstrap_expected=bootstrap_expected, migration=migration, reset=reset,
+            values_path=values, overlay_path=overlay,
             recorded_values_path=pathlib.Path(args.recorded_serving_values) if args.recorded_serving_values else None,
             recorded_values_sha256=args.recorded_serving_values_sha256)
     print(json.dumps(result, sort_keys=True))

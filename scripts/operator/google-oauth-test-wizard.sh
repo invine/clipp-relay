@@ -884,15 +884,9 @@ def optional(value):
     return json.loads(value) if value.strip() else None
 release, namespace, status = sys.argv[2:5]
 values, bootstrap, pod, migration, migration_logs, reset, reset_logs = sys.argv[5:]
-pod_initialize = None
-pod = optional(pod)
-if pod is not None:
-    init = next((item for item in pod.get("spec", {}).get("initContainers", []) if item.get("name") == "initialize"), None)
-    value = next((item.get("value") for item in (init or {}).get("env", []) if item.get("name") == "CLIPP_INITIALIZE"), None)
-    pod_initialize = {"true": True, "false": False}.get(value)
 data = {
     "release": {"name": release, "namespace": namespace, "status": status, "values": optional(values) or {}},
-    "bootstrap": {"job": optional(bootstrap), "pod_initialize": pod_initialize},
+    "bootstrap": {"job": optional(bootstrap), "pod": optional(pod)},
     "jobs": {"migration": optional(migration), "migration_logs": migration_logs.splitlines(),
              "reset": optional(reset), "reset_logs": reset_logs.splitlines()},
 }
