@@ -3,7 +3,6 @@ package quota
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"clipp-relay/internal/persistence"
@@ -34,52 +33,19 @@ var ErrSettlementUncertain = errors.New("settlement commit outcome unknown; reco
 var ErrSettlementUnresolved = errors.New("previous settlement must be reconciled")
 var ErrUsageRetired = errors.New("account or weekly usage retired")
 
-type settlementKey struct {
-	id   string
-	week time.Time
-}
-type settlementState struct {
-	mu         sync.Mutex
-	refs       int
-	unresolved *Settlement
-	retired    bool
-}
-
 // SetSettlementHooksForTest controls persistence failures and acknowledgement
 // timing without replacing production composition or PostgreSQL.
 func (q *Quota) SetSettlementHooksForTest(before func(context.Context, persistence.AccountingTransaction) error, after func(context.Context) error) {
-	q.settlementMu.Lock()
+	q.periodic.mu.Lock()
 	q.settlementBefore = before
 	q.settlementAfter = after
-	q.settlementMu.Unlock()
-}
-
-func (q *Quota) acquireSettlement(key settlementKey) *settlementState {
-	q.settlementMu.Lock()
-	defer q.settlementMu.Unlock()
-	if q.settlements == nil {
-		q.settlements = make(map[settlementKey]*settlementState)
-	}
-	s := q.settlements[key]
-	if s == nil {
-		s = &settlementState{}
-		q.settlements[key] = s
-	}
-	s.refs++
-	return s
-}
-func (q *Quota) releaseSettlement(key settlementKey, s *settlementState) {
-	q.settlementMu.Lock()
-	defer q.settlementMu.Unlock()
-	s.refs--
-	if s.refs == 0 && (s.unresolved == nil || s.retired) {
-		delete(q.settlements, key)
-	}
+	q.periodic.mu.Unlock()
 }
 
 // Settle atomically records all observed bytes, even above the allowance or
 // after authorization changes. Only final deletion or week retirement seals it.
-// An ambiguous commit blocks successors until the identical batch is reconciled.
+// The observed Weekly Quota Window owns the in-flight batch and its uncertainty;
+// an ambiguous commit blocks successors until that identical batch is reconciled.
 func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUsage, err error) {
 	started := time.Now()
 	defer func() { q.accountingDiagnostic("quota.settlement", err, started) }()
@@ -90,40 +56,85 @@ func (q *Quota) Settle(ctx context.Context, batch Settlement) (result RecordedUs
 	if q.accounting == nil {
 		return result, ErrTemporary
 	}
+	week, created, lockErr := q.lockSettlementWeek(ctx, batch)
+	if lockErr != nil {
+		return result, lockErr
+	}
+	defer week.settleMu.Unlock()
 	op, startErr := q.accounting.StartSettlement(ctx)
 	if startErr != nil {
 		return result, ErrTemporary
 	}
 	defer op.Close()
-	err = func(unitCtx context.Context) error {
-		key := settlementKey{batch.AccountID, batch.WeekStart}
-		s := q.acquireSettlement(key)
-		defer q.releaseSettlement(key, s)
-		for !s.mu.TryLock() {
-			select {
-			case <-unitCtx.Done():
-				return ErrTemporary
-			case <-time.After(time.Millisecond):
-			}
+	result, err = q.settle(op, batch)
+	q.periodic.mu.Lock()
+	if week.retired || errors.Is(err, ErrUsageRetired) {
+		week.retired = true
+		if account := q.periodic.accounts[batch.AccountID]; account != nil && account.weeks[batch.WeekStart] == week {
+			delete(account.weeks, batch.WeekStart)
 		}
-		defer s.mu.Unlock()
-		if s.unresolved != nil && *s.unresolved != batch {
-			return ErrSettlementUnresolved
-		}
-		var workErr error
-		result, workErr = q.settle(op, batch)
-		if errors.Is(workErr, ErrSettlementUncertain) {
-			copy := batch
-			s.unresolved = &copy
-		} else if workErr == nil || errors.Is(workErr, ErrUsageRetired) || errors.Is(workErr, ErrSettlementConflict) {
-			s.unresolved = nil
-		}
-		return workErr
-	}(op.Context())
+	} else if err == nil {
+		week.recorded = result
+		week.initialized = true
+		week.flight = nil
+		week.uncertain = false
+	} else if errors.Is(err, ErrSettlementUncertain) {
+		week.uncertain = true
+	} else if errors.Is(err, ErrSettlementConflict) && created && week.flight != nil && *week.flight == batch {
+		week.flight = nil
+		week.uncertain = false
+	}
+	q.periodic.mu.Unlock()
 	if err != nil && !errors.Is(err, ErrSettlementConflict) && !errors.Is(err, ErrSettlementUncertain) && !errors.Is(err, ErrSettlementUnresolved) && !errors.Is(err, ErrUsageRetired) {
 		err = ErrTemporary
 	}
 	return result, err
+}
+
+// lockSettlementWeek reserves one account/week batch in the same state that
+// owns observations, receipts and retirement. Waiting is outside the accounting
+// mutex and happens before acquiring a persistence operation/connection.
+func (q *Quota) lockSettlementWeek(ctx context.Context, batch Settlement) (*observedWeek, bool, error) {
+	q.periodic.mu.Lock()
+	account := q.observedAccountLocked(batch.AccountID)
+	if account == nil {
+		q.periodic.mu.Unlock()
+		return nil, false, ErrTemporary
+	}
+	week := account.weeks[batch.WeekStart]
+	if week == nil {
+		week = &observedWeek{}
+		account.weeks[batch.WeekStart] = week
+	}
+	if week.retired {
+		q.periodic.mu.Unlock()
+		return nil, false, ErrUsageRetired
+	}
+	q.periodic.mu.Unlock()
+	for !week.settleMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, false, ErrTemporary
+		case <-time.After(time.Millisecond):
+		}
+	}
+	q.periodic.mu.Lock()
+	defer q.periodic.mu.Unlock()
+	if week.retired {
+		week.settleMu.Unlock()
+		return nil, false, ErrUsageRetired
+	}
+	if week.flight != nil {
+		if *week.flight != batch {
+			week.settleMu.Unlock()
+			return nil, false, ErrSettlementUnresolved
+		}
+		return week, false, nil
+	}
+	copy := batch
+	week.flight = &copy
+	week.uncertain = false
+	return week, true, nil
 }
 
 func (q *Quota) settle(op persistence.AccountingOperation, b Settlement) (RecordedUsage, error) {
@@ -162,9 +173,9 @@ func (q *Quota) settle(op persistence.AccountingOperation, b Settlement) (Record
 	if err != nil {
 		return RecordedUsage{}, ErrTemporary
 	}
-	q.settlementMu.Lock()
+	q.periodic.mu.Lock()
 	before, after := q.settlementBefore, q.settlementAfter
-	q.settlementMu.Unlock()
+	q.periodic.mu.Unlock()
 	if before != nil {
 		if err = before(ctx, tx); err != nil {
 			return RecordedUsage{}, ErrTemporary

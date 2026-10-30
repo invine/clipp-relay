@@ -31,7 +31,29 @@ type observedWeek struct {
 	recorded    RecordedUsage
 	initialized bool
 	uncertain   bool
+	retired     bool
+	settleMu    sync.Mutex
 }
+
+// effectiveBytes counts durable usage and observations that have not yet been
+// confirmed in that durable receipt exactly once.
+func (w *observedWeek) effectiveBytes() (int64, bool) {
+	if w == nil {
+		return 0, true
+	}
+	extra := w.pending
+	if w.flight != nil && !(w.recorded.OperationID == w.flight.OperationID && w.recorded.Sequence == w.flight.Sequence) {
+		if w.flight.DeltaBytes > math.MaxInt64-extra {
+			return 0, false
+		}
+		extra += w.flight.DeltaBytes
+	}
+	if extra > math.MaxInt64-w.recorded.RecordedBytes {
+		return 0, false
+	}
+	return w.recorded.RecordedBytes + extra, true
+}
+
 type observedAccount struct {
 	sessions           int
 	weeks              map[time.Time]*observedWeek
@@ -154,18 +176,11 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 	w.recorded = durable
 	w.initialized = true
 	result.RecordedBytes = durable.RecordedBytes
-	result.EffectiveBytes = durable.RecordedBytes
-	extra := w.pending
-	if w.flight != nil && !(durable.OperationID == w.flight.OperationID && durable.Sequence == w.flight.Sequence) {
-		if w.flight.DeltaBytes > math.MaxInt64-extra {
-			return result, ErrTemporary
-		}
-		extra += w.flight.DeltaBytes
-	}
-	if extra > math.MaxInt64-result.EffectiveBytes {
+	var usageValid bool
+	result.EffectiveBytes, usageValid = w.effectiveBytes()
+	if !usageValid {
 		return result, ErrTemporary
 	}
-	result.EffectiveBytes += extra
 	pending := hasObserved(a)
 	// Only an idle authoritative read can restore write health.
 	if !pending {
@@ -394,7 +409,6 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 			w.initialized = true
 			q.periodic.mu.Unlock()
 		}
-		var usage RecordedUsage
 		var settlementErr error
 		retired := false
 		for retry := 0; ; retry++ {
@@ -414,7 +428,7 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 			}
 			batch := *w.flight
 			q.periodic.mu.Unlock()
-			usage, settlementErr = q.Settle(ctx, batch)
+			_, settlementErr = q.Settle(ctx, batch)
 			if errors.Is(settlementErr, ErrUsageRetired) {
 				q.periodic.mu.Lock()
 				delete(a.weeks, week)
@@ -436,20 +450,8 @@ func (q *Quota) flushAccounting(ctx context.Context, id string, deletion bool) e
 				}
 			}
 			if settlementErr != nil {
-				if errors.Is(settlementErr, ErrSettlementUncertain) {
-					q.periodic.mu.Lock()
-					if w.flight != nil && *w.flight == batch {
-						w.uncertain = true
-					}
-					q.periodic.mu.Unlock()
-				}
 				return settlementErr
 			}
-			q.periodic.mu.Lock()
-			w.recorded = usage
-			w.flight = nil
-			w.uncertain = false
-			q.periodic.mu.Unlock()
 			break
 		}
 		if retired {
@@ -625,20 +627,13 @@ func (q *Quota) cutoffChecked(id, reason string, expiredOnly bool) {
 // credential revocation. Lifecycle callers must first attempt a bounded flush.
 func (q *Quota) ForgetAccounting(id string) {
 	q.periodic.mu.Lock()
-	delete(q.periodic.accounts, id)
-	q.periodic.mu.Unlock()
-	// Active attempts may still return an acknowledgement. Their state retires
-	// when their last reference exits; idle uncertain receipts can go now.
-	q.settlementMu.Lock()
-	for key, state := range q.settlements {
-		if key.id == id {
-			state.retired = true
-			if state.refs == 0 {
-				delete(q.settlements, key)
-			}
+	if account := q.periodic.accounts[id]; account != nil {
+		for _, week := range account.weeks {
+			week.retired = true
 		}
 	}
-	q.settlementMu.Unlock()
+	delete(q.periodic.accounts, id)
+	q.periodic.mu.Unlock()
 }
 
 // ClosureCurrent fences delayed outcomes after accounting recovers.
@@ -694,16 +689,8 @@ func (q *Quota) ApplyAccountingPolicy(id string, cap int64) bool {
 	a.revision++
 	exhausted := cap <= 0
 	if w := a.weeks[weekStart(q.now())]; w != nil {
-		effective := w.recorded.RecordedBytes
-		extra := w.pending
-		if w.flight != nil && !(w.recorded.OperationID == w.flight.OperationID && w.recorded.Sequence == w.flight.Sequence) {
-			if w.flight.DeltaBytes > math.MaxInt64-extra {
-				exhausted = true
-			} else {
-				extra += w.flight.DeltaBytes
-			}
-		}
-		exhausted = exhausted || extra > math.MaxInt64-effective || effective+extra >= cap
+		effective, valid := w.effectiveBytes()
+		exhausted = exhausted || !valid || effective >= cap
 	}
 	if exhausted {
 		a.blocked = true

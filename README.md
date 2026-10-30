@@ -29,6 +29,10 @@ is soft: full attributable overrun is recorded, and observations not persisted
 before a crash may be lost. No historical settlement replay or multi-instance
 writer coordination is supported. The accounting failure deadline defaults to
 three seconds and closes affected sessions independently of blocked SQL workers.
+Quota keeps pending observations, the immutable in-flight batch, its confirmed
+receipt, uncertainty and retirement together for each account and week. Each
+window serializes settlement without holding the observation lock during SQL;
+eligibility and policy changes use the same effective-usage calculation.
 The owner profile shows confirmed Recorded Relay Usage and twelve preceding
 weekly totals. Its capacity table distinguishes configured limits from separately
 sampled live counts. Active Login Grants are sampled from PostgreSQL; live Relay

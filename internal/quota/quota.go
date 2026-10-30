@@ -21,8 +21,6 @@ type Quota struct {
 	beforeCommit        func(context.Context, persistence.AccountingTransaction) error
 	afterCommit         func() error
 	periodic            periodicAccounting
-	settlementMu        sync.Mutex
-	settlements         map[settlementKey]*settlementState
 	accounting          persistence.Accounting
 	diagnostics         *diagnostic.Logger
 	clock               clockState
