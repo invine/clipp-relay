@@ -365,6 +365,16 @@ label input, label select, .quantity-input { margin-top: 6px; }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] body,
 :root[data-theme="dark"] .workspace-page { background: var(--ground); color: var(--ink); }
+:root[data-theme="dark"] .site-header { border-color: var(--line); }
+:root[data-theme="dark"] .brand { color: var(--ink); }
+:root[data-theme="dark"] .brand-product,
+:root[data-theme="dark"] .header-note { color: var(--muted); }
+:root[data-theme="dark"] .card { border-color: var(--line); background: var(--surface); color: var(--ink); }
+:root[data-theme="dark"] button:not(.secondary):not(.danger),
+:root[data-theme="dark"] .button:not(.secondary):not(.danger) { color: #211a2c; }
+:root[data-theme="dark"] button.secondary,
+:root[data-theme="dark"] .button.secondary { border-color: var(--control); background: var(--surface); color: var(--ink); }
+:root[data-theme="dark"] .theme-toggle { border-color: var(--control); background: var(--surface); color: var(--ink); }
 :root[data-theme="dark"] .workspace-page .workspace-main,
 :root[data-theme="dark"] .workspace-page .card,
 :root[data-theme="dark"] .workspace-page .welcome { border-color: var(--line); background: var(--surface); color: var(--ink); }

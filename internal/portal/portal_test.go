@@ -113,3 +113,44 @@ func TestSetupAndUncertainMessagesStayCompactAndReadOnly(t *testing.T) {
 		})
 	}
 }
+
+func TestStandalonePortalPagesShareAppearanceWhereScriptsArePermitted(t *testing.T) {
+	cases := []struct {
+		name string
+		data any
+	}{
+		{name: "error", data: struct {
+			Status                                   int
+			Title, Message, Action, Href, RetryAfter string
+		}{http.StatusTooManyRequests, "Please wait", "Requests are temporarily limited.", "Check your relay account", "/", "7"}},
+		{name: "consent", data: struct{ Client, Email, RelayHost, Flow, CSRF string }{"android", "owner@example.test", "relay.example.test", "one-use-flow", "csrf-token"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			status := http.StatusOK
+			if tc.name == "error" {
+				status = http.StatusTooManyRequests
+			}
+			Render(w, status, tc.name, tc.data)
+			body := w.Body.String()
+			wants := []string{`data-theme="dark"`}
+			if tc.name == "error" {
+				wants = append(wants, `data-theme-toggle`, `aria-label="Switch to light appearance"`, `/assets/portal.js`)
+			} else {
+				wants = append(wants, "owner@example.test", "Clipp for Android", `name="decision" value="authorize"`, `name="decision" value="cancel"`)
+			}
+			for _, want := range wants {
+				if !strings.Contains(body, want) {
+					t.Errorf("%s page missing expected presentation %q: %s", tc.name, want, body)
+				}
+			}
+			if tc.name == "consent" && (strings.Contains(body, "/assets/portal.js") || strings.Contains(body, `data-theme-toggle`)) {
+				t.Errorf("consent page must remain script-free and omit an inert theme control under its restrictive CSP: %s", body)
+			}
+			if w.Code != status || w.Header().Get("Cache-Control") != "no-store" {
+				t.Errorf("%s response changed status or privacy: status=%d cache=%q", tc.name, w.Code, w.Header().Get("Cache-Control"))
+			}
+		})
+	}
+}
