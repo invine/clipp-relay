@@ -92,6 +92,64 @@ try {
   await evalJS(`document.querySelector('[data-theme-toggle]').click()`)
   themeEvidence.restored = await evalJS(`({theme:document.documentElement.dataset.theme,stored:localStorage.getItem('clipp-relay-appearance')})`)
   if (themeEvidence.restored.theme !== 'dark' || themeEvidence.restored.stored !== 'dark') throw new Error(`theme control did not restore dark appearance: ${JSON.stringify(themeEvidence.restored)}`)
+  const lightThemeSweep = {}
+  await evalJS(`localStorage.setItem('clipp-relay-appearance','light')`)
+  const inspectLight = async (name, width, path) => {
+    await call('Emulation.setDeviceMetricsOverride', { width, height: viewportHeight(width), deviceScaleFactor: 1, mobile: width < 640 })
+    await call('Page.navigate', { url: `${base}${path}` }); await ready(); await wait(220)
+    const result = await evalJS(`(()=>{const rgb=s=>{const m=s.match(/[\\d.]+/g);return m&&!(m.length>3&&Number(m[3])===0)?m.slice(0,3).map(Number):null};const lum=c=>{const a=c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return .2126*a[0]+.7152*a[1]+.0722*a[2]};const contrast=(a,b)=>{a=rgb(a);b=rgb(b);if(!a||!b)return null;const x=lum(a),y=lum(b);return +((Math.max(x,y)+.05)/(Math.min(x,y)+.05)).toFixed(2)};const ground=getComputedStyle(document.querySelector('.workspace-main')||document.body).backgroundColor;const controls=[...document.querySelectorAll('button:not(:disabled),.button')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0}).map(e=>({label:e.innerText.trim().replace(/\\s+/g,' ').slice(0,48),ratio:contrast(getComputedStyle(e).color,rgb(getComputedStyle(e).backgroundColor)?getComputedStyle(e).backgroundColor:ground),border:getComputedStyle(e).borderColor,bg:getComputedStyle(e).backgroundColor,fg:getComputedStyle(e).color}));return {theme:document.documentElement.dataset.theme,width:innerWidth,scroll:document.documentElement.scrollWidth,themeToggle:!!document.querySelector('[data-theme-toggle]'),controls,disabled:[...document.querySelectorAll('button:disabled,input:disabled')].length,mark:[...document.images].every(i=>i.complete&&i.naturalWidth>0)}})()`)
+    if (result.theme !== 'light' || result.scroll > width || !result.mark) throw new Error(`light theme ${name} at ${width}px failed: ${JSON.stringify(result)}`)
+    if (result.controls.some(control => control.ratio !== null && control.ratio < 4.5)) throw new Error(`light theme control contrast failed on ${name}: ${JSON.stringify(result.controls)}`)
+    const toggleRect = await evalJS(`(()=>{const r=document.querySelector('[data-theme-toggle]')?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+    if (toggleRect) {
+      await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:toggleRect.x, y:toggleRect.y }); await wait(80)
+      const hover = await evalJS(`(()=>{const e=document.querySelector('[data-theme-toggle]'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
+      if (hover.ratio < 4.5) throw new Error(`light theme toggle hover contrast failed on ${name}: ${JSON.stringify(hover)}`)
+      await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 }); await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+      const focus = await evalJS(`(()=>{const e=document.querySelector('[data-theme-toggle]');e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth),color:s.outlineColor}})()`)
+      if (focus.outline === 'none' || focus.width < 2) throw new Error(`light theme toggle focus indicator missing on ${name}: ${JSON.stringify(focus)}`)
+      result.interaction = { hover, focus }
+    }
+    if (name === 'owner' && width === 1440) {
+      const logoutRect = await evalJS(`(()=>{const menu=document.querySelector('.workspace-menu');if(menu)menu.open=true;const all=[...document.querySelectorAll('.sidebar-logout button,.menu-logout button')];const e=all.find(x=>x.getBoundingClientRect().width>0)||all[0];const r=e?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2,selector:e.matches('.sidebar-logout button')?'.sidebar-logout button':'.menu-logout button'}:null})()`)
+      if (logoutRect) {
+        await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:logoutRect.x, y:logoutRect.y }); await wait(80)
+        result.logoutHover = await evalJS(`(()=>{const e=document.querySelector('${logoutRect.selector}'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor==='rgba(0, 0, 0, 0)'?'rgb(255,255,255)':s.backgroundColor));return {color:s.color,background:s.backgroundColor,ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),visible:e.getBoundingClientRect().width>0}})()`)
+        if (!result.logoutHover.visible || result.logoutHover.ratio < 4.5) throw new Error(`light theme logout hover contrast failed: ${JSON.stringify(result.logoutHover)}`)
+        await evalJS(`document.querySelector('.workspace-menu').open=false`)
+      }
+    }
+    await snap(`light-${name}-${width}.png`, false)
+    return result
+  }
+  const portalCookie = (await call('Network.getAllCookies')).cookies.find(item => item.name === '__Host-clipp-portal' && item.domain === 'localhost')
+  if (!portalCookie) throw new Error('light-theme sweep could not preserve the disposable portal session')
+  await call('Network.deleteCookies', { name:portalCookie.name, url:`${base}/` })
+  lightThemeSweep['signed-out-1440'] = await inspectLight('signed-out', 1440, '/')
+  await call('Network.setCookie', { name:portalCookie.name, value:portalCookie.value, url:`${base}/`, path:'/', secure:true, httpOnly:true, sameSite:portalCookie.sameSite })
+  for (const width of [1440, 768, 390, 320]) lightThemeSweep[`owner-${width}`] = await inspectLight('owner', width, '/')
+  await call('Page.navigate', { url:`${base}/` }); await ready(); await wait(180)
+  await evalJS(`document.querySelector('.connect-clipp')?.click()`)
+  const closeRect = await evalJS(`(()=>{const r=document.querySelector('.connect-dialog .dialog-close')?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+  if (closeRect) {
+    await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:closeRect.x, y:closeRect.y }); await wait(80)
+    lightThemeSweep.dialogCloseHover = await evalJS(`(()=>{const e=document.querySelector('.connect-dialog .dialog-close'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
+    if (lightThemeSweep.dialogCloseHover.ratio < 4.5) throw new Error(`light theme dialog-close hover contrast failed: ${JSON.stringify(lightThemeSweep.dialogCloseHover)}`)
+    await evalJS(`document.querySelector('.connect-dialog .dialog-close').focus()`)
+    lightThemeSweep.dialogCloseFocus = await evalJS(`(()=>{const e=document.querySelector('.connect-dialog .dialog-close'),s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth)}})()`)
+    if (lightThemeSweep.dialogCloseFocus.outline === 'none' || lightThemeSweep.dialogCloseFocus.width < 2) throw new Error(`light theme dialog-close focus indicator missing: ${JSON.stringify(lightThemeSweep.dialogCloseFocus)}`)
+    await evalJS(`document.querySelector('.connect-dialog .dialog-close').click()`)
+  }
+  for (const [name, path] of [['security','/account/security'],['admin','/admin'],['admin-detail','/admin?selected=66000000-0000-4000-8000-000000000001&view=detail'],['plans','/admin/plans']]) {
+    lightThemeSweep[name] = await inspectLight(name, 1440, path)
+    lightThemeSweep[`${name}-phone`] = await inspectLight(name, 390, path)
+  }
+  lightThemeSweep['error-1440'] = await inspectLight('error', 1440, '/auth/deletion/not-a-valid-id')
+  lightThemeSweep['error-phone'] = await inspectLight('error', 390, '/auth/deletion/not-a-valid-id')
+  await evalJS(`localStorage.setItem('clipp-relay-appearance','dark')`)
+  await navigate(1440)
+  lightThemeSweep.restoredDark = await evalJS(`({theme:document.documentElement.dataset.theme,stored:localStorage.getItem('clipp-relay-appearance')})`)
+  if (lightThemeSweep.restoredDark.theme !== 'dark') throw new Error(`theme sweep did not restore dark appearance: ${JSON.stringify(lightThemeSweep.restoredDark)}`)
   if (process.env.PORTAL_APP_INSPECTOR) {
     const cookie = (await call('Network.getAllCookies')).cookies.find(item => item.name === '__Host-clipp-portal' && item.domain === 'localhost')?.value
     if (!cookie) throw new Error('authenticated browser did not expose its disposable portal session to the app inspector')
@@ -117,7 +175,7 @@ try {
     const inspectConsent = new URLSearchParams({ response_type: 'code', client_id: 'electron', redirect_uri: 'http://127.0.0.1:34567/oauth/callback', code_challenge_method: 'S256', code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM', state: 'browser-consent-inspector-state-10' })
     await inspect('owner-consent', `/oauth/authorize?${inspectConsent}`)
   }
-  const evidence = { url: base, signedOut, clipboardSuccess, clipboardRefusal, auth: facts, theme: themeEvidence, viewports: {}, keyboard: {}, noScript: {}, failures: {} }
+  const evidence = { url: base, signedOut, clipboardSuccess, clipboardRefusal, auth: facts, theme: themeEvidence, lightThemeSweep, viewports: {}, keyboard: {}, noScript: {}, failures: {} }
 
   const electronCallback = 'http://127.0.0.1:34567/oauth/callback'
   const consentState = decision => `browser-consent-${decision}-state-10`
