@@ -17,11 +17,19 @@
 </span>Clipp <span class="brand-product">Relay</span>
 </a>
 <span class="header-note">A connection for your devices</span>
+{{if ne . "Authorize Clipp Relay"}}
+<button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch to light appearance">Light theme</button>
+{{end}}
 </header>
 {{end}}
 {{end}}
 
 {{define "foot"}}
+<script src="/assets/portal.js" defer></script>
+</body>
+</html>{{end}}
+
+{{define "foot-no-script"}}
 </body>
 </html>{{end}}
 
