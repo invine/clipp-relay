@@ -548,10 +548,10 @@ try {
   if (!(await evalJS(`document.body.innerText.includes('Your account')`))) throw new Error('fixture did not restore owner session after portal-only logout')
   for (const width of [1440, 768, 390, 320]) {
     await adminNavigate(width, '/account/security')
-    const result = await evalJS(`({heading:document.querySelector('h1')?.innerText,account:document.body.innerText.includes('workspace-a@example.test'),grantCount:document.body.innerText.includes('Active Login Grants:'),review:document.body.innerText.includes('revoke every Login Grant'),checkbox:!!document.querySelector('input[name="confirm"][required]'),deletion:!!document.querySelector('form[action="/auth/delete"]'),deleteConfirmation:!!document.querySelector('input[name="confirm_email"][required][pattern]'),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth})`)
+    const result = await evalJS(`({heading:document.querySelector('h1')?.innerText,account:document.body.innerText.includes('workspace-a@example.test'),grantCount:document.body.innerText.includes('Active Login Grants:'),portalScope:document.body.innerText.includes('Only this browser')&&document.body.innerText.includes('Your Clipp Login Grants, Relay Access Tokens and live Relay Sessions remain active'),revokeScope:document.body.innerText.includes('All access for this Relay Account')&&document.body.innerText.includes('end all Portal Sessions')&&document.body.innerText.includes('Your account status and quota assignments do not change'),review:document.body.innerText.includes('revoke every Login Grant'),checkbox:!!document.querySelector('input[name="confirm"][required]'),deletion:!!document.querySelector('form[action="/auth/delete"]'),deletionScope:document.body.innerText.includes('Permanent account removal')&&document.body.innerText.includes('Relay Account Deletion is irreversible')&&document.body.innerText.includes('Retained Quota Usage for the current week may be imported'),deleteConfirmation:!!document.querySelector('input[name="confirm_email"][required][pattern]'),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth})`)
     evidence.security.viewports[width] = result
     await snap(`security-${width}.png`, false)
-    if (!result.account || !result.grantCount || !result.review || !result.checkbox || !result.deletion || !result.deleteConfirmation || result.overflow) throw new Error(`security view ${width}px acceptance failed: ${JSON.stringify(result)}`)
+    if (!result.account || !result.grantCount || !result.portalScope || !result.revokeScope || !result.review || !result.checkbox || !result.deletion || !result.deletionScope || !result.deleteConfirmation || result.overflow) throw new Error(`security view ${width}px acceptance failed: ${JSON.stringify(result)}`)
   }
   await adminNavigate(1440, '/account/security')
   await call('Emulation.setScriptExecutionDisabled', { value: true })
@@ -559,13 +559,14 @@ try {
   const unchecked = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'input[name="confirm"]' })
   const revokeButton = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'form[action="/auth/revoke"] button' })
   const uncheckedState = await call('DOM.describeNode', { nodeId: unchecked.nodeId })
-  evidence.security.noScript = { reviewVisible: (await call('DOM.getOuterHTML', { nodeId: securityDOM.root.nodeId })).outerHTML.includes('I understand this signs workspace-a@example.test out everywhere.'), required: uncheckedState.node.attributes.includes('required') }
+  const noScriptHTML = (await call('DOM.getOuterHTML', { nodeId: securityDOM.root.nodeId })).outerHTML
+  evidence.security.noScript = { reviewVisible: noScriptHTML.includes('I understand this signs workspace-a@example.test out everywhere.'), required: uncheckedState.node.attributes.includes('required'), deletionRecovery: noScriptHTML.includes('Signing in does not resubmit the deletion.') && noScriptHTML.includes('Retained Quota Usage for the current week may be imported') }
   await call('DOM.focus', { nodeId: revokeButton.nodeId })
   await call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
   await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
   await wait(150)
   evidence.security.noScript.uncheckedPrevented = (await evalJS(`location.pathname === '/account/security'`))
-  if (!evidence.security.noScript.reviewVisible || !evidence.security.noScript.required || !evidence.security.noScript.uncheckedPrevented) throw new Error(`JavaScript-disabled security review failed: ${JSON.stringify(evidence.security.noScript)}`)
+  if (!evidence.security.noScript.reviewVisible || !evidence.security.noScript.required || !evidence.security.noScript.deletionRecovery || !evidence.security.noScript.uncheckedPrevented) throw new Error(`JavaScript-disabled security review failed: ${JSON.stringify(evidence.security.noScript)}`)
   securityDOM = await call('DOM.getDocument', { depth: 0 })
   const checked = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'input[name="confirm"]' })
   await clickNode(checked.nodeId)
