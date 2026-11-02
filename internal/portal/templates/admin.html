@@ -2,22 +2,22 @@
 {{template "head" "Clipp Relay — Administration"}}
 <div class="portal-workspace">
 <aside class="workspace-sidebar" aria-label="Portal navigation">
-  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="brand" href="/"><img class="brand-mark" src="/assets/clipp-mark.svg" alt="">Clipp <span class="brand-product">Relay</span></a>
   <nav class="workspace-nav" aria-label="Portal navigation">
     <a href="/">{{template "nav-icon-account" .}}Your account</a><a href="/account/security">{{template "nav-icon-security" .}}Access &amp; security</a>
     <span class="nav-group-label">Administration</span><a href="/admin" aria-current="page">{{template "nav-icon-admin" .}}Account reviews</a><a href="/admin/plans">{{template "nav-icon-plans" .}}Quota plans</a>
   </nav>
-  <div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form></div>
+  <div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Log out</button></form></div>
 </aside>
 <div class="workspace-main">
 <header class="workspace-bar">
-  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="mobile-brand brand" href="/"><img class="brand-mark" src="/assets/clipp-mark.svg" alt="">Clipp <span class="brand-product">Relay</span></a>
   <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> Account reviews</span>
   <span class="bar-account">{{.Email}}</span>
-  <button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch to light appearance">Light theme</button>
+  <button type="button" class="theme-toggle secondary" data-theme-toggle aria-label="Switch to light appearance">Light theme</button>
   <details class="workspace-menu"><summary aria-label="Open or close portal navigation"><span class="menu-icon" aria-hidden="true"></span><span>Menu</span></summary><nav aria-label="Portal navigation">
     <a href="/">Your account</a><a href="/account/security">Access &amp; security</a><a href="/admin" aria-current="page">Account reviews</a><a href="/admin/plans">Quota plans</a>
-    <form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form>
+    <form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Log out</button></form>
   </nav></details>
 </header>
 <main class="page admin-page">
@@ -30,7 +30,7 @@
 </div>
   <p class="admin-policy-note">Current administrator allowlist revision <strong>{{.PolicyRevision}}</strong></p>
   <p class="admin-finding"><strong>{{.Pending}}</strong><span><span class="admin-finding-title">Pending Relay Accounts</span><span class="admin-finding-scope">Awaiting review across the service</span></span></p>
-  <div class="admin-grid{{if .MobileDetail}} mobile-detail{{end}}">
+  <div class="admin-grid{{if .SelectedAccount}} has-selection{{end}}{{if .MobileDetail}} mobile-detail{{end}}">
   <section class="card accounts-pane">
 <div class="section-heading">
 <div>
@@ -59,7 +59,7 @@
 </thead>
 <tbody>{{range .Accounts}}
 <tr{{if eq .ID $.Selected}} class="selected-row"{{end}}>
-<td class="account-email">{{.Email}}
+<td class="account-email">{{.Email}}<span class="mobile-account-plan">{{if .PlanID}}{{.PlanName}} · {{bytes .EffectiveBytes}} / week{{if .PlanArchived}} · archived{{end}}{{else}}Unassigned plan{{end}}</span>
 </td>
 <td>
 <span class="badge status-{{.Status}}">{{.Status}}

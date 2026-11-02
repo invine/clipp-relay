@@ -154,3 +154,15 @@ func TestStandalonePortalPagesShareAppearanceWhereScriptsArePermitted(t *testing
 		})
 	}
 }
+
+func TestEmbeddedClippMarkIsServedWithSVGContentType(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterAssets(mux)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/clipp-mark.svg", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/svg+xml" ||
+		response.Header().Get("X-Content-Type-Options") != "nosniff" ||
+		!strings.Contains(response.Body.String(), "viewBox=\"0 0 32 32\"") {
+		t.Fatalf("embedded brand asset response = status %d, headers %v, body %q", response.Code, response.Header(), response.Body.String())
+	}
+}

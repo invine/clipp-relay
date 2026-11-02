@@ -13,12 +13,11 @@
 {{if and (ne . "Clipp Relay — Your account") (ne . "Clipp Relay — Access & security") (ne . "Clipp Relay — Administration") (ne . "Clipp Relay — Quota plans")}}
 <header class="site-header">
 <a class="brand" href="/">
-<span class="brand-mark" aria-hidden="true">
-</span>Clipp <span class="brand-product">Relay</span>
+<img class="brand-mark" src="/assets/clipp-mark.svg" alt="">Clipp <span class="brand-product">Relay</span>
 </a>
 <span class="header-note">A connection for your devices</span>
 {{if ne . "Authorize Clipp Relay"}}
-<button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch to light appearance">Light theme</button>
+<button type="button" class="theme-toggle secondary" data-theme-toggle aria-label="Switch to light appearance">Light theme</button>
 {{end}}
 </header>
 {{end}}

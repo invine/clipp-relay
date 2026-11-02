@@ -2,25 +2,25 @@
 {{template "head" "Clipp Relay — Your account"}}
 <div class="portal-workspace">
 <aside class="workspace-sidebar" aria-label="Portal navigation">
-  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="brand" href="/"><img class="brand-mark" src="/assets/clipp-mark.svg" alt="">Clipp <span class="brand-product">Relay</span></a>
   <nav class="workspace-nav" aria-label="Portal navigation">
     <a href="/" aria-current="page">{{template "nav-icon-account" .}}Your account</a>
     {{if .SignedIn}}<a href="/account/security">{{template "nav-icon-security" .}}Access &amp; security</a>{{end}}
     {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">{{template "nav-icon-admin" .}}Account reviews</a><a href="/admin/plans">{{template "nav-icon-plans" .}}Quota plans</a>{{end}}
   </nav>
-  {{if .SignedIn}}<div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form></div>{{end}}
+  {{if .SignedIn}}<div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Log out</button></form></div>{{end}}
 </aside>
 <div class="workspace-main">
 <header class="workspace-bar">
-  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="mobile-brand brand" href="/"><img class="brand-mark" src="/assets/clipp-mark.svg" alt="">Clipp <span class="brand-product">Relay</span></a>
   <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> {{if .SignedIn}}Your account{{else}}Welcome{{end}}</span>
   {{if .SignedIn}}<span class="bar-account">{{.Email}}</span>{{end}}
-  <button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch to light appearance">Light theme</button>
+  <button type="button" class="theme-toggle secondary" data-theme-toggle aria-label="Switch to light appearance">Light theme</button>
   <details class="workspace-menu"><summary aria-label="Open or close portal navigation"><span class="menu-icon" aria-hidden="true"></span><span>Menu</span></summary><nav aria-label="Portal navigation">
     <a href="/" aria-current="page">{{template "nav-icon-account" .}}Your account</a>
     {{if .SignedIn}}<a href="/account/security">{{template "nav-icon-security" .}}Access &amp; security</a>{{end}}
     {{if .Admin}}<a href="/admin">{{template "nav-icon-admin" .}}Account reviews</a><a href="/admin/plans">{{template "nav-icon-plans" .}}Quota plans</a>{{end}}
-    {{if .SignedIn}}<form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form>{{end}}
+    {{if .SignedIn}}<form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Log out</button></form>{{end}}
   </nav></details>
 </header>
 <main class="page">

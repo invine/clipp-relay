@@ -67,7 +67,7 @@ if (setup && connect && typeof HTMLDialogElement !== "undefined" && typeof HTMLD
   dialog.setAttribute("aria-labelledby", "setup-title");
   const close = document.createElement("button");
   close.type = "button";
-  close.className = "dialog-close";
+  close.className = "secondary dialog-close";
   close.dataset.closeConnect = "";
   close.setAttribute("aria-label", "Close Connect Clipp setup");
   close.textContent = "Close";
