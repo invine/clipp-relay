@@ -128,7 +128,7 @@ func TestWorkspaceAssetsProvideDarkFirstThemeAndStorageFallback(t *testing.T) {
 	for _, tc := range []struct {
 		path string
 		want []string
-	}{{"/assets/portal.css", []string{`:root[data-theme="dark"]`, `:root[data-theme="light"]`, `color-scheme: dark`, `:root[data-theme="dark"] .site-header`, `:root[data-theme="dark"] .card`, `:root[data-theme="dark"] .theme-toggle`}}, {"/assets/portal.js", []string{"clipp-relay-appearance", "localStorage.setItem", "storage is unavailable"}}} {
+	}{{"/assets/portal.css", []string{`:root[data-theme="dark"]`, `:root[data-theme="light"]`, `color-scheme: dark`, `:root[data-theme="dark"] .site-header`, `:root[data-theme="dark"] .card`, `:root[data-theme="dark"] .theme-toggle`, `--accent: #6f55a5`, `--accent-soft: #f0ebf8`, `--accent-hover: #584283`, `--accent: #b59af7`}}, {"/assets/portal.js", []string{"clipp-relay-appearance", "localStorage.setItem", "storage is unavailable"}}} {
 		out := httptest.NewRecorder()
 		handler.ServeHTTP(out, httptest.NewRequest(http.MethodGet, tc.path, nil))
 		if out.Code != http.StatusOK {
