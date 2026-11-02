@@ -159,6 +159,16 @@ tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 .deletion-confirmation label { line-height: 1.5; }
 .deletion-confirmation input[type="email"] { width: min(100%, 360px); }
 .deletion-confirmation .fine-print { max-width: 56ch; margin: 0; }
+.security-action { min-width: 0; }
+.security-scope { margin: 0 0 7px; color: var(--supporting-ink); font-size: 12px; font-weight: 650; letter-spacing: .02em; }
+.security-action > p:not(.security-scope) { max-width: 72ch; }
+.security-action form { margin-top: 18px; }
+.danger-details.security-action { margin-top: 8px; padding: 0; border: 1px solid #e7c8c4; border-radius: var(--workspace-radius); color: var(--ink); font-size: 15px; }
+.danger-details.security-action summary { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-height: 64px; padding: 14px 20px; color: #9e3733; }
+.security-delete-title { font-size: 16px; }
+.danger-details.security-action[open] { padding: 20px; }
+.danger-details.security-action[open] summary { min-height: 0; margin: -8px -8px 14px; padding: 8px; }
+.danger-details.security-action[open] .security-scope { color: var(--supporting-ink); }
 .service-totals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 16px; }
 .service-totals .card { display: flex; justify-content: space-between; align-items: center; padding: 20px; gap: 12px; }
 .service-totals strong { font-size: 28px; font-weight: 650; }
@@ -321,6 +331,8 @@ label input, label select, .quantity-input { margin-top: 6px; }
 :root[data-theme="dark"] .workspace-page button:not(.secondary):not(.danger),
 :root[data-theme="dark"] .workspace-page .button:not(.secondary):not(.danger) { color: #211a2c; }
 :root[data-theme="dark"] .workspace-page .setup-card { border-top-color: #9375d4; }
+:root[data-theme="dark"] .workspace-page .danger-details.security-action { border-color: #59403f; }
+:root[data-theme="dark"] .workspace-page .danger-details.security-action summary { color: #f0aaa5; }
 :root[data-theme="dark"] .workspace-page .note { background: #282330; color: #ded5ec; }
 :root[data-theme="dark"] .workspace-page .history-column:hover .history-bar,
 :root[data-theme="dark"] .workspace-page .history-column:focus .history-bar { fill: #c5afff; }
