@@ -122,6 +122,17 @@ try {
         await evalJS(`document.querySelector('.workspace-menu').open=false`)
       }
     }
+    if (name === 'owner' && width === 390) {
+      const menuLogout = await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true;const e=document.querySelector('.menu-logout button'),r=e?.getBoundingClientRect();return r&&r.width>0&&r.height>0?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+      if (!menuLogout) throw new Error('light theme phone menu has no visible logout control')
+      await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:menuLogout.x, y:menuLogout.y }); await wait(80)
+      result.mobileLogoutHover = await evalJS(`(()=>{const e=document.querySelector('.menu-logout button'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);let bg=s.backgroundColor;if(bg==='rgba(0, 0, 0, 0)')bg=getComputedStyle(e.parentElement).backgroundColor;const a=l(rgb(s.color)),b=l(rgb(bg));return {visible:e.getBoundingClientRect().width>0,ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:bg,color:s.color}})()`)
+      if (!result.mobileLogoutHover.visible || result.mobileLogoutHover.ratio < 4.5) throw new Error(`light theme phone menu logout hover contrast failed: ${JSON.stringify(result.mobileLogoutHover)}`)
+      await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 }); await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+      result.mobileLogoutFocus = await evalJS(`(()=>{const e=document.querySelector('.menu-logout button');e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth)}})()`)
+      if (result.mobileLogoutFocus.outline === 'none' || result.mobileLogoutFocus.width < 2) throw new Error(`light theme phone menu logout focus indicator missing: ${JSON.stringify(result.mobileLogoutFocus)}`)
+      await evalJS(`document.querySelector('.workspace-menu').open=false`)
+    }
     await snap(`light-${name}-${width}.png`, false)
     return result
   }
@@ -170,6 +181,11 @@ try {
   await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true})()`)
   const darkLogout = await evalJS(`(()=>[...document.querySelectorAll('.sidebar-logout button,.menu-logout button')].find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0})?.matches('.sidebar-logout button')?'.sidebar-logout button':'.menu-logout button')()`)
   lightThemeSweep.darkLogout = await inspectDarkInteraction('logout',darkLogout)
+  await call('Emulation.setDeviceMetricsOverride', { width:390, height:844, deviceScaleFactor:1, mobile:true })
+  await call('Page.navigate', { url:`${base}/` }); await ready(); await wait(180)
+  await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true})()`)
+  lightThemeSweep.darkMobileMenuLogout = await inspectDarkInteraction('phone menu logout','.menu-logout button')
+  await navigate(1440)
   await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=false;document.querySelector('.connect-clipp')?.click()})()`)
   const darkDialog = await evalJS(`(()=>({open:document.querySelector('.connect-dialog')?.open===true,close:!!document.querySelector('.connect-dialog .dialog-close')}))()`)
   if (!darkDialog.open || !darkDialog.close) throw new Error(`dark theme Connect Clipp dialog is not open: ${JSON.stringify(darkDialog)}`)
