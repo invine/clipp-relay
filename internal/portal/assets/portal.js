@@ -9,9 +9,8 @@ try {
 
 function updateThemeControl(button) {
   const light = themeRoot.dataset.theme === "light";
-  button.textContent = light ? "Dark theme" : "Light theme";
-  button.setAttribute("aria-label", `Switch to ${light ? "dark" : "light"} appearance`);
-  button.setAttribute("aria-pressed", String(light));
+  button.setAttribute("aria-checked", String(!light));
+  button.querySelector(".theme-label").textContent = light ? "Light mode" : "Dark mode";
 }
 
 document.querySelectorAll("[data-theme-toggle]").forEach((button) => {

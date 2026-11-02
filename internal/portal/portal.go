@@ -52,6 +52,7 @@ func RegisterAssets(mux *http.ServeMux) {
 		"portal.css":     "text/css; charset=utf-8",
 		"portal.js":      "text/javascript; charset=utf-8",
 		"clipp-mark.svg": "image/svg+xml",
+		"clipp-icon.png": "image/png",
 	} {
 		body, err := files.ReadFile("assets/" + name)
 		if err != nil {

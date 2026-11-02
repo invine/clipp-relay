@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"bytes"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -136,7 +137,7 @@ func TestStandalonePortalPagesShareAppearanceWhereScriptsArePermitted(t *testing
 			body := w.Body.String()
 			wants := []string{`data-theme="dark"`}
 			if tc.name == "error" {
-				wants = append(wants, `data-theme-toggle`, `aria-label="Switch to light appearance"`, `/assets/portal.js`)
+				wants = append(wants, `data-theme-toggle`, `aria-label="Dark mode"`, `/assets/portal.js`)
 			} else {
 				wants = append(wants, "owner@example.test", "Clipp for Android", `name="decision" value="authorize"`, `name="decision" value="cancel"`)
 			}
@@ -155,14 +156,14 @@ func TestStandalonePortalPagesShareAppearanceWhereScriptsArePermitted(t *testing
 	}
 }
 
-func TestEmbeddedClippMarkIsServedWithSVGContentType(t *testing.T) {
+func TestEmbeddedClippMarkIsServedWithPNGContentType(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterAssets(mux)
 	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/clipp-mark.svg", nil))
-	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/svg+xml" ||
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/clipp-icon.png", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/png" ||
 		response.Header().Get("X-Content-Type-Options") != "nosniff" ||
-		!strings.Contains(response.Body.String(), "viewBox=\"0 0 32 32\"") {
+		!bytes.HasPrefix(response.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
 		t.Fatalf("embedded brand asset response = status %d, headers %v, body %q", response.Code, response.Header(), response.Body.String())
 	}
 }

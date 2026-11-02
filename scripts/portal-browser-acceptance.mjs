@@ -83,13 +83,13 @@ try {
   await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Escape', code:'Escape', windowsVirtualKeyCode:27 })
   const connectEscape = await evalJS(`({closed:!document.querySelector('#connect-dialog').open,focusRestored:document.activeElement===document.querySelector('.connect-clipp')})`)
   if (!connectEscape.closed || !connectEscape.focusRestored) throw new Error(`Connect Clipp Escape did not close and restore focus: ${JSON.stringify(connectEscape)}`)
-  const themeEvidence = await evalJS(`(()=>{const button=document.querySelector('[data-theme-toggle]');const initial=document.documentElement.dataset.theme;button.click();const selected={theme:document.documentElement.dataset.theme,label:button.innerText,pressed:button.getAttribute('aria-pressed'),stored:localStorage.getItem('clipp-relay-appearance')};return {initial,...selected}})()`)
-  if (themeEvidence.initial !== 'dark' || themeEvidence.theme !== 'light' || themeEvidence.label !== 'Dark theme' || themeEvidence.pressed !== 'true' || themeEvidence.stored !== 'light') throw new Error(`theme toggle did not select and store light appearance: ${JSON.stringify(themeEvidence)}`)
+  const themeEvidence = await evalJS(`(()=>{const button=document.querySelector('.workspace-sidebar [data-theme-toggle]');if(!button.getBoundingClientRect().width)throw new Error('sidebar theme control unavailable');const initial=document.documentElement.dataset.theme;button.click();const selected={theme:document.documentElement.dataset.theme,label:button.innerText,pressed:button.getAttribute('aria-checked'),stored:localStorage.getItem('clipp-relay-appearance')};return {initial,...selected}})()`)
+  if (themeEvidence.initial !== 'dark' || themeEvidence.theme !== 'light' || themeEvidence.label !== 'Light mode' || themeEvidence.pressed !== 'false' || themeEvidence.stored !== 'light') throw new Error(`theme toggle did not select and store light appearance: ${JSON.stringify(themeEvidence)}`)
   await snap('account-light-1440.png')
   await call('Page.reload'); await ready(); await wait(120)
-  themeEvidence.reloaded = await evalJS(`({theme:document.documentElement.dataset.theme,label:document.querySelector('[data-theme-toggle]').innerText,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
-  if (themeEvidence.reloaded.theme !== 'light' || themeEvidence.reloaded.label !== 'Dark theme' || themeEvidence.reloaded.overflow) throw new Error(`saved theme was not restored safely: ${JSON.stringify(themeEvidence.reloaded)}`)
-  await evalJS(`document.querySelector('[data-theme-toggle]').click()`)
+  themeEvidence.reloaded = await evalJS(`({theme:document.documentElement.dataset.theme,label:([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')).textContent,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
+  if (themeEvidence.reloaded.theme !== 'light' || themeEvidence.reloaded.label !== 'Light mode' || themeEvidence.reloaded.overflow) throw new Error(`saved theme was not restored safely: ${JSON.stringify(themeEvidence.reloaded)}`)
+  await evalJS(`([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')).click()`)
   themeEvidence.restored = await evalJS(`({theme:document.documentElement.dataset.theme,stored:localStorage.getItem('clipp-relay-appearance')})`)
   if (themeEvidence.restored.theme !== 'dark' || themeEvidence.restored.stored !== 'dark') throw new Error(`theme control did not restore dark appearance: ${JSON.stringify(themeEvidence.restored)}`)
   const lightThemeSweep = {}
@@ -97,18 +97,19 @@ try {
   const inspectLight = async (name, width, path) => {
     await call('Emulation.setDeviceMetricsOverride', { width, height: viewportHeight(width), deviceScaleFactor: 1, mobile: width < 640 })
     await call('Page.navigate', { url: `${base}${path}` }); await ready(); await wait(220)
-    const result = await evalJS(`(()=>{const rgb=s=>{const m=s.match(/[\\d.]+/g);return m&&!(m.length>3&&Number(m[3])===0)?m.slice(0,3).map(Number):null};const lum=c=>{const a=c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return .2126*a[0]+.7152*a[1]+.0722*a[2]};const contrast=(a,b)=>{a=rgb(a);b=rgb(b);if(!a||!b)return null;const x=lum(a),y=lum(b);return +((Math.max(x,y)+.05)/(Math.min(x,y)+.05)).toFixed(2)};const ground=getComputedStyle(document.querySelector('.workspace-main')||document.body).backgroundColor;const controls=[...document.querySelectorAll('button:not(:disabled),.button')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0}).map(e=>({label:e.innerText.trim().replace(/\\s+/g,' ').slice(0,48),ratio:contrast(getComputedStyle(e).color,rgb(getComputedStyle(e).backgroundColor)?getComputedStyle(e).backgroundColor:ground),border:getComputedStyle(e).borderColor,bg:getComputedStyle(e).backgroundColor,fg:getComputedStyle(e).color}));return {theme:document.documentElement.dataset.theme,width:innerWidth,scroll:document.documentElement.scrollWidth,themeToggle:!!document.querySelector('[data-theme-toggle]'),controls,disabled:[...document.querySelectorAll('button:disabled,input:disabled')].length,mark:[...document.images].every(i=>i.complete&&i.naturalWidth>0)}})()`)
+    const result = await evalJS(`(()=>{const rgb=s=>{const m=s.match(/[\\d.]+/g);return m&&!(m.length>3&&Number(m[3])===0)?m.slice(0,3).map(Number):null};const lum=c=>{const a=c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return .2126*a[0]+.7152*a[1]+.0722*a[2]};const contrast=(a,b)=>{a=rgb(a);b=rgb(b);if(!a||!b)return null;const x=lum(a),y=lum(b);return +((Math.max(x,y)+.05)/(Math.min(x,y)+.05)).toFixed(2)};const ground=getComputedStyle(document.querySelector('.workspace-main')||document.body).backgroundColor;const controls=[...document.querySelectorAll('button:not(:disabled),.button')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0}).map(e=>({label:e.innerText.trim().replace(/\\s+/g,' ').slice(0,48),ratio:contrast(getComputedStyle(e).color,rgb(getComputedStyle(e).backgroundColor)?getComputedStyle(e).backgroundColor:ground),border:getComputedStyle(e).borderColor,bg:getComputedStyle(e).backgroundColor,fg:getComputedStyle(e).color}));return {theme:document.documentElement.dataset.theme,width:innerWidth,scroll:document.documentElement.scrollWidth,themeToggle:!!([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')),controls,disabled:[...document.querySelectorAll('button:disabled,input:disabled')].length,mark:[...document.images].every(i=>i.complete&&i.naturalWidth>0)}})()`)
     if (result.theme !== 'light' || result.scroll > width || !result.mark) throw new Error(`light theme ${name} at ${width}px failed: ${JSON.stringify(result)}`)
     if (!result.themeToggle) throw new Error(`light theme switch is missing on ${name}: ${JSON.stringify(result)}`)
     if (result.controls.some(control => control.ratio !== null && control.ratio < 4.5)) throw new Error(`light theme control contrast failed on ${name}: ${JSON.stringify(result.controls)}`)
-    const toggleRect = await evalJS(`(()=>{const r=document.querySelector('[data-theme-toggle]')?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+    await evalJS(`document.querySelector('.workspace-menu').open=true`)
+    const toggleRect = await evalJS(`(()=>{const r=([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]'))?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
     if (!toggleRect) throw new Error(`light theme switch is not visible on ${name}`)
     if (toggleRect) {
       await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:toggleRect.x, y:toggleRect.y }); await wait(80)
-      const hover = await evalJS(`(()=>{const e=document.querySelector('[data-theme-toggle]'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
+      const hover = await evalJS(`(()=>{const e=([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
       if (hover.ratio < 4.5) throw new Error(`light theme toggle hover contrast failed on ${name}: ${JSON.stringify(hover)}`)
       await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 }); await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
-      const focus = await evalJS(`(()=>{const e=document.querySelector('[data-theme-toggle]');e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth),color:s.outlineColor}})()`)
+      const focus = await evalJS(`(()=>{const e=([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]'));e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth),color:s.outlineColor}})()`)
       if (focus.outline === 'none' || focus.width < 2) throw new Error(`light theme toggle focus indicator missing on ${name}: ${JSON.stringify(focus)}`)
       result.interaction = { hover, focus }
     }
@@ -177,7 +178,8 @@ try {
     if (focus.outline === 'none' || focus.width < 2) throw new Error(`dark theme ${name} focus indicator missing: ${JSON.stringify(focus)}`)
     return {hover,focus}
   }
-  lightThemeSweep.darkThemeToggle = await inspectDarkInteraction('theme toggle','[data-theme-toggle]')
+  await evalJS(`document.querySelector('.workspace-menu').open=true`)
+  lightThemeSweep.darkThemeToggle = await inspectDarkInteraction('theme toggle','.workspace-sidebar [data-theme-toggle]')
   await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true})()`)
   const darkLogout = await evalJS(`(()=>[...document.querySelectorAll('.sidebar-logout button,.menu-logout button')].find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0})?.matches('.sidebar-logout button')?'.sidebar-logout button':'.menu-logout button')()`)
   lightThemeSweep.darkLogout = await inspectDarkInteraction('logout',darkLogout)
@@ -340,6 +342,13 @@ try {
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
   evidence.keyboard.escape = await evalJS(`({open:document.querySelector('.workspace-menu').open,focus:document.activeElement.matches('.workspace-menu summary')})`)
   if (!evidence.keyboard.open.open || evidence.keyboard.escape.open || !evidence.keyboard.escape.focus) throw new Error(`keyboard menu acceptance failed: ${JSON.stringify(evidence.keyboard)}`)
+  evidence.menuLayout = {};
+  for (const width of [320, 390, 768]) {
+    await navigate(width)
+    const layout = await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');m.open=true;const nav=m.querySelector('nav');const items=[...nav.children].filter(e=>e.getBoundingClientRect().height>0).map(e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom}});const b=nav.querySelector('[data-theme-toggle]');return {items,visible:b.getBoundingClientRect().width>0}})()`)
+    if (!layout.visible || layout.items.some((r,i)=>r.x<0||r.right>width||(i>0&&r.y<layout.items[i-1].bottom-1))) throw new Error(`menu is not a single visible column at ${width}px: ${JSON.stringify(layout)}`)
+    evidence.menuLayout[width] = layout
+  }
   evidence.keyboard.logout = await evalJS(`({action:document.querySelector('.workspace-menu form')?.getAttribute('action'),method:document.querySelector('.workspace-menu form')?.getAttribute('method'),csrf:!!document.querySelector('.workspace-menu form input[name="csrf"]'),label:document.querySelector('.workspace-menu form button')?.textContent.trim()})`)
   if (evidence.keyboard.logout.action !== '/auth/logout' || evidence.keyboard.logout.method !== 'post' || !evidence.keyboard.logout.csrf || evidence.keyboard.logout.label !== 'Log out') throw new Error(`menu logout form failed: ${JSON.stringify(evidence.keyboard.logout)}`)
   // Simulate 150% browser zoom on a 390px screen as a 260 CSS-pixel viewport
@@ -657,14 +666,18 @@ try {
   if (!(await evalJS(`document.body.innerText.includes('Your account')`))) throw new Error('fixture did not restore owner session after portal-only logout')
   for (const width of [1440, 768, 390, 320]) {
     await adminNavigate(width, '/account/security')
+    await snap(`security-${width}.png`, false)
+    await evalJS(`document.querySelector('.security-review summary').click()`)
     const result = await evalJS(`({heading:document.querySelector('h1')?.innerText,account:document.body.innerText.includes('workspace-a@example.test'),grantCount:document.body.innerText.includes('Active Login Grants:'),portalScope:document.body.innerText.includes('Only this browser')&&document.body.innerText.includes('Your Clipp Login Grants, Relay Access Tokens and live Relay Sessions remain active'),revokeScope:document.body.innerText.includes('All access for this Relay Account')&&document.body.innerText.includes('end all Portal Sessions')&&document.body.innerText.includes('Your account status and quota assignments do not change'),review:document.body.innerText.includes('revoke every Login Grant'),checkbox:!!document.querySelector('input[name="confirm"][required]'),deletion:!!document.querySelector('form[action="/auth/delete"]'),deletionScope:document.body.innerText.includes('Permanent account removal')&&document.querySelector('.danger-details.security-action')?.textContent.includes('Relay Account Deletion is irreversible')&&document.querySelector('.danger-details.security-action')?.textContent.includes('Retained Quota Usage for the current week may be imported'),deleteConfirmation:!!document.querySelector('input[name="confirm_email"][required][pattern]'),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth})`)
     evidence.security.viewports[width] = result
-    await snap(`security-${width}.png`, false)
     if (!result.account || !result.grantCount || !result.portalScope || !result.revokeScope || !result.review || !result.checkbox || !result.deletion || !result.deletionScope || !result.deleteConfirmation || result.overflow) throw new Error(`security view ${width}px acceptance failed: ${JSON.stringify(result)}`)
   }
   await adminNavigate(1440, '/account/security')
   await call('Emulation.setScriptExecutionDisabled', { value: true })
   let securityDOM = await call('DOM.getDocument', { depth: 0 })
+  const revokeSummary = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: '.security-review summary' })
+  await clickNode(revokeSummary.nodeId)
+  securityDOM = await call('DOM.getDocument', { depth: 0 })
   const unchecked = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'input[name="confirm"]' })
   const revokeButton = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'form[action="/auth/revoke"] button' })
   const uncheckedState = await call('DOM.describeNode', { nodeId: unchecked.nodeId })
