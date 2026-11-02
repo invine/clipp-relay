@@ -74,6 +74,15 @@ try {
   if (!(await evalJS(`document.body.innerText.includes('Your account')`))) throw new Error(`OAuth login did not reach the account workspace at ${await evalJS('location.href')}: ${(await evalJS('document.body.innerText')).slice(0,1200)}; responses=${JSON.stringify(responses.slice(-12))}`)
   const facts = await evalJS(`({ title: document.querySelector('h1')?.innerText, account: document.body.innerText.includes('workspace-a@example.test'), allowance: document.body.innerText.includes('Your allowance'), setup: document.body.innerText.includes('Add this relay to Clipp'), width: innerWidth, scroll: document.documentElement.scrollWidth })`)
   if (!facts.account || !facts.allowance || !facts.setup) throw new Error(`expected account workspace facts missing: ${JSON.stringify(facts)}`)
+  const themeEvidence = await evalJS(`(()=>{const button=document.querySelector('[data-theme-toggle]');const initial=document.documentElement.dataset.theme;button.click();const selected={theme:document.documentElement.dataset.theme,label:button.innerText,pressed:button.getAttribute('aria-pressed'),stored:localStorage.getItem('clipp-relay-appearance')};return {initial,...selected}})()`)
+  if (themeEvidence.initial !== 'dark' || themeEvidence.theme !== 'light' || themeEvidence.label !== 'Dark theme' || themeEvidence.pressed !== 'true' || themeEvidence.stored !== 'light') throw new Error(`theme toggle did not select and store light appearance: ${JSON.stringify(themeEvidence)}`)
+  await snap('account-light-1440.png')
+  await call('Page.reload'); await ready(); await wait(120)
+  themeEvidence.reloaded = await evalJS(`({theme:document.documentElement.dataset.theme,label:document.querySelector('[data-theme-toggle]').innerText,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
+  if (themeEvidence.reloaded.theme !== 'light' || themeEvidence.reloaded.label !== 'Dark theme' || themeEvidence.reloaded.overflow) throw new Error(`saved theme was not restored safely: ${JSON.stringify(themeEvidence.reloaded)}`)
+  await evalJS(`document.querySelector('[data-theme-toggle]').click()`)
+  themeEvidence.restored = await evalJS(`({theme:document.documentElement.dataset.theme,stored:localStorage.getItem('clipp-relay-appearance')})`)
+  if (themeEvidence.restored.theme !== 'dark' || themeEvidence.restored.stored !== 'dark') throw new Error(`theme control did not restore dark appearance: ${JSON.stringify(themeEvidence.restored)}`)
   if (process.env.PORTAL_APP_INSPECTOR) {
     const cookie = (await call('Network.getAllCookies')).cookies.find(item => item.name === '__Host-clipp-portal' && item.domain === 'localhost')?.value
     if (!cookie) throw new Error('authenticated browser did not expose its disposable portal session to the app inspector')
@@ -99,7 +108,7 @@ try {
     const inspectConsent = new URLSearchParams({ response_type: 'code', client_id: 'electron', redirect_uri: 'http://127.0.0.1:34567/oauth/callback', code_challenge_method: 'S256', code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM', state: 'browser-consent-inspector-state-10' })
     await inspect('owner-consent', `/oauth/authorize?${inspectConsent}`)
   }
-  const evidence = { url: base, signedOut, clipboardSuccess, clipboardRefusal, auth: facts, viewports: {}, keyboard: {}, noScript: {}, failures: {} }
+  const evidence = { url: base, signedOut, clipboardSuccess, clipboardRefusal, auth: facts, theme: themeEvidence, viewports: {}, keyboard: {}, noScript: {}, failures: {} }
 
   const electronCallback = 'http://127.0.0.1:34567/oauth/callback'
   const consentState = decision => `browser-consent-${decision}-state-10`
