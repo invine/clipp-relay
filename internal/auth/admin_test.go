@@ -417,7 +417,7 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 	}
 	set("2", "12345", "5", false)
 	selected := portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
-	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `id="quota-override"`) || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="12345"`) || !strings.Contains(selected.Body.String(), `<option value="B" selected>bytes</option>`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) {
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `id="quota-override"`) || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="12345"`) || !strings.Contains(selected.Body.String(), `<option value="B" selected>bytes</option>`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) || !strings.Contains(selected.Body.String(), "Override set to 12345 bytes") || !strings.Contains(selected.Body.String(), "Override set to 5") {
 		t.Fatalf("selected policy does not show current overrides: %d %s", selected.Code, selected.Body.String())
 	}
 	onlyBytes := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {"3"}, "weekly_bytes_override": {"999"}}
@@ -435,14 +435,19 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 		t.Fatalf("session-only override reset byte cap: %+v", change)
 	}
 	selected = portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
-	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="999"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) {
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="999"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) || !strings.Contains(selected.Body.String(), "Override set to 999 bytes") || !strings.Contains(selected.Body.String(), "Override set to 0") {
 		t.Fatalf("exact arbitrary-byte and explicit-zero values were not retained: %d %s", selected.Code, selected.Body.String())
 	}
 	profile := portalRequest(s, "GET", "/", owner, nil, "")
 	if profile.Code != 200 || !strings.Contains(profile.Body.String(), "Recorded Relay Usage: 1000 bytes") || !strings.Contains(profile.Body.String(), "999 bytes") || !strings.Contains(profile.Body.String(), "Relay Sessions: 0") {
 		t.Fatalf("owner quota profile: %d %s", profile.Code, profile.Body.String())
 	}
-	clearBytes := url.Values{"csrf": {csrf}, "reason": {"support_correction"}, "action": {"override"}, "revision": {"5"}, "weekly_bytes_override": {""}, "weekly_bytes_override_unit": {"B"}}
+	set("5", "0", "0", false)
+	selected = portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="0"`) || !strings.Contains(selected.Body.String(), "Override set to 0 bytes") {
+		t.Fatalf("explicit zero allowance override was not shown as distinct from a cleared override: %d %s", selected.Code, selected.Body.String())
+	}
+	clearBytes := url.Values{"csrf": {csrf}, "reason": {"support_correction"}, "action": {"override"}, "revision": {"6"}, "weekly_bytes_override": {""}, "weekly_bytes_override_unit": {"B"}}
 	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, clearBytes, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("clear allowance override: %d %s", out.Code, out.Body.String())
 	}
@@ -450,7 +455,7 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 		t.Fatalf("clearing allowance override did not restore the assigned plan: %+v", change)
 	}
 	selected = portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
-	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value=""`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) {
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value=""`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) || !strings.Contains(selected.Body.String(), "Uses assigned plan") || strings.Contains(selected.Body.String(), "Override set to 0 bytes") || !strings.Contains(selected.Body.String(), "Override set to 0</dd>") {
 		t.Fatalf("cleared override and explicit-zero session limit were conflated: %d %s", selected.Code, selected.Body.String())
 	}
 	var generation, committed int64
