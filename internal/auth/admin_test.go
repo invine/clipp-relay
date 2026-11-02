@@ -208,9 +208,10 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	}
 	d := newProvider(t)
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	admin := loginAs(t, s, d, "plans-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "plans-admin@gmail.com", "")
+	adminSubject := "plans-admin-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	admin := loginAs(t, s, d, adminSubject, "plans-admin@gmail.com", "")
 	first := portalRequest(s, http.MethodGet, "/admin/plans?limit=1", admin, nil, "")
-	for _, want := range []string{"Quota plans", "Create a quota plan", "Weekly allowance", "Relay Sessions", "Accounts already using it keep their saved plan and allowance", `href="/admin"`} {
+	for _, want := range []string{"Quota plans", "Create a quota plan", "Weekly allowance", "Relay Sessions", "Accounts already using it keep their saved plan and allowance", "Assigned Relay Accounts", `href="/admin"`} {
 		if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), want) {
 			t.Fatalf("separate quota plan library missing %q: %d %s", want, first.Code, first.Body.String())
 		}
@@ -235,9 +236,17 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	if created.Code != http.StatusSeeOther || !strings.HasPrefix(createdPath, "/admin/plans?created=") {
 		t.Fatalf("plan creation should return to its library: %d %q", created.Code, created.Header().Get("Location"))
 	}
+	createdID := strings.TrimPrefix(createdPath, "/admin/plans?created=")
 	resultPage := portalRequest(s, http.MethodGet, createdPath, admin, nil, "")
-	if resultPage.Code != http.StatusOK || !strings.Contains(resultPage.Body.String(), "Plan created") || !strings.Contains(resultPage.Body.String(), planName) || !strings.Contains(resultPage.Body.String(), "0 bytes") {
+	if resultPage.Code != http.StatusOK || !strings.Contains(resultPage.Body.String(), "Plan created") || !strings.Contains(resultPage.Body.String(), planName) || !strings.Contains(resultPage.Body.String(), "0 bytes") || !strings.Contains(resultPage.Body.String(), "0 Relay Accounts") {
 		t.Fatalf("committed plan result was not directly reachable: %d %s", resultPage.Code, resultPage.Body.String())
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET plan_id=$1 WHERE subject=$2`, createdID, adminSubject); err != nil {
+		t.Fatal(err)
+	}
+	assignedPage := portalRequest(s, http.MethodGet, "/admin/plans?created="+createdID, admin, nil, "")
+	if assignedPage.Code != http.StatusOK || !strings.Contains(assignedPage.Body.String(), "1 Relay Account") {
+		t.Fatalf("plan library did not show the account's current assignment: %d %s", assignedPage.Code, assignedPage.Body.String())
 	}
 	firstPage := portalRequest(s, http.MethodGet, "/admin/plans?limit=1", admin, nil, "")
 	next := regexp.MustCompile(`href="/admin/plans\?after=([0-9a-f-]+)&amp;limit=1"`).FindStringSubmatch(firstPage.Body.String())
@@ -252,7 +261,7 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), planName) || !strings.Contains(updated.Body.String(), "0 bytes") || !strings.Contains(updated.Body.String(), "Relay Sessions") {
 		t.Fatalf("created zero-valued plan was not presented accurately: %d %s", updated.Code, updated.Body.String())
 	}
-	var zeroPlanID, zeroPlanRevision string
+	zeroPlanID, zeroPlanRevision := createdID, ""
 	if err := db.Pool.QueryRow(context.Background(), `SELECT id::text,revision::text FROM public.quota_plans WHERE name=$1`, planName).Scan(&zeroPlanID, &zeroPlanRevision); err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +273,10 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	archivePath := "/admin/plans?created=" + zeroPlanID
 	if response := portalRequest(s, http.MethodPost, "/admin/plans/"+zeroPlanID+"/archive", admin, archiveForm, c.PortalOrigin); response.Code != http.StatusSeeOther || response.Header().Get("Location") != archivePath {
 		t.Fatalf("reviewed plan archive = %d %q", response.Code, response.Header().Get("Location"))
+	}
+	archivedPage := portalRequest(s, http.MethodGet, archivePath, admin, nil, "")
+	if archivedPage.Code != http.StatusOK || !strings.Contains(archivedPage.Body.String(), "Archived") || !strings.Contains(archivedPage.Body.String(), "1 Relay Account") {
+		t.Fatalf("archiving a plan changed or obscured its current assignments: %d %s", archivedPage.Code, archivedPage.Body.String())
 	}
 	stale := portalRequest(s, http.MethodPost, "/admin/plans/"+zeroPlanID+"/archive", admin, archiveForm, c.PortalOrigin)
 	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `href="`+archivePath+`"`) {
