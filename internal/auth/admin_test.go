@@ -314,7 +314,7 @@ func TestAccountSecurityActionsThroughPortal(t *testing.T) {
 	owner := loginAs(t, s, d, subject, "owner@example.test", "")
 	ownerCSRF := csrfFrom(t, s, owner)
 	securityPage := portalRequest(s, http.MethodGet, "/account/security", owner, nil, "")
-	for _, want := range []string{"Access &amp; security", "owner@example.test", "Active Login Grants:", "name=\"confirm\"", "required", "Delete relay account", "name=\"confirm_email\"", `pattern="owner@example\.test"`, "Deleting your account closes relay access", "return here to review and submit", "Physical connection closure may take a short time"} {
+	for _, want := range []string{"Access &amp; security", "owner@example.test", "Active Login Grants:", "Only this browser", "Log out of this portal", "Your Clipp Login Grants, Relay Access Tokens and live Relay Sessions remain active", "All Portal Sessions", "Every Login Grant and Relay Access Token", "Physical connection closure may take a short time", "Delete relay account", "name=\"confirm_email\"", `pattern="owner@example\.test"`, "Deletion is irreversible", "current week may be imported", "closes relay access", "return here to review and submit"} {
 		if securityPage.Code != http.StatusOK || !strings.Contains(securityPage.Body.String(), want) {
 			t.Fatalf("security view missing %q: %d %s", want, securityPage.Code, securityPage.Body.String())
 		}
