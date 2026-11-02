@@ -1,3 +1,33 @@
+const themeRoot = document.documentElement;
+const themeKey = "clipp-relay-appearance";
+try {
+  const savedTheme = localStorage.getItem(themeKey);
+  if (savedTheme === "dark" || savedTheme === "light") themeRoot.dataset.theme = savedTheme;
+} catch {
+  // The server-rendered dark appearance remains complete when storage is unavailable.
+}
+
+function updateThemeControl(button) {
+  const light = themeRoot.dataset.theme === "light";
+  button.textContent = light ? "Dark theme" : "Light theme";
+  button.setAttribute("aria-label", `Switch to ${light ? "dark" : "light"} appearance`);
+  button.setAttribute("aria-pressed", String(light));
+}
+
+document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+  updateThemeControl(button);
+  button.addEventListener("click", () => {
+    const nextTheme = themeRoot.dataset.theme === "light" ? "dark" : "light";
+    themeRoot.dataset.theme = nextTheme;
+    try {
+      localStorage.setItem(themeKey, nextTheme);
+    } catch {
+      // Theme still changes for this page even when preference storage is blocked.
+    }
+    document.querySelectorAll("[data-theme-toggle]").forEach(updateThemeControl);
+  });
+});
+
 document.documentElement.classList.add("js");
 
 document.querySelectorAll(".workspace-menu").forEach((menu) => {
