@@ -99,8 +99,10 @@ try {
     await call('Page.navigate', { url: `${base}${path}` }); await ready(); await wait(220)
     const result = await evalJS(`(()=>{const rgb=s=>{const m=s.match(/[\\d.]+/g);return m&&!(m.length>3&&Number(m[3])===0)?m.slice(0,3).map(Number):null};const lum=c=>{const a=c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return .2126*a[0]+.7152*a[1]+.0722*a[2]};const contrast=(a,b)=>{a=rgb(a);b=rgb(b);if(!a||!b)return null;const x=lum(a),y=lum(b);return +((Math.max(x,y)+.05)/(Math.min(x,y)+.05)).toFixed(2)};const ground=getComputedStyle(document.querySelector('.workspace-main')||document.body).backgroundColor;const controls=[...document.querySelectorAll('button:not(:disabled),.button')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0}).map(e=>({label:e.innerText.trim().replace(/\\s+/g,' ').slice(0,48),ratio:contrast(getComputedStyle(e).color,rgb(getComputedStyle(e).backgroundColor)?getComputedStyle(e).backgroundColor:ground),border:getComputedStyle(e).borderColor,bg:getComputedStyle(e).backgroundColor,fg:getComputedStyle(e).color}));return {theme:document.documentElement.dataset.theme,width:innerWidth,scroll:document.documentElement.scrollWidth,themeToggle:!!document.querySelector('[data-theme-toggle]'),controls,disabled:[...document.querySelectorAll('button:disabled,input:disabled')].length,mark:[...document.images].every(i=>i.complete&&i.naturalWidth>0)}})()`)
     if (result.theme !== 'light' || result.scroll > width || !result.mark) throw new Error(`light theme ${name} at ${width}px failed: ${JSON.stringify(result)}`)
+    if (!result.themeToggle) throw new Error(`light theme switch is missing on ${name}: ${JSON.stringify(result)}`)
     if (result.controls.some(control => control.ratio !== null && control.ratio < 4.5)) throw new Error(`light theme control contrast failed on ${name}: ${JSON.stringify(result.controls)}`)
     const toggleRect = await evalJS(`(()=>{const r=document.querySelector('[data-theme-toggle]')?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+    if (!toggleRect) throw new Error(`light theme switch is not visible on ${name}`)
     if (toggleRect) {
       await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:toggleRect.x, y:toggleRect.y }); await wait(80)
       const hover = await evalJS(`(()=>{const e=document.querySelector('[data-theme-toggle]'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
@@ -112,6 +114,7 @@ try {
     }
     if (name === 'owner' && width === 1440) {
       const logoutRect = await evalJS(`(()=>{const menu=document.querySelector('.workspace-menu');if(menu)menu.open=true;const all=[...document.querySelectorAll('.sidebar-logout button,.menu-logout button')];const e=all.find(x=>x.getBoundingClientRect().width>0)||all[0];const r=e?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2,selector:e.matches('.sidebar-logout button')?'.sidebar-logout button':'.menu-logout button'}:null})()`)
+      if (!logoutRect) throw new Error('light theme owner view has no visible logout control')
       if (logoutRect) {
         await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:logoutRect.x, y:logoutRect.y }); await wait(80)
         result.logoutHover = await evalJS(`(()=>{const e=document.querySelector('${logoutRect.selector}'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor==='rgba(0, 0, 0, 0)'?'rgb(255,255,255)':s.backgroundColor));return {color:s.color,background:s.backgroundColor,ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),visible:e.getBoundingClientRect().width>0}})()`)
@@ -130,7 +133,9 @@ try {
   for (const width of [1440, 768, 390, 320]) lightThemeSweep[`owner-${width}`] = await inspectLight('owner', width, '/')
   await call('Page.navigate', { url:`${base}/` }); await ready(); await wait(180)
   await evalJS(`document.querySelector('.connect-clipp')?.click()`)
-  const closeRect = await evalJS(`(()=>{const r=document.querySelector('.connect-dialog .dialog-close')?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+  const closeState = await evalJS(`(()=>{const d=document.querySelector('.connect-dialog'),e=d?.querySelector('.dialog-close'),r=e?.getBoundingClientRect();return {open:d?.open===true,close:!!e,visible:!!r&&r.width>0&&r.height>0,rect:r?{x:r.x+r.width/2,y:r.y+r.height/2}:null}})()`)
+  if (!closeState.open || !closeState.close || !closeState.visible) throw new Error(`light theme Connect Clipp dialog/close control is missing: ${JSON.stringify(closeState)}`)
+  const closeRect = closeState.rect
   if (closeRect) {
     await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:closeRect.x, y:closeRect.y }); await wait(80)
     lightThemeSweep.dialogCloseHover = await evalJS(`(()=>{const e=document.querySelector('.connect-dialog .dialog-close'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
@@ -150,6 +155,26 @@ try {
   await navigate(1440)
   lightThemeSweep.restoredDark = await evalJS(`({theme:document.documentElement.dataset.theme,stored:localStorage.getItem('clipp-relay-appearance')})`)
   if (lightThemeSweep.restoredDark.theme !== 'dark') throw new Error(`theme sweep did not restore dark appearance: ${JSON.stringify(lightThemeSweep.restoredDark)}`)
+  const inspectDarkInteraction = async (name, selector) => {
+    const rect = await evalJS(`(()=>{const r=document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect();return r&&r.width>0&&r.height>0?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+    if (!rect) throw new Error(`dark theme ${name} control is missing or hidden`)
+    await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:rect.x, y:rect.y }); await wait(80)
+    const hover = await evalJS(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);let bg=s.backgroundColor;if(bg==='rgba(0, 0, 0, 0)')bg=getComputedStyle(e.parentElement).backgroundColor;const a=l(rgb(s.color)),b=l(rgb(bg));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:bg,color:s.color}})()`)
+    if (hover.ratio < 4.5) throw new Error(`dark theme ${name} hover contrast failed: ${JSON.stringify(hover)}`)
+    await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 }); await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+    const focus = await evalJS(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth),color:s.outlineColor}})()`)
+    if (focus.outline === 'none' || focus.width < 2) throw new Error(`dark theme ${name} focus indicator missing: ${JSON.stringify(focus)}`)
+    return {hover,focus}
+  }
+  lightThemeSweep.darkThemeToggle = await inspectDarkInteraction('theme toggle','[data-theme-toggle]')
+  await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true})()`)
+  const darkLogout = await evalJS(`(()=>[...document.querySelectorAll('.sidebar-logout button,.menu-logout button')].find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0})?.matches('.sidebar-logout button')?'.sidebar-logout button':'.menu-logout button')()`)
+  lightThemeSweep.darkLogout = await inspectDarkInteraction('logout',darkLogout)
+  await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=false;document.querySelector('.connect-clipp')?.click()})()`)
+  const darkDialog = await evalJS(`(()=>({open:document.querySelector('.connect-dialog')?.open===true,close:!!document.querySelector('.connect-dialog .dialog-close')}))()`)
+  if (!darkDialog.open || !darkDialog.close) throw new Error(`dark theme Connect Clipp dialog is not open: ${JSON.stringify(darkDialog)}`)
+  lightThemeSweep.darkDialogClose = await inspectDarkInteraction('dialog close','.connect-dialog .dialog-close')
+  await evalJS(`document.querySelector('.connect-dialog .dialog-close').click()`)
   if (process.env.PORTAL_APP_INSPECTOR) {
     const cookie = (await call('Network.getAllCookies')).cookies.find(item => item.name === '__Host-clipp-portal' && item.domain === 'localhost')?.value
     if (!cookie) throw new Error('authenticated browser did not expose its disposable portal session to the app inspector')
