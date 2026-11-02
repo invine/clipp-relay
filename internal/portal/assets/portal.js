@@ -58,6 +58,32 @@ document.querySelectorAll("[data-copy]").forEach((button) => {
   });
 });
 
+const setup = document.querySelector("#connection-setup");
+const connect = document.querySelector(".connect-clipp");
+if (setup && connect && typeof HTMLDialogElement !== "undefined" && typeof HTMLDialogElement.prototype.showModal === "function") {
+  const dialog = document.createElement("dialog");
+  dialog.id = "connect-dialog";
+  dialog.className = "connect-dialog";
+  dialog.setAttribute("aria-labelledby", "setup-title");
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "dialog-close";
+  close.dataset.closeConnect = "";
+  close.setAttribute("aria-label", "Close Connect Clipp setup");
+  close.textContent = "Close";
+  setup.prepend(close);
+  dialog.append(setup);
+  document.querySelector("main.page")?.append(dialog);
+
+  connect.addEventListener("click", (event) => {
+    event.preventDefault();
+    connect.focus();
+    dialog.showModal();
+    setup.querySelector("#discovery-url")?.focus();
+  });
+  close.addEventListener("click", () => dialog.close());
+}
+
 document.querySelectorAll("[data-plan-preview]").forEach((select) => {
   const output = document.getElementById(select.dataset.planPreview);
   if (!output) return;
