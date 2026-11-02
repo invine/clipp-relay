@@ -208,9 +208,10 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	}
 	d := newProvider(t)
 	s := newTestServer(t, db.Pool, c, m, d.endpoints())
-	admin := loginAs(t, s, d, "plans-admin-"+strconv.FormatInt(time.Now().UnixNano(), 10), "plans-admin@gmail.com", "")
+	adminSubject := "plans-admin-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	admin := loginAs(t, s, d, adminSubject, "plans-admin@gmail.com", "")
 	first := portalRequest(s, http.MethodGet, "/admin/plans?limit=1", admin, nil, "")
-	for _, want := range []string{"Quota plans", "Create a quota plan", "Weekly allowance", "Relay Sessions", "Accounts already using it keep their saved plan and allowance", `href="/admin"`} {
+	for _, want := range []string{"Quota plans", "Create a quota plan", "Weekly allowance", "Relay Sessions", "Accounts already using it keep their saved plan and allowance", "Assigned Relay Accounts", `href="/admin"`} {
 		if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), want) {
 			t.Fatalf("separate quota plan library missing %q: %d %s", want, first.Code, first.Body.String())
 		}
@@ -235,9 +236,17 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	if created.Code != http.StatusSeeOther || !strings.HasPrefix(createdPath, "/admin/plans?created=") {
 		t.Fatalf("plan creation should return to its library: %d %q", created.Code, created.Header().Get("Location"))
 	}
+	createdID := strings.TrimPrefix(createdPath, "/admin/plans?created=")
 	resultPage := portalRequest(s, http.MethodGet, createdPath, admin, nil, "")
-	if resultPage.Code != http.StatusOK || !strings.Contains(resultPage.Body.String(), "Plan created") || !strings.Contains(resultPage.Body.String(), planName) || !strings.Contains(resultPage.Body.String(), "0 bytes") {
+	if resultPage.Code != http.StatusOK || !strings.Contains(resultPage.Body.String(), "Plan created") || !strings.Contains(resultPage.Body.String(), planName) || !strings.Contains(resultPage.Body.String(), "0 bytes") || !strings.Contains(resultPage.Body.String(), "0 Relay Accounts") {
 		t.Fatalf("committed plan result was not directly reachable: %d %s", resultPage.Code, resultPage.Body.String())
+	}
+	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET plan_id=$1 WHERE subject=$2`, createdID, adminSubject); err != nil {
+		t.Fatal(err)
+	}
+	assignedPage := portalRequest(s, http.MethodGet, "/admin/plans?created="+createdID, admin, nil, "")
+	if assignedPage.Code != http.StatusOK || !strings.Contains(assignedPage.Body.String(), "1 Relay Account") {
+		t.Fatalf("plan library did not show the account's current assignment: %d %s", assignedPage.Code, assignedPage.Body.String())
 	}
 	firstPage := portalRequest(s, http.MethodGet, "/admin/plans?limit=1", admin, nil, "")
 	next := regexp.MustCompile(`href="/admin/plans\?after=([0-9a-f-]+)&amp;limit=1"`).FindStringSubmatch(firstPage.Body.String())
@@ -252,7 +261,7 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), planName) || !strings.Contains(updated.Body.String(), "0 bytes") || !strings.Contains(updated.Body.String(), "Relay Sessions") {
 		t.Fatalf("created zero-valued plan was not presented accurately: %d %s", updated.Code, updated.Body.String())
 	}
-	var zeroPlanID, zeroPlanRevision string
+	zeroPlanID, zeroPlanRevision := createdID, ""
 	if err := db.Pool.QueryRow(context.Background(), `SELECT id::text,revision::text FROM public.quota_plans WHERE name=$1`, planName).Scan(&zeroPlanID, &zeroPlanRevision); err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +273,10 @@ func TestAdministratorQuotaPlanLibraryIsSeparateAndBounded(t *testing.T) {
 	archivePath := "/admin/plans?created=" + zeroPlanID
 	if response := portalRequest(s, http.MethodPost, "/admin/plans/"+zeroPlanID+"/archive", admin, archiveForm, c.PortalOrigin); response.Code != http.StatusSeeOther || response.Header().Get("Location") != archivePath {
 		t.Fatalf("reviewed plan archive = %d %q", response.Code, response.Header().Get("Location"))
+	}
+	archivedPage := portalRequest(s, http.MethodGet, archivePath, admin, nil, "")
+	if archivedPage.Code != http.StatusOK || !strings.Contains(archivedPage.Body.String(), "Archived") || !strings.Contains(archivedPage.Body.String(), "1 Relay Account") {
+		t.Fatalf("archiving a plan changed or obscured its current assignments: %d %s", archivedPage.Code, archivedPage.Body.String())
 	}
 	stale := portalRequest(s, http.MethodPost, "/admin/plans/"+zeroPlanID+"/archive", admin, archiveForm, c.PortalOrigin)
 	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `href="`+archivePath+`"`) {
@@ -314,7 +327,7 @@ func TestAccountSecurityActionsThroughPortal(t *testing.T) {
 	owner := loginAs(t, s, d, subject, "owner@example.test", "")
 	ownerCSRF := csrfFrom(t, s, owner)
 	securityPage := portalRequest(s, http.MethodGet, "/account/security", owner, nil, "")
-	for _, want := range []string{"Access &amp; security", "owner@example.test", "Active Login Grants:", "name=\"confirm\"", "required", "Delete relay account", "name=\"confirm_email\"", `pattern="owner@example\.test"`, "Deleting your account closes relay access", "return here to review and submit", "Physical connection closure may take a short time"} {
+	for _, want := range []string{"Access &amp; security", "owner@example.test", "Active Login Grants:", "Only this browser", "Log out of this portal", "Your Clipp Login Grants, Relay Access Tokens and live Relay Sessions remain active", "All Portal Sessions", "Every Login Grant and Relay Access Token", "Physical connection closure may take a short time", "Delete relay account", "name=\"confirm_email\"", `pattern="owner@example\.test"`, "Deletion is irreversible", "current week may be imported", "closes relay access", "return here to review and submit"} {
 		if securityPage.Code != http.StatusOK || !strings.Contains(securityPage.Body.String(), want) {
 			t.Fatalf("security view missing %q: %d %s", want, securityPage.Code, securityPage.Body.String())
 		}
@@ -417,7 +430,7 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 	}
 	set("2", "12345", "5", false)
 	selected := portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
-	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `id="quota-override"`) || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="12345"`) || !strings.Contains(selected.Body.String(), `<option value="B" selected>bytes</option>`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) {
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `id="quota-override"`) || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="12345"`) || !strings.Contains(selected.Body.String(), `<option value="B" selected>bytes</option>`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="5"`) || !strings.Contains(selected.Body.String(), "Override set to 12345 bytes") || !strings.Contains(selected.Body.String(), "Override set to 5") {
 		t.Fatalf("selected policy does not show current overrides: %d %s", selected.Code, selected.Body.String())
 	}
 	onlyBytes := url.Values{"csrf": {csrf}, "reason": {"policy_enforcement"}, "action": {"override"}, "revision": {"3"}, "weekly_bytes_override": {"999"}}
@@ -435,14 +448,19 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 		t.Fatalf("session-only override reset byte cap: %+v", change)
 	}
 	selected = portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
-	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="999"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) {
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="999"`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) || !strings.Contains(selected.Body.String(), "Override set to 999 bytes") || !strings.Contains(selected.Body.String(), "Override set to 0") {
 		t.Fatalf("exact arbitrary-byte and explicit-zero values were not retained: %d %s", selected.Code, selected.Body.String())
 	}
 	profile := portalRequest(s, "GET", "/", owner, nil, "")
 	if profile.Code != 200 || !strings.Contains(profile.Body.String(), "Recorded Relay Usage: 1000 bytes") || !strings.Contains(profile.Body.String(), "999 bytes") || !strings.Contains(profile.Body.String(), "Relay Sessions: 0") {
 		t.Fatalf("owner quota profile: %d %s", profile.Code, profile.Body.String())
 	}
-	clearBytes := url.Values{"csrf": {csrf}, "reason": {"support_correction"}, "action": {"override"}, "revision": {"5"}, "weekly_bytes_override": {""}, "weekly_bytes_override_unit": {"B"}}
+	set("5", "0", "0", false)
+	selected = portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value="0"`) || !strings.Contains(selected.Body.String(), "Override set to 0 bytes") {
+		t.Fatalf("explicit zero allowance override was not shown as distinct from a cleared override: %d %s", selected.Code, selected.Body.String())
+	}
+	clearBytes := url.Values{"csrf": {csrf}, "reason": {"support_correction"}, "action": {"override"}, "revision": {"6"}, "weekly_bytes_override": {""}, "weekly_bytes_override_unit": {"B"}}
 	if out := portalRequest(s, "POST", "/admin/accounts/"+id, admin, clearBytes, c.PortalOrigin); out.Code != 303 {
 		t.Fatalf("clear allowance override: %d %s", out.Code, out.Body.String())
 	}
@@ -450,7 +468,7 @@ func TestLiveQuotaOverridesPreserveRecordedUsageAndCredentials(t *testing.T) {
 		t.Fatalf("clearing allowance override did not restore the assigned plan: %+v", change)
 	}
 	selected = portalRequest(s, "GET", "/admin?selected="+id, admin, nil, "")
-	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value=""`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) {
+	if selected.Code != 200 || !strings.Contains(selected.Body.String(), `name="weekly_bytes_override" type="number" min="0" step="any" value=""`) || !strings.Contains(selected.Body.String(), `name="sessions_override" type="number" min="0" value="0"`) || !strings.Contains(selected.Body.String(), "Uses assigned plan") || strings.Contains(selected.Body.String(), "Override set to 0 bytes") || !strings.Contains(selected.Body.String(), "Override set to 0</dd>") {
 		t.Fatalf("cleared override and explicit-zero session limit were conflated: %d %s", selected.Code, selected.Body.String())
 	}
 	var generation, committed int64

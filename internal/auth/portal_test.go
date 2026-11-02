@@ -108,7 +108,7 @@ func TestLoggedOutPortalProvidesStylesAndCanonicalSetupURL(t *testing.T) {
 	if out.Code != http.StatusOK {
 		t.Fatalf("portal status %d: %s", out.Code, out.Body.String())
 	}
-	for _, want := range []string{`href="/assets/portal.css"`, `class="portal-workspace"`, `aria-label="Portal navigation"`, `aria-label="Open or close portal navigation"`, `href="/" aria-current="page"`, "relay.example.test", `https://relay.example.test/v1/relay`, "Add this relay to Clipp", "Peers sidebar", "Open discovery endpoint", "Authenticated discovery", "HTTPS discovery URL", "Sign in with Google", "New accounts need administrator approval", "each Clipp app needs its own authorization", "does not mean setup failed"} {
+	for _, want := range []string{`data-theme="dark"`, `data-theme-toggle`, `aria-label="Portal navigation"`, `aria-label="Open or close portal navigation"`, `href="/" aria-current="page"`, "relay.example.test", `https://relay.example.test/v1/relay`, "Add this relay to Clipp", "Peers sidebar", "Open discovery endpoint", "Authenticated discovery", "HTTPS discovery URL", "Sign in with Google", "New accounts need administrator approval", "each Clipp app needs its own authorization", "does not mean setup failed"} {
 		if !strings.Contains(out.Body.String(), want) {
 			t.Fatalf("missing portal content %q", want)
 		}
@@ -118,6 +118,26 @@ func TestLoggedOutPortalProvidesStylesAndCanonicalSetupURL(t *testing.T) {
 		handler.ServeHTTP(out, httptest.NewRequest(http.MethodGet, tc.path, nil))
 		if out.Code != http.StatusOK || !strings.HasPrefix(out.Header().Get("Content-Type"), tc.contentType) || out.Body.Len() == 0 {
 			t.Fatalf("asset %s: %d %s", tc.path, out.Code, out.Header().Get("Content-Type"))
+		}
+	}
+}
+
+func TestWorkspaceAssetsProvideDarkFirstThemeAndStorageFallback(t *testing.T) {
+	s := New(Dependencies{}, config.Config{PortalOrigin: "https://relay.example.test"}, config.Material{}, Provider{})
+	handler := s.Handler()
+	for _, tc := range []struct {
+		path string
+		want []string
+	}{{"/assets/portal.css", []string{`:root[data-theme="dark"]`, `:root[data-theme="light"]`, `color-scheme: dark`, `:root[data-theme="dark"] .site-header`, `:root[data-theme="dark"] .card`, `:root[data-theme="dark"] .theme-toggle`, `--accent: #6f55a5`, `--accent-soft: #f0ebf8`, `--accent-hover: #584283`, `--accent: #b59af7`}}, {"/assets/portal.js", []string{"clipp-relay-appearance", "localStorage.setItem", "storage is unavailable"}}} {
+		out := httptest.NewRecorder()
+		handler.ServeHTTP(out, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if out.Code != http.StatusOK {
+			t.Fatalf("asset %s: %d", tc.path, out.Code)
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(out.Body.String(), want) {
+				t.Fatalf("asset %s missing theme behavior %q", tc.path, want)
+			}
 		}
 	}
 }

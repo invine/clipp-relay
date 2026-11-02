@@ -2,32 +2,33 @@
 {{template "head" "Clipp Relay — Quota plans"}}
 <div class="portal-workspace">
 <aside class="workspace-sidebar" aria-label="Portal navigation">
-  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="brand" href="/"><img class="brand-mark" src="/assets/clipp-icon.png" alt="">clipp <span class="brand-product">relay</span></a>
   <nav class="workspace-nav" aria-label="Portal navigation">
-    <a href="/">Your account</a><a href="/account/security">Access &amp; security</a>
+    <a href="/">{{template "nav-icon-account" .}}Your account</a><a href="/account/security">{{template "nav-icon-security" .}}Access &amp; security</a>
     <span class="nav-group-label">Administration</span>
-    <a href="/admin">Account reviews</a>
-    <a href="/admin/plans" aria-current="page">Quota plans</a>
+    <a href="/admin">{{template "nav-icon-admin" .}}Account reviews</a>
+    <a href="/admin/plans" aria-current="page">{{template "nav-icon-plans" .}}Quota plans</a>
   </nav>
-  <div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form></div>
+  <div class="sidebar-footer">{{template "theme-control"}}<div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Log out</button></form></div>
 </aside>
 <div class="workspace-main">
 <header class="workspace-bar">
-  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="mobile-brand brand" href="/"><img class="brand-mark" src="/assets/clipp-icon.png" alt="">clipp <span class="brand-product">relay</span></a>
   <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> Quota plans</span>
   <span class="bar-account">{{.Email}}</span>
   <details class="workspace-menu"><summary aria-label="Open or close portal navigation"><span class="menu-icon" aria-hidden="true"></span><span>Menu</span></summary><nav aria-label="Portal navigation">
     <a href="/">Your account</a><a href="/account/security">Access &amp; security</a><a href="/admin">Account reviews</a><a href="/admin/plans" aria-current="page">Quota plans</a>
-    <form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form>
+    <form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10"/></svg>Log out</button></form>
+    {{template "theme-control"}}
   </nav></details>
 </header>
 <main class="page plan-library-page">
-  <div class="page-heading"><div><p class="eyebrow">ADMINISTRATION</p><h1>Quota plans</h1><p class="muted">Reusable weekly allowances and concurrent Relay Session limits.</p></div><a class="button secondary" href="/admin">Account reviews <span aria-hidden="true">↗</span></a></div>
+  <div class="page-heading"><div><p class="eyebrow">ADMINISTRATION</p><h1>Quota plans</h1><p class="muted">Compare reusable weekly allowances, Relay Session limits and current assignments.</p></div><div class="plan-library-actions"><a class="button" href="#create-plan">Create plan</a><a class="button secondary" href="/admin">Account reviews <span aria-hidden="true">↗</span></a></div></div>
   <section class="notice plan-policy" aria-label="Plan assignment policy"><strong>Plan values stay fixed after assignment.</strong><p>Archiving a plan prevents new assignments. Accounts already using it keep their saved plan and allowance.</p></section>
   {{with .Created}}
   <section class="card plan-created" aria-labelledby="created-plan-heading" data-plan-id="{{.ID}}">
     <p class="eyebrow">PLAN RESULT</p><h2 id="created-plan-heading">{{if .Archived}}Plan archived{{else}}Plan created{{end}}</h2>
-    <div class="quota-plan-created"><div><span class="plan-field-label">Plan</span><strong>{{.Name}}</strong></div><div><span class="plan-field-label">Weekly allowance</span><strong title="{{.Bytes}} bytes">{{bytes .Bytes}}</strong></div><div><span class="plan-field-label">Relay Sessions</span><strong>{{.Sessions}}</strong></div><div><span class="plan-field-label">Availability</span><span class="badge {{if .Archived}}status-Suspended{{else}}status-Active{{end}}">{{if .Archived}}Archived{{else}}Available{{end}}</span></div></div>
+    <div class="quota-plan-created"><div><span class="plan-field-label">Plan</span><strong>{{.Name}}</strong></div><div><span class="plan-field-label">Weekly allowance</span><strong title="{{.Bytes}} bytes">{{bytes .Bytes}}</strong></div><div><span class="plan-field-label">Relay Sessions</span><strong>{{.Sessions}}</strong></div><div><span class="plan-field-label">Availability</span><span class="badge {{if .Archived}}status-Suspended{{else}}status-Active{{end}}">{{if .Archived}}Archived{{else}}Available{{end}}</span></div><div><span class="plan-field-label">Assigned Relay Accounts</span><strong>{{if eq .AssignedAccounts 1}}1 Relay Account{{else}}{{.AssignedAccounts}} Relay Accounts{{end}}</strong></div></div>
     {{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive" class="archive-plan-form"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><input type="hidden" name="after" value="{{$.After}}"><input type="hidden" name="created" value="{{$.CreatedID}}"><label><input type="checkbox" name="confirm" value="yes" required> I understand this prevents new assignments; current accounts keep their saved plan.</label><button class="secondary">Archive this plan</button></form>{{end}}
   </section>
   {{end}}
@@ -40,7 +41,8 @@
         <div class="quota-plan-value"><span class="plan-field-label">Weekly allowance</span><strong title="{{.Bytes}} bytes">{{bytes .Bytes}}</strong></div>
         <div class="quota-plan-value"><span class="plan-field-label">Relay Sessions</span><strong>{{.Sessions}}</strong></div>
         <div class="quota-plan-state"><span class="plan-field-label">Availability</span><span class="badge {{if .Archived}}status-Suspended{{else}}status-Active{{end}}">{{if .Archived}}Archived{{else}}Available{{end}}</span></div>
-        <div class="quota-plan-action">{{if not .Archived}}<form method="post" action="/admin/plans/{{.ID}}/archive" class="archive-plan-form"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><input type="hidden" name="after" value="{{$.After}}"><input type="hidden" name="created" value="{{$.CreatedID}}"><label><input type="checkbox" name="confirm" value="yes" required> I understand this stops new assignments.</label><button class="secondary compact">Archive plan</button></form>{{else}}<span class="muted fine-print">No new assignments</span>{{end}}</div>
+        <div class="quota-plan-assignments"><span class="plan-field-label">Assigned Relay Accounts</span><strong>{{if eq .AssignedAccounts 1}}1 Relay Account{{else}}{{.AssignedAccounts}} Relay Accounts{{end}}</strong><span class="muted fine-print">{{if .Archived}}Existing assignments stay in place{{else}}Current assignments{{end}}</span></div>
+        <div class="quota-plan-action">{{if not .Archived}}<details class="archive-plan-review"><summary>Archive plan</summary><form method="post" action="/admin/plans/{{.ID}}/archive" class="archive-plan-form"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="revision" value="{{.Revision}}"><input type="hidden" name="reason" value="routine_administration"><input type="hidden" name="after" value="{{$.After}}"><input type="hidden" name="created" value="{{$.CreatedID}}"><label><input type="checkbox" name="confirm" value="yes" required> I understand this stops new assignments.</label><button class="secondary compact">Archive plan</button></form></details>{{else}}<span class="muted fine-print">No new assignments</span>{{end}}</div>
       </article>
       {{else}}<p class="empty-state">No quota plans are available yet. Create the first plan below.</p>{{end}}
     </div>
