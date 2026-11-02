@@ -117,7 +117,9 @@ func (r *ReadViews) AdminHome(ctx context.Context, accountAfter, planAfter, stat
 }
 
 func (r *ReadViews) AdminPlans(ctx context.Context, after string, limit int) ([]persistence.AdminPlan, error) {
-	rows, err := r.runtime.Query(ctx, `SELECT id::text,name,weekly_bytes,sessions,revision,archived_at IS NOT NULL FROM public.quota_plans WHERE id>COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY id LIMIT $2`, after, limit)
+	rows, err := r.runtime.Query(ctx, `SELECT p.id::text,p.name,p.weekly_bytes,p.sessions,p.revision,p.archived_at IS NOT NULL,
+		(SELECT count(*) FROM public.accounts a WHERE a.plan_id=p.id AND a.deletion_started_at IS NULL)
+		FROM public.quota_plans p WHERE p.id>COALESCE(NULLIF($1,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY p.id LIMIT $2`, after, limit)
 	if err != nil {
 		return nil, readError(err)
 	}
@@ -125,7 +127,7 @@ func (r *ReadViews) AdminPlans(ctx context.Context, after string, limit int) ([]
 	plans := make([]persistence.AdminPlan, 0, limit)
 	for rows.Next() {
 		var plan persistence.AdminPlan
-		if err := rows.Scan(&plan.ID, &plan.Name, &plan.Bytes, &plan.Sessions, &plan.Revision, &plan.Archived); err != nil {
+		if err := rows.Scan(&plan.ID, &plan.Name, &plan.Bytes, &plan.Sessions, &plan.Revision, &plan.Archived, &plan.AssignedAccounts); err != nil {
 			return nil, readError(err)
 		}
 		plans = append(plans, plan)
@@ -144,7 +146,9 @@ func escapeLike(value string) string {
 
 func (r *ReadViews) AdminPlan(ctx context.Context, id string) (persistence.AdminPlan, error) {
 	var p persistence.AdminPlan
-	err := r.runtime.QueryRow(ctx, `SELECT id::text,name,weekly_bytes,sessions,revision,archived_at IS NOT NULL FROM public.quota_plans WHERE id=$1`, id).Scan(&p.ID, &p.Name, &p.Bytes, &p.Sessions, &p.Revision, &p.Archived)
+	err := r.runtime.QueryRow(ctx, `SELECT p.id::text,p.name,p.weekly_bytes,p.sessions,p.revision,p.archived_at IS NOT NULL,
+		(SELECT count(*) FROM public.accounts a WHERE a.plan_id=p.id AND a.deletion_started_at IS NULL)
+		FROM public.quota_plans p WHERE p.id=$1`, id).Scan(&p.ID, &p.Name, &p.Bytes, &p.Sessions, &p.Revision, &p.Archived, &p.AssignedAccounts)
 	return p, readError(err)
 }
 

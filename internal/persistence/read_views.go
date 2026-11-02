@@ -30,11 +30,12 @@ type AdminAccount struct {
 }
 
 type AdminPlan struct {
-	ID, Name string
-	Bytes    int64
-	Sessions int
-	Revision int64
-	Archived bool
+	ID, Name         string
+	Bytes            int64
+	Sessions         int
+	Revision         int64
+	Archived         bool
+	AssignedAccounts int64
 }
 
 type AccountCounts struct{ Pending, Active, Suspended, Denied int64 }
