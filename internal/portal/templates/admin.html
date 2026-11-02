@@ -23,20 +23,18 @@
 <main class="page admin-page">
   <div class="page-heading">
 <div>
-<p class="eyebrow">ADMINISTRATION</p>
 <h1>Account reviews</h1>
 <p class="muted">Manage account access and weekly allowances.</p>
 </div>
 <a class="button secondary" id="quota-plans" href="/admin/plans">Quota plans <span aria-hidden="true">↗</span></a>
 </div>
-  <p class="muted fine-print">Applied allowlist revision {{.PolicyRevision}}
-</p>
-  <p class="admin-finding"><strong>{{.Pending}}</strong> Relay Accounts need review <span class="muted">service-wide</span></p>
+  <p class="admin-policy-note">Current administrator allowlist revision <strong>{{.PolicyRevision}}</strong></p>
+  <p class="admin-finding"><strong>{{.Pending}}</strong><span><span class="admin-finding-title">Pending Relay Accounts</span><span class="admin-finding-scope">Awaiting review across the service</span></span></p>
   <div class="admin-grid{{if .MobileDetail}} mobile-detail{{end}}">
   <section class="card accounts-pane">
 <div class="section-heading">
 <div>
-<p class="eyebrow">RELAY ACCOUNTS</p>
+<p class="eyebrow">Relay Accounts</p>
 <h2>Accounts</h2>
 </div>
 </div>
@@ -45,7 +43,7 @@
 <label>Status<select name="status"><option value="">All accounts</option><option value="Pending"{{if eq .StatusFilter "Pending"}} selected{{end}}>Needs review</option><option value="Active"{{if eq .StatusFilter "Active"}} selected{{end}}>Active</option><option value="Suspended"{{if eq .StatusFilter "Suspended"}} selected{{end}}>Suspended</option><option value="Denied"{{if eq .StatusFilter "Denied"}} selected{{end}}>Denied</option></select></label>
 <input type="hidden" name="limit" value="{{.Limit}}"><button class="secondary compact">Apply filters</button>{{if or .StatusFilter .EmailFilter}}<a class="table-link filter-clear" href="/admin">Clear filters</a>{{end}}
 </form>
-<p class="muted fine-print" aria-live="polite">{{.FilteredCount}} matching Relay Accounts{{if or .StatusFilter .EmailFilter}} in this filtered result{{else}} in all accounts{{end}}.</p>
+<p class="admin-result-count" aria-live="polite"><strong>{{.FilteredCount}}</strong> matching Relay Accounts{{if or .StatusFilter .EmailFilter}} in this filtered result{{else}} in all accounts{{end}}.</p>
 <div class="table-scroll">
 <table>
 <thead>
@@ -84,18 +82,21 @@
 <a class="button secondary pagination" href="/admin?accounts_after={{.NextAccount}}&plans_after={{.PlanCursor}}&selected={{.Selected}}&limit={{.Limit}}{{if .StatusFilter}}&status={{.StatusFilter}}{{end}}{{if .EmailFilter}}&email={{.EmailFilter}}{{end}}">Next accounts →</a>{{end}}
 </section>
   <section class="card account-editor">
-<p class="eyebrow">ACCOUNT REVIEW</p>
-<h2>Selected account</h2>{{if .MobileDetail}}<a class="button secondary mobile-back" href="{{$.ListHref}}">← Back to accounts</a>{{end}}{{with .SelectedAccount}}
-<p class="account-email">{{.Email}}
-</p>
-<p>Assigned plan: <strong>{{if .PlanName}}{{.PlanName}}{{else}}Unassigned{{end}}</strong>{{if .PlanArchived}} <span class="muted">(archived; saved assignment retained)</span>{{end}} · {{bytes .EffectiveBytes}} per week · {{.EffectiveSessions}} Relay Sessions</p>
-<p>
-<span class="badge status-{{.Status}}">{{.Status}}
-</span> <span class="muted fine-print">Revision {{.Revision}}
-</span>
-</p>
-{{if .RecoveryHeld}}<p>Recovery Review Hold: relay use is blocked until explicit administrator review of status and quota assignments.</p>{{end}}
-{{with .Usage}}<p>Recorded Relay Usage: {{bytes .Recorded}} · Remaining allowance: {{bytes .Remaining}}</p>
+<p class="eyebrow">Account review</p>
+<h2>Review account</h2>{{if .MobileDetail}}<a class="button secondary mobile-back" href="{{$.ListHref}}">← Back to accounts</a>{{end}}{{with .SelectedAccount}}
+<header class="review-account-header">
+<p class="account-email">{{.Email}}</p>
+<div class="review-account-state"><span class="badge status-{{.Status}}">{{.Status}}</span><span class="muted fine-print">Revision {{.Revision}}</span></div>
+</header>
+<dl class="review-facts">
+<div><dt>Assigned Quota Plan</dt><dd>{{if .PlanName}}{{.PlanName}}{{else}}Unassigned{{end}}{{if .PlanArchived}} <span class="muted">(archived; saved assignment retained)</span>{{end}}</dd></div>
+<div><dt>Effective weekly allowance</dt><dd>{{bytes .EffectiveBytes}}</dd></div>
+<div><dt>Effective Relay Session limit</dt><dd>{{.EffectiveSessions}}</dd></div>
+<div><dt>Weekly allowance override</dt><dd>{{if .WeeklyOverride}}Override set to {{.WeeklyOverride}} bytes{{else}}Uses assigned plan{{end}}</dd></div>
+<div><dt>Relay Session override</dt><dd>{{if .SessionOverride}}Override set to {{.SessionOverride}}{{else}}Uses assigned plan{{end}}</dd></div>
+</dl>
+{{if .RecoveryHeld}}<p class="review-hold"><strong>Recovery Review Hold</strong><span>Relay use is blocked until an administrator explicitly reviews status and quota assignments. The hold is separate from the account status.</span></p>{{end}}
+{{with .Usage}}<div class="review-usage"><p><strong>Recorded Relay Usage</strong><span>{{bytes .Recorded}} this week</span></p><p><strong>Remaining allowance</strong><span>{{bytes .Remaining}}</span></p></div>
 <p class="muted fine-print">Periodic confirmation lag means recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for one account; control traffic may count. History retains the current week + twelve preceding weeks as absolute totals.</p>
 <details><summary>Recorded Relay Usage history</summary><table><thead><tr><th>Week starting UTC</th><th class="numeric">Confirmed usage</th></tr></thead><tbody>{{range .History}}<tr><td>{{.Week}}</td><td class="numeric">{{bytes .Recorded}}</td></tr>{{end}}</tbody></table></details>{{end}}
 {{if eq .Status "Pending"}}
