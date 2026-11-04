@@ -92,6 +92,7 @@ type Server struct {
 	deletions                          persistence.DeletionRepository
 	recovery                           persistence.RecoveryRepository
 	readViews                          persistence.ReadViews
+	liveSessionCounts                  portal.LiveSessionCounts
 	maintenance                        persistence.Maintenance
 	Origin, ClientID, ClientSecret     string
 	AndroidRedirect, ExtensionRedirect string
@@ -209,10 +210,15 @@ func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(
 
 // CapacitySample is a separate, aggregate live observation. Nil counts mean
 // unavailable, not zero; it contains no Device Identity or session detail.
-type CapacitySample struct{ LiveSessions, ActiveLoginGrants *int }
+type CapacitySample struct{ ActiveLoginGrants *int }
 
 func (s *Server) SetCapacitySampler(sample func(context.Context, string) (CapacitySample, error)) {
 	s.capacitySampler = sample
+}
+
+// SetLiveSessionCountsForTest controls the independent Quota sample in Portal tests.
+func (s *Server) SetLiveSessionCountsForTest(counts portal.LiveSessionCounts) {
+	s.liveSessionCounts = counts
 }
 
 // AccountChange describes the authoritative policy outcome of a protected
@@ -285,6 +291,7 @@ type QuotaProtection interface {
 	SetSessionReconciler(func(string, func(int) (bool, string)) error)
 	ApplyCommittedLimits(string, int64, int) (string, error)
 	InvalidatePolicyAssessments(string)
+	LiveSessionCount(string) (int, bool)
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
@@ -298,6 +305,7 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	}
 	s.deletionAccounting = accounting
 	accounting.SetSessionReconciler(sessions.ReconcileAccountSessions)
+	s.liveSessionCounts = accounting
 	s.grantRevoked = func(grantID string) error {
 		return sessions.RetireGrant(grantID)
 	}
@@ -322,15 +330,7 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 		}
 		return reason
 	}
-	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
-		sample, err := s.SampleActiveGrants(ctx, account)
-		if err != nil {
-			return sample, err
-		}
-		count := sessions.AccountSessions(account)
-		sample.LiveSessions = &count
-		return sample, nil
-	})
+	s.SetCapacitySampler(s.SampleActiveGrants)
 	return nil
 }
 
@@ -1014,22 +1014,24 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	}
 	var status, email string
 	var recoveryHeld bool
+	var history []quotaHistory
+	var liveCount *int
 	var weekStart time.Time
 	var weeklyBytes *int64
 	var sessions *int
 	var verified bool
 	var hd *string
 	var recorded int64
-	var historyJSON []byte
 	if e == nil {
 		if s.beforeProfileRead != nil {
 			s.beforeProfileRead()
 		}
-		profile, err := s.ownerUsageProfile(r, id, version)
+		profile, err := portal.ReadOwnerQuotaView(r.Context(), s.readViews, s.liveSessionCounts, id, s.sessionDigest(r, version), version)
 		weekStart = profile.WeekStart
 		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
 		recoveryHeld = profile.RecoveryHeld
-		weeklyBytes, sessions, recorded, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
+		weeklyBytes, sessions, recorded = profile.WeeklyBytes, profile.Sessions, profile.Recorded
+		history, liveCount = profile.History, profile.LiveSessions
 		if errors.Is(err, persistence.ErrNotFound) {
 			e = errInvalidSession
 		} else if err != nil {
@@ -1059,26 +1061,21 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if sessions != nil {
 		sessionsValue = *sessions
 	}
-	var history []quotaHistory
-	if e == nil && status == "Active" && json.Unmarshal(historyJSON, &history) != nil {
-		fail(w, 503)
-		return
-	}
 	showAllHistory := r.URL.Query().Get("history") == "all"
 	history = portal.QuotaHistoryRange(history, showAllHistory)
 	var liveSessions, activeGrants int
 	var liveKnown, grantsKnown bool
 	if e == nil && status == "Active" && s.capacitySampler != nil {
 		if sample, err := s.capacitySampler(r.Context(), id); err == nil {
-			if sample.LiveSessions != nil && *sample.LiveSessions >= 0 {
-				liveSessions = *sample.LiveSessions
-				liveKnown = true
-			}
 			if sample.ActiveLoginGrants != nil && *sample.ActiveLoginGrants >= 0 {
 				activeGrants = *sample.ActiveLoginGrants
 				grantsKnown = true
 			}
 		}
+	}
+	if liveCount != nil {
+		liveSessions = *liveCount
+		liveKnown = true
 	}
 	percent := int64(0)
 	if bytesValue > 0 {

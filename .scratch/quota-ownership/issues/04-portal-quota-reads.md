@@ -4,14 +4,16 @@
 
 **Blocked by:** [02: Move final admission and live counts into Quota](02-quota-admission-live-counts.md)
 
-**Status:** claimed
+**Status:** resolved
 
-**Claimed by:** quota-ownership-coordinator (2026-11-05)
-
-- [ ] Route Recorded Relay Usage, remaining allowance and history directly to the Portal read path. Auth's authorization results contain credential or policy facts without usage totals or live counts.
-- [ ] With authenticated owner and administrator routes backed by disposable PostgreSQL, verify configured caps, confirmed current-week usage and history, and the owner capacity distinction between live Relay Sessions and active Login Grants. Exercise known zero and unavailable count separately.
-- [ ] Revoke the owner Portal Session between initial authorization and the protected profile read. Assert that the response exposes no usage data. Keep the session recheck and durable policy-and-usage snapshot within one database operation.
-- [ ] Preserve administrator authority and deleted-account visibility, existing responses and rendering. Keep live count sampling separate from the durable profile snapshot.
-- [ ] Retire the previous Auth usage projection and count sampler for the migrated pages. Existing Portal behavior tests continue to pass.
+- [x] Route Recorded Relay Usage, remaining allowance and history directly to the Portal read path. Auth's authorization results contain credential or policy facts without usage totals or live counts.
+- [x] With authenticated owner and administrator routes backed by disposable PostgreSQL, verify configured caps, confirmed current-week usage and history, and the owner capacity distinction between live Relay Sessions and active Login Grants. Exercise known zero and unavailable count separately.
+- [x] Revoke the owner Portal Session between initial authorization and the protected profile read. Assert that the response exposes no usage data. Keep the session recheck and durable policy-and-usage snapshot within one database operation.
+- [x] Preserve administrator authority and deleted-account visibility, existing responses and rendering. Keep live count sampling separate from the durable profile snapshot.
+- [x] Retire the previous Auth usage projection and count sampler for the migrated pages. Existing Portal behavior tests continue to pass.
 
 **Spec coverage:** I1, I5–I6, I8 · T8. See the [parent specification](../spec.md) and [decision record](../decisions.md).
+
+## Resolution
+
+Implemented on `codex/quota-ownership-04`, source commit `e54e252e652295d0b0d12a4e34960dadea63c96b`; integrated unchanged into `codex/quota-ownership-integration` at the same commit. Baseline was integration `c676c7373a030633ad74c36b16c2112b65d70d56`. `go test -count=1 ./internal/portal ./internal/auth ./internal/quota`, `go vet ./internal/portal ./internal/auth`, and `git diff --check` passed on the integrated revision. The PostgreSQL-backed protected-session revocation case skipped because no serving fixture was available. Final Standards/Spec review will cover the combined revision.
