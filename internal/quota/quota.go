@@ -154,12 +154,84 @@ func (q *Quota) ConfigureRetainedUsageKeys(current uint64, peppers map[uint64][]
 // reference used by deletion, registration and recovery transactions. It
 // returns no usage data and never stores the raw identity.
 func (q *Quota) RetainedUsageKey(issuer, subject string) (persistence.RetainedUsageKey, error) {
+	q.retainedUsageMu.RLock()
+	version := q.retainedUsageCurrent
+	q.retainedUsageMu.RUnlock()
+	return q.retainedUsageKey(version, issuer, subject)
+}
+
+func (q *Quota) retainedUsageKey(version uint64, issuer, subject string) (persistence.RetainedUsageKey, error) {
 	if issuer == "" || subject == "" {
 		return persistence.RetainedUsageKey{}, errors.New("retained-usage identity unavailable")
 	}
 	q.retainedUsageMu.RLock()
 	defer q.retainedUsageMu.RUnlock()
-	return q.retainedUsageKeyLocked(q.retainedUsageCurrent, issuer, subject)
+	return q.retainedUsageKeyLocked(version, issuer, subject)
+}
+
+func (q *Quota) retainedUsageKeyLocked(version uint64, issuer, subject string) (persistence.RetainedUsageKey, error) {
+	key := q.retainedUsagePeppers[version]
+	if version == 0 || len(key) < 32 {
+		return persistence.RetainedUsageKey{}, errors.New("current retained-usage key unavailable")
+	}
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte("clipp-relay/v1/retained-quota\x00" + issuer + "\x00" + subject))
+	var digest [32]byte
+	copy(digest[:], h.Sum(nil))
+	return persistence.RetainedUsageKey{PepperVersion: version, IdentityDigest: digest}, nil
+}
+
+// ImportRetainedUsage finds the returning External Identity's current-week
+// record and imports it through the registration transaction. The transaction
+// and credential issuance remain owned by the caller; Quota returns no usage
+// values to Auth.
+func (q *Quota) ImportRetainedUsage(ctx context.Context, tx persistence.RetainedUsageTransaction, accountID, issuer, subject string) error {
+	if tx == nil || accountID == "" {
+		return errors.New("retained-usage transaction unavailable")
+	}
+	week, err := tx.CurrentRetainedUsageWeek(ctx)
+	if err != nil {
+		return err
+	}
+	versions, err := tx.RetainedUsageVersions(ctx)
+	if err != nil {
+		return err
+	}
+	q.retainedUsageMu.RLock()
+	keyVersions := make([]uint64, 0, len(q.retainedUsagePeppers))
+	for version := range q.retainedUsagePeppers {
+		keyVersions = append(keyVersions, version)
+	}
+	for _, version := range versions {
+		if len(q.retainedUsagePeppers[version]) < 32 {
+			q.retainedUsageMu.RUnlock()
+			return errors.New("retained usage key unavailable")
+		}
+	}
+	q.retainedUsageMu.RUnlock()
+	var match persistence.RetainedUsageRecord
+	matches := 0
+	for _, version := range keyVersions {
+		key, err := q.retainedUsageKey(version, issuer, subject)
+		if err != nil {
+			return err
+		}
+		record, found, err := tx.RetainedUsageForIdentity(ctx, version, key.IdentityDigest, week)
+		if err != nil {
+			return err
+		}
+		if found {
+			matches++
+			match = record
+		}
+	}
+	if matches > 1 {
+		return errors.New("duplicate logical retained usage")
+	}
+	if matches == 0 {
+		return nil
+	}
+	return tx.ImportRetainedUsage(ctx, accountID, match)
 }
 
 // ValidateRetainedUsageKeyCoverage fails closed when a retained record depends
@@ -215,25 +287,20 @@ func (q *Quota) RetainRecoveredUsage(ctx context.Context, tx persistence.Recover
 	return tx.StoreRecoveredRetainedUsage(ctx, selected.PepperVersion, selected.IdentityDigest[:], week, recorded)
 }
 
-// recoveryRetainedUsageKeys returns configured key candidates to detect
-// previous retained records without exposing key material outside Quota.
 func (q *Quota) recoveryRetainedUsageKeys(issuer, subject string) ([]persistence.RetainedUsageKey, error) {
 	if issuer == "" || subject == "" {
 		return nil, errors.New("retained-usage identity unavailable")
 	}
 	q.retainedUsageMu.RLock()
-	defer q.retainedUsageMu.RUnlock()
-	if _, err := q.retainedUsageKeyLocked(q.retainedUsageCurrent, issuer, subject); err != nil {
-		return nil, err
-	}
 	versions := make([]uint64, 0, len(q.retainedUsagePeppers))
 	for version := range q.retainedUsagePeppers {
 		versions = append(versions, version)
 	}
+	q.retainedUsageMu.RUnlock()
 	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
 	keys := make([]persistence.RetainedUsageKey, 0, len(versions))
 	for _, version := range versions {
-		key, err := q.retainedUsageKeyLocked(version, issuer, subject)
+		key, err := q.retainedUsageKey(version, issuer, subject)
 		if err != nil {
 			return nil, err
 		}
@@ -242,9 +309,6 @@ func (q *Quota) recoveryRetainedUsageKeys(issuer, subject string) ([]persistence
 	return keys, nil
 }
 
-// selectRecoveredRetainedUsageKey chooses the existing matching key for a
-// restored identity or the current key when no record exists. Multiple matches
-// identify duplicate logical retained records and must abort the recovery.
 func (q *Quota) selectRecoveredRetainedUsageKey(issuer, subject string, matchingVersions []uint64) (persistence.RetainedUsageKey, error) {
 	current, err := q.RetainedUsageKey(issuer, subject)
 	if err != nil {
@@ -256,21 +320,7 @@ func (q *Quota) selectRecoveredRetainedUsageKey(issuer, subject string, matching
 	if len(matchingVersions) == 0 {
 		return current, nil
 	}
-	q.retainedUsageMu.RLock()
-	defer q.retainedUsageMu.RUnlock()
-	return q.retainedUsageKeyLocked(matchingVersions[0], issuer, subject)
-}
-
-func (q *Quota) retainedUsageKeyLocked(version uint64, issuer, subject string) (persistence.RetainedUsageKey, error) {
-	key := q.retainedUsagePeppers[version]
-	if version == 0 || len(key) < 32 {
-		return persistence.RetainedUsageKey{}, errors.New("current retained-usage key unavailable")
-	}
-	h := hmac.New(sha256.New, key)
-	_, _ = h.Write([]byte("clipp-relay/v1/retained-quota\x00" + issuer + "\x00" + subject))
-	var digest [32]byte
-	copy(digest[:], h.Sum(nil))
-	return persistence.RetainedUsageKey{PepperVersion: version, IdentityDigest: digest}, nil
+	return q.retainedUsageKey(matchingVersions[0], issuer, subject)
 }
 
 // Close cancels workers; graceful persistence belongs to FlushAllAccounting.
