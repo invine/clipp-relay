@@ -1,6 +1,6 @@
 # Quota ownership
 
-Status: implementation-in-progress
+Status: resolved
 
 Owning repository: relay  
 Canonical feature directory: relay `.scratch/quota-ownership/`  

@@ -1,6 +1,6 @@
 # Quota ownership tickets
 
-Status: implementation-in-progress
+Status: resolved
 
 Parent: [Quota ownership specification](../spec.md)  
 Decisions: [Quota ownership decisions](../decisions.md)
