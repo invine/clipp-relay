@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"clipp-relay/internal/persistence"
 	"clipp-relay/internal/quota"
 	libp2p "github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -41,6 +43,84 @@ func (p *committedPolicyFixture) commitLimits(weeklyBytes int64, sessionLimit in
 	p.mu.Lock()
 	p.weeklyBytes, p.sessionLimit = weeklyBytes, sessionLimit
 	p.mu.Unlock()
+}
+
+func TestQuotaBackedRenewalAndCrossAccountReplacementPublishBothCounts(t *testing.T) {
+	store := &committedPolicyFixture{weeklyBytes: 1_000, sessionLimit: 1}
+	accounting := quota.New(store)
+	defer accounting.Close()
+	server, err := New(twoAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	key, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	info := peer.AddrInfo{ID: server.Host.ID(), Addrs: server.Host.Addrs()}
+	if err := first.Connect(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+
+	if response := authResponse(t, ctx, first, server.Host.ID(), "a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("initial authentication: %s", response)
+	}
+	if got, known := accounting.LiveSessionCount("a"); !known || got != 1 {
+		t.Fatalf("initial Quota count=(%d,%v), want (1,true)", got, known)
+	}
+
+	// Renewal uses the same authenticated connection and must keep its slot at
+	// the account cap of one.
+	if response := authResponse(t, ctx, first, server.Host.ID(), "a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("same-connection renewal at capacity: %s", response)
+	}
+	if got := server.AccountSessions("a"); got != 1 {
+		t.Fatalf("Relay count after renewal=%d, want 1", got)
+	}
+	if got, known := accounting.LiveSessionCount("a"); !known || got != 1 {
+		t.Fatalf("Quota count after renewal=(%d,%v), want (1,true)", got, known)
+	}
+
+	// A new physical connection with the same Peer ID can replace the account
+	// association. Quota receives the target and source absolute counts together.
+	replacement, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	if err := replacement.Connect(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, replacement, server.Host.ID(), "b"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("cross-account replacement: %s", response)
+	}
+	if got := server.AccountSessions("a"); got != 0 {
+		t.Fatalf("source Relay count after replacement=%d, want 0", got)
+	}
+	if got := server.AccountSessions("b"); got != 1 {
+		t.Fatalf("target Relay count after replacement=%d, want 1", got)
+	}
+	if got, known := accounting.LiveSessionCount("a"); !known || got != 0 {
+		t.Fatalf("source Quota count after replacement=(%d,%v), want known zero", got, known)
+	}
+	if got, known := accounting.LiveSessionCount("b"); !known || got != 1 {
+		t.Fatalf("target Quota count after replacement=(%d,%v), want (1,true)", got, known)
+	}
+	if got := server.ActiveSessions(); got != 1 {
+		t.Fatalf("effective Relay Sessions after replacement=%d, want 1", got)
+	}
+	if _, err := relayclient.Reserve(ctx, replacement, info); err != nil {
+		t.Fatalf("replacement Relay Session could not reserve: %v", err)
+	}
 }
 
 func TestCommittedCapRacingFinalAdmissionRetiresAllBeforeAcknowledgment(t *testing.T) {
