@@ -4,7 +4,9 @@
 
 **Blocked by:** [02: Move final admission and live counts into Quota](02-quota-admission-live-counts.md)
 
-**Status:** ready-for-agent
+**Status:** claimed
+
+**Claimed by:** quota-ownership-coordinator (2026-11-05)
 
 - [ ] Exercise a Quota Plan reassignment and an override through protected administrator HTTP. Auth hands off confirmed limits and receives a completion outcome without reading live counts to decide retirement. Quota enters the Relay reconciliation operation before taking its own state lock.
 - [ ] Cap wins. Pause a completed cap-five assessment before final admission, complete the edit to cap three, and release it. The fourth AUTH returns the temporary refusal and the three existing sessions retain permission.

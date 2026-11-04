@@ -4,7 +4,9 @@
 
 **Blocked by:** [02: Move final admission and live counts into Quota](02-quota-admission-live-counts.md)
 
-**Status:** ready-for-agent
+**Status:** claimed
+
+**Claimed by:** quota-ownership-coordinator (2026-11-05)
 
 - [ ] Route Recorded Relay Usage, remaining allowance and history directly to the Portal read path. Auth's authorization results contain credential or policy facts without usage totals or live counts.
 - [ ] With authenticated owner and administrator routes backed by disposable PostgreSQL, verify configured caps, confirmed current-week usage and history, and the owner capacity distinction between live Relay Sessions and active Login Grants. Exercise known zero and unavailable count separately.
