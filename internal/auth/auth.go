@@ -294,6 +294,7 @@ type QuotaProtection interface {
 	LiveSessionCount(string) (int, bool)
 	ConfigureRetainedUsageKeys(uint64, map[uint64][]byte) error
 	RetainedUsageKey(string, string) (persistence.RetainedUsageKey, error)
+	ImportRetainedUsage(context.Context, persistence.RetainedUsageTransaction, string, string, string) error
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
@@ -883,7 +884,11 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.uncertainAccounts.Delete(accountID)
 	}
 	if registered.Created {
-		if e = s.importRetainedUsage(ctx, tx, accountID, claims.Subject); e != nil {
+		if s.deletionAccounting == nil {
+			fail(w, 503)
+			return
+		}
+		if e = s.deletionAccounting.ImportRetainedUsage(ctx, tx, accountID, googleIssuer, claims.Subject); e != nil {
 			fail(w, 503)
 			return
 		}

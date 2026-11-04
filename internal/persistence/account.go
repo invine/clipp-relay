@@ -45,6 +45,15 @@ type RetainedUsageKey struct {
 	IdentityDigest [32]byte
 }
 
+// RetainedUsageTransaction is the caller-owned transaction capability needed
+// to find and import one current-week Retained Quota Usage record.
+type RetainedUsageTransaction interface {
+	CurrentRetainedUsageWeek(context.Context) (time.Time, error)
+	RetainedUsageVersions(context.Context) ([]uint64, error)
+	RetainedUsageForIdentity(context.Context, uint64, [32]byte, time.Time) (RetainedUsageRecord, bool, error)
+	ImportRetainedUsage(context.Context, string, RetainedUsageRecord) error
+}
+
 // PortalSessionOwner is the durable projection required to authenticate a
 // Portal Session while keeping expiry and account eligibility authoritative in
 // PostgreSQL.
@@ -60,13 +69,10 @@ type PortalSessionOwner struct {
 // transaction, including creation of the initial Portal Session.
 type AccountRegistrationTransaction interface {
 	Transaction
+	RetainedUsageTransaction
 	UpsertRelayAccount(context.Context, AccountRegistration) (RegisteredAccount, error)
 	AccountStateAfterUncertain(context.Context, string, string) (AccountStateAfterUncertain, error)
 	RecordAccountCreated(context.Context, string, string) error
-	CurrentRetainedUsageWeek(context.Context) (time.Time, error)
-	RetainedUsageVersions(context.Context) ([]uint64, error)
-	RetainedUsageForIdentity(context.Context, uint64, [32]byte, time.Time) (RetainedUsageRecord, bool, error)
-	ImportRetainedUsage(context.Context, string, RetainedUsageRecord) error
 	CreatePortalSession(context.Context, [32]byte, uint64, string, int64, [32]byte) error
 }
 

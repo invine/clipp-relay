@@ -15,42 +15,6 @@ func beginAccountTransaction(op persistence.AccountRegistrationOperation) (persi
 	return tx, nil
 }
 
-func (s *Server) importRetainedUsage(ctx context.Context, tx persistence.AccountRegistrationTransaction, accountID, subject string) error {
-	week, err := tx.CurrentRetainedUsageWeek(ctx)
-	if err != nil {
-		return err
-	}
-	versions, err := tx.RetainedUsageVersions(ctx)
-	if err != nil {
-		return err
-	}
-	for _, version := range versions {
-		if len(s.Peppers[version]) == 0 {
-			return errors.New("retained usage key unavailable")
-		}
-	}
-	var match persistence.RetainedUsageRecord
-	matches := 0
-	for version := range s.Peppers {
-		digest := digest32(s.digest(version, "retained-quota", googleIssuer+"\x00"+subject))
-		record, found, err := tx.RetainedUsageForIdentity(ctx, version, digest, week)
-		if err != nil {
-			return err
-		}
-		if found {
-			matches++
-			match = record
-		}
-	}
-	if matches > 1 {
-		return errors.New("duplicate logical retained usage")
-	}
-	if matches == 0 {
-		return nil
-	}
-	return tx.ImportRetainedUsage(ctx, accountID, match)
-}
-
 func (s *Server) commitPortalTransaction(ctx context.Context, tx persistence.Transaction) error {
 	if s.commitPortal != nil {
 		return s.commitPortal(ctx, tx)
@@ -101,7 +65,10 @@ func (s *Server) persistGoogleLogin(op persistence.AccountRegistrationOperation,
 		s.uncertainAccounts.Delete(registered.ID)
 	}
 	if registered.Created {
-		if err = s.importRetainedUsage(ctx, tx, registered.ID, claims.Subject); err != nil {
+		if s.deletionAccounting == nil {
+			return "", 0, errors.New("quota retained-usage accounting unavailable")
+		}
+		if err = s.deletionAccounting.ImportRetainedUsage(ctx, tx, registered.ID, googleIssuer, claims.Subject); err != nil {
 			return "", 0, err
 		}
 		if err = tx.RecordAccountCreated(ctx, auditID, registered.ID); err != nil {
