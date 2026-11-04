@@ -21,10 +21,11 @@ func (s *Server) ValidatePepperCoverage(ctx context.Context) error {
 			return errors.New("pepper version still protects credentials")
 		}
 	}
-	for _, version := range coverage.RetainedUsage {
-		if len(s.Peppers[version]) == 0 {
-			return ErrRetainedPepperUnavailable
-		}
+	if s.deletionAccounting == nil {
+		return ErrRetainedPepperUnavailable
+	}
+	if err := s.deletionAccounting.ValidateRetainedUsageKeyCoverage(coverage.RetainedUsage); err != nil {
+		return ErrRetainedPepperUnavailable
 	}
 	return nil
 }

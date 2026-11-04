@@ -291,10 +291,10 @@ type QuotaProtection interface {
 	SetSessionReconciler(func(string, func(int) (bool, string)) error)
 	ApplyCommittedLimits(string, int64, int) (string, error)
 	InvalidatePolicyAssessments(string)
-	LiveSessionCount(string) (int, bool)
 	ConfigureRetainedUsageKeys(uint64, map[uint64][]byte) error
 	RetainedUsageKey(string, string) (persistence.RetainedUsageKey, error)
 	ImportRetainedUsage(context.Context, persistence.RetainedUsageTransaction, string, string, string) error
+	ValidateRetainedUsageKeyCoverage([]uint64) error
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
@@ -322,9 +322,13 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	if err := accounting.ConfigureRetainedUsageKeys(s.CurrentPepper, s.Peppers); err != nil {
 		return err
 	}
+	counts, ok := accounting.(portal.LiveSessionCounts)
+	if !ok {
+		return errors.New("relay quota live count source unavailable")
+	}
 	s.deletionAccounting = accounting
 	accounting.SetSessionReconciler(sessions.ReconcileAccountSessions)
-	s.liveSessionCounts = accounting
+	s.liveSessionCounts = counts
 	s.grantRevoked = func(grantID string) error {
 		return sessions.RetireGrant(grantID)
 	}

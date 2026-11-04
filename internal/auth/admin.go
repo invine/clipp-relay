@@ -262,7 +262,7 @@ type adminAccountRow struct {
 	EffectiveSessions                                                    int
 	PlanArchived                                                         bool
 	Revision                                                             int64
-	Usage                                                                *accountUsageQuery
+	Usage                                                                *portal.AdminQuotaView
 	ReviewHref                                                           template.URL
 }
 type adminPlanRow struct {
@@ -539,7 +539,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		data.Accounts = append(data.Accounts, account)
 	}
 	if data.Selected != "" {
-		selected, readErr := s.adminAccountUsage(r.Context(), data.Selected)
+		selectedUsage, readErr := portal.ReadAdminQuotaView(r.Context(), s.readViews, data.Selected)
 		err = readErr
 		if errors.Is(err, persistence.ErrNotFound) {
 			fail(w, 404)
@@ -549,6 +549,8 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 			fail(w, 503)
 			return
 		}
+		account := selectedUsage.Account
+		selected := adminAccountRow{ID: account.ID, Email: account.Email, Status: account.Status, PlanID: account.PlanID, PlanName: account.PlanName, WeeklyOverride: account.WeeklyOverride, SessionOverride: account.SessionOverride, Revision: account.Revision, RecoveryHeld: account.RecoveryHeld, PlanArchived: account.PlanArchived, EffectiveBytes: account.EffectiveBytes, EffectiveSessions: account.EffectiveSessions, Usage: &selectedUsage}
 		data.SelectedAccount = &selected
 		data.AccessActions = adminAccessActionsFor(selected)
 	}
