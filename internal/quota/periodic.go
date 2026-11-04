@@ -724,3 +724,78 @@ func (q *Quota) ApplyAccountingPolicy(id string, cap int64) bool {
 	}
 	return exhausted
 }
+
+// SetSessionReconciler connects Quota's committed-limit decision to Relay's
+// registry lock. Configure it before serving. Relay calls decide with the exact
+// live count while holding that lock and applies any returned retirement before
+// it acknowledges the operation.
+func (q *Quota) SetSessionReconciler(reconcile func(string, func(int) (bool, string)) error) {
+	q.sessionReconciler = reconcile
+}
+
+// ApplyCommittedLimits applies confirmed account policy against the exact Relay
+// Session count. The Relay reconciliation callback is entered before Quota takes
+// its state lock, preserving the registry-to-Quota lock order used by admission.
+func (q *Quota) ApplyCommittedLimits(id string, weeklyBytes int64, sessionLimit int) (string, error) {
+	if id == "" || weeklyBytes < 0 || sessionLimit < 0 || q.sessionReconciler == nil {
+		return "", ErrTemporary
+	}
+	reason := ""
+	var decisionErr error
+	err := q.sessionReconciler(id, func(liveCount int) (bool, string) {
+		if liveCount < 0 {
+			decisionErr = ErrTemporary
+			return false, ""
+		}
+		q.periodic.mu.Lock()
+		defer q.periodic.mu.Unlock()
+		q.periodic.policyEpoch++
+		q.publishLiveCountsLocked(map[string]int{id: liveCount})
+		a := q.observedAccountLocked(id)
+		if a != nil {
+			a.revision++
+		}
+		exhausted := weeklyBytes == 0
+		if a != nil {
+			if w := a.weeks[weekStart(q.now())]; w != nil {
+				effective, valid := w.effectiveBytes()
+				exhausted = exhausted || !valid || effective >= weeklyBytes
+			}
+			if exhausted {
+				a.blocked = true
+				a.reason = "quota_exhausted"
+			} else if a.reason == "quota_exhausted" {
+				a.blocked = false
+				a.reason = ""
+			}
+		}
+		if exhausted {
+			reason = "quota_exhausted"
+		} else if liveCount > sessionLimit {
+			reason = "policy_changed"
+		} else {
+			reason = ""
+		}
+		return reason != "", reason
+	})
+	if err != nil {
+		return "", err
+	}
+	if decisionErr != nil {
+		return "", decisionErr
+	}
+	return reason, nil
+}
+
+// InvalidatePolicyAssessments fences work captured before an uncertain policy
+// commit without applying speculative limits.
+func (q *Quota) InvalidatePolicyAssessments(id string) {
+	q.periodic.mu.Lock()
+	q.periodic.policyEpoch++
+	if a := q.periodic.accounts[id]; a != nil {
+		a.revision++
+		a.blocked = true
+		a.reason = "account_access_changed"
+	}
+	q.periodic.mu.Unlock()
+}

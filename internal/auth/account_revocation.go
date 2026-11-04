@@ -128,7 +128,7 @@ func (s *Server) revokeAccountAccess(r *http.Request) accountRevocationOutcome {
 			if operationErr != nil {
 				s.uncertainAccounts.Store(id, uncertainMutation{revision: state.Revision, generation: state.Generation + 1, status: state.Status})
 			}
-			reason := s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: state.WeeklyBytes, SessionLimit: state.Sessions, CloseAll: true})
+			reason := s.accountChanged(AccountChange{AccountID: id, WeeklyBytes: state.WeeklyBytes, SessionLimit: state.Sessions, CloseAll: true, PolicyUncertain: operationErr != nil})
 			if reason == "" {
 				reason = "account_access_changed"
 			}

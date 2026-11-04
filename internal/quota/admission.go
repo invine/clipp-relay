@@ -48,19 +48,24 @@ func (q *Quota) Assess(ctx context.Context, account string) (Assessment, error) 
 		return Assessment{}, err
 	}
 	q.periodic.mu.Lock()
-	defer q.periodic.mu.Unlock()
 	a := q.periodic.accounts[account]
 	if a == nil || a.revision != eligibility.Revision || !a.eligibleWeek.Equal(eligibility.WeekStart) {
+		q.periodic.mu.Unlock()
 		return Assessment{}, ErrTemporary
 	}
-	return Assessment{state: &assessmentState{
+	assessment := Assessment{state: &assessmentState{
 		account:         account,
 		accountIdentity: a.identity,
 		revision:        a.revision,
 		week:            eligibility.WeekStart,
 		capBytes:        eligibility.CapBytes,
 		sessionLimit:    eligibility.SessionLimit,
-	}}, nil
+	}}
+	q.periodic.mu.Unlock()
+	if q.afterAssessment != nil {
+		q.afterAssessment()
+	}
+	return assessment, nil
 }
 
 // CommitAdmission serializes the final quota decision, Relay's in-memory
@@ -111,10 +116,27 @@ func (q *Quota) CommitAdmission(assessment Assessment, change SessionChange, ins
 		return ErrSessionLimit
 	}
 
+	if q.beforeAdmissionInstall != nil {
+		q.beforeAdmissionInstall()
+	}
 	state.used = true
 	counts := install()
 	q.publishLiveCountsLocked(counts)
 	return nil
+}
+
+// SetAdmissionInstallBoundaryForTest pauses after Quota validates a final
+// assessment and before Relay's registry installation. Configure it before
+// serving to exercise the competing registry-lock ordering.
+func (q *Quota) SetAdmissionInstallBoundaryForTest(boundary func()) {
+	q.beforeAdmissionInstall = boundary
+}
+
+// SetAssessmentReturnBoundaryForTest pauses after Quota has captured an
+// assessment and released its state lock, before Relay can attempt final
+// admission. Configure it before serving to exercise cap-first ordering.
+func (q *Quota) SetAssessmentReturnBoundaryForTest(boundary func()) {
+	q.afterAssessment = boundary
 }
 
 // PublishLiveCounts atomically applies final absolute counts reported by Relay

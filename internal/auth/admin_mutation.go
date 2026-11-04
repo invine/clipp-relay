@@ -257,7 +257,7 @@ func (s *Server) applyAdminAccountMutation(ctx context.Context, r *http.Request,
 	if err != nil {
 		s.uncertainAccounts.Store(target, uncertainMutation{revision: result.NewRevision, generation: result.NewGeneration, status: result.NewStatus})
 	}
-	outcome.change = &AccountChange{AccountID: target, WeeklyBytes: result.WeeklyBytes, SessionLimit: result.Sessions, CloseAll: spec.security || err != nil}
+	outcome.change = &AccountChange{AccountID: target, WeeklyBytes: result.WeeklyBytes, SessionLimit: result.Sessions, CloseAll: spec.security || err != nil, PolicyUncertain: err != nil}
 	if err != nil {
 		outcome.result = adminAccountUncertain
 		outcome.status = http.StatusServiceUnavailable

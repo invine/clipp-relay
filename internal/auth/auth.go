@@ -219,10 +219,11 @@ func (s *Server) SetCapacitySampler(sample func(context.Context, string) (Capaci
 // Auth command. Local invalidation runs under account protection; connection
 // close I/O is deferred until all logical guards have been released.
 type AccountChange struct {
-	AccountID    string
-	WeeklyBytes  int64
-	SessionLimit int
-	CloseAll     bool
+	AccountID       string
+	WeeklyBytes     int64
+	SessionLimit    int
+	CloseAll        bool
+	PolicyUncertain bool
 }
 
 // SetAccountChangedForTest installs a controlled invalidation adapter. Production
@@ -260,6 +261,7 @@ func (s *Server) SetAccountInvalidationCompleteForTest(complete func(string) err
 // RelaySessions exposes physical operations, not account policy decisions.
 type RelaySessions interface {
 	AccountSessions(string) int
+	ReconcileAccountSessions(string, func(int) (bool, string)) error
 	RetireAccount(string, string) error
 	CompleteAccountInvalidation(string) error
 	RetireGrant(string) error
@@ -280,7 +282,9 @@ func (s *Server) SetGrantRevokedForTest(revoked func(string) error) {
 
 // QuotaProtection applies current policy without discarding observations.
 type QuotaProtection interface {
-	ApplyAccountingPolicy(string, int64) bool
+	SetSessionReconciler(func(string, func(int) (bool, string)) error)
+	ApplyCommittedLimits(string, int64, int) (string, error)
+	InvalidatePolicyAssessments(string)
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
@@ -293,6 +297,7 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 		return errors.New("relay account protection requires quota and sessions")
 	}
 	s.deletionAccounting = accounting
+	accounting.SetSessionReconciler(sessions.ReconcileAccountSessions)
 	s.grantRevoked = func(grantID string) error {
 		return sessions.RetireGrant(grantID)
 	}
@@ -304,17 +309,18 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	s.accountInvalidationFallback = sessions.RetireAccount
 	s.accountInvalidationComplete = sessions.CompleteAccountInvalidation
 	s.accountChanged = func(change AccountChange) string {
-		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes)
+		if change.PolicyUncertain {
+			accounting.InvalidatePolicyAssessments(change.AccountID)
+			return "account_access_changed"
+		}
+		reason, err := accounting.ApplyCommittedLimits(change.AccountID, change.WeeklyBytes, change.SessionLimit)
+		if err != nil {
+			return "account_access_changed"
+		}
 		if change.CloseAll {
 			return "account_access_changed"
 		}
-		if exhausted {
-			return "quota_exhausted"
-		}
-		if sessions.AccountSessions(change.AccountID) > change.SessionLimit {
-			return "policy_changed"
-		}
-		return ""
+		return reason
 	}
 	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
 		sample, err := s.SampleActiveGrants(ctx, account)
