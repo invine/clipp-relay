@@ -583,3 +583,26 @@ func TestPlanCreateLostCommitAckReplaysOneOperation(t *testing.T) {
 		t.Fatalf("safe retry = %d", retried.Code)
 	}
 }
+
+func TestOwnerProfileHidesUsageWhenSessionIsRevokedBeforeProtectedRead(t *testing.T) {
+	s, cookie, db, _ := adminFixture(t)
+	const recordedBytes = int64(987654321)
+	_, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) SELECT id,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,$1,1,$2,$1 FROM public.accounts WHERE email='consistency@gmail.com'`, recordedBytes, "386dfe14-2f37-45e7-ace8-0cbcc3851469")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	s.beforeProfileRead = func() { close(entered); <-release }
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() { result <- internalRequest(s, "GET", "/", cookie, nil, "") }()
+	<-entered // Initial Portal Session authorization has completed.
+	if _, err := db.Pool.Exec(context.Background(), `DELETE FROM public.portal_sessions WHERE account_id=(SELECT id FROM public.accounts WHERE email='consistency@gmail.com')`); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	close(release)
+	out := <-result
+	if out.Code != http.StatusOK || strings.Contains(out.Body.String(), "987654321") || strings.Contains(out.Body.String(), "Recorded Relay Usage") {
+		t.Fatalf("revoked owner profile exposed usage: %d %s", out.Code, out.Body.String())
+	}
+}
