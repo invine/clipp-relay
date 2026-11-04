@@ -3,7 +3,9 @@ package quota
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
@@ -21,6 +23,9 @@ type Quota struct {
 	beforeCommit           func(context.Context, persistence.AccountingTransaction) error
 	afterCommit            func() error
 	periodic               periodicAccounting
+	retainedUsageMu        sync.RWMutex
+	retainedUsageCurrent   uint64
+	retainedUsagePeppers   map[uint64][]byte
 	accounting             persistence.Accounting
 	diagnostics            *diagnostic.Logger
 	clock                  clockState
@@ -116,6 +121,53 @@ func New(accounting persistence.Accounting) *Quota {
 	cancel()
 	go q.probeLoop()
 	return q
+}
+
+// ConfigureRetainedUsageKeys installs the account-identity keyring used only
+// for Quota's transaction-scoped retained-usage operations. Call before
+// accounting starts; the secret bytes are copied into Quota's private state.
+func (q *Quota) ConfigureRetainedUsageKeys(current uint64, peppers map[uint64][]byte) error {
+	if current == 0 || len(peppers[current]) < 32 {
+		return errors.New("current retained-usage key unavailable")
+	}
+	q.periodic.mu.Lock()
+	defer q.periodic.mu.Unlock()
+	if q.periodic.started {
+		return errors.New("retained-usage keys must be configured before accounting starts")
+	}
+	keys := make(map[uint64][]byte, len(peppers))
+	for version, material := range peppers {
+		if version == 0 || len(material) < 32 {
+			return errors.New("invalid retained-usage keyring")
+		}
+		keys[version] = append([]byte(nil), material...)
+	}
+	q.retainedUsageMu.Lock()
+	q.retainedUsageCurrent = current
+	q.retainedUsagePeppers = keys
+	q.retainedUsageMu.Unlock()
+	return nil
+}
+
+// RetainedUsageKey derives the privacy-minimal, keyed External Identity
+// reference used by deletion, registration and recovery transactions. It
+// returns no usage data and never stores the raw identity.
+func (q *Quota) RetainedUsageKey(issuer, subject string) (persistence.RetainedUsageKey, error) {
+	if issuer == "" || subject == "" {
+		return persistence.RetainedUsageKey{}, errors.New("retained-usage identity unavailable")
+	}
+	q.retainedUsageMu.RLock()
+	defer q.retainedUsageMu.RUnlock()
+	version := q.retainedUsageCurrent
+	key := q.retainedUsagePeppers[version]
+	if version == 0 || len(key) < 32 {
+		return persistence.RetainedUsageKey{}, errors.New("current retained-usage key unavailable")
+	}
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte("clipp-relay/v1/retained-quota\x00" + issuer + "\x00" + subject))
+	var digest [32]byte
+	copy(digest[:], h.Sum(nil))
+	return persistence.RetainedUsageKey{PepperVersion: version, IdentityDigest: digest}, nil
 }
 
 // Close cancels workers; graceful persistence belongs to FlushAllAccounting.

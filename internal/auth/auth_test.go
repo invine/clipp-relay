@@ -39,6 +39,14 @@ func newTestServer(t *testing.T, pool *pgxpool.Pool, c config.Config, m config.M
 		deps = authDependencies(database.NewRuntime(pool))
 	}
 	s := auth.New(deps, c, m, provider)
+	accounting := quota.New(nil)
+	if m.CurrentPepper != 0 {
+		if err := s.SetDeletionAccountingForTest(accounting); err != nil {
+			accounting.Close()
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(accounting.Close)
 	if len(m.NativeSigningKey) == 32 {
 		if err := s.EnableNativeOAuth(m.NativeSigningKey); err != nil {
 			t.Fatal(err)

@@ -292,9 +292,24 @@ type QuotaProtection interface {
 	ApplyCommittedLimits(string, int64, int) (string, error)
 	InvalidatePolicyAssessments(string)
 	LiveSessionCount(string) (int, bool)
+	ConfigureRetainedUsageKeys(uint64, map[uint64][]byte) error
+	RetainedUsageKey(string, string) (persistence.RetainedUsageKey, error)
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
+}
+
+// SetDeletionAccountingForTest installs the Quota adapter for isolated Auth
+// fixtures that exercise deletion finalization without constructing Relay.
+func (s *Server) SetDeletionAccountingForTest(accounting QuotaProtection) error {
+	if accounting == nil {
+		return errors.New("deletion accounting is required")
+	}
+	if err := accounting.ConfigureRetainedUsageKeys(s.CurrentPepper, s.Peppers); err != nil {
+		return err
+	}
+	s.deletionAccounting = accounting
+	return nil
 }
 
 // ConfigureRelayProtection installs the complete observed policy
@@ -302,6 +317,9 @@ type QuotaProtection interface {
 func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions RelaySessions) error {
 	if accounting == nil || sessions == nil {
 		return errors.New("relay account protection requires quota and sessions")
+	}
+	if err := accounting.ConfigureRetainedUsageKeys(s.CurrentPepper, s.Peppers); err != nil {
+		return err
 	}
 	s.deletionAccounting = accounting
 	accounting.SetSessionReconciler(sessions.ReconcileAccountSessions)

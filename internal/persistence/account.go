@@ -38,6 +38,13 @@ type RetainedUsageRecord struct {
 	RecordedBytes  int64
 }
 
+// RetainedUsageKey contains the keyed External Identity reference Quota
+// supplies to a transaction that retains confirmed usage.
+type RetainedUsageKey struct {
+	PepperVersion  uint64
+	IdentityDigest [32]byte
+}
+
 // PortalSessionOwner is the durable projection required to authenticate a
 // Portal Session while keeping expiry and account eligibility authoritative in
 // PostgreSQL.

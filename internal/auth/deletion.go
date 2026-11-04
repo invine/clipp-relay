@@ -315,11 +315,12 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	// Settlement acquires Auth account protection itself. Attempt it before any
 	// finalization row lock, and reserve the remaining budget for deletion even
 	// when pending usage cannot be preserved. Journal proof precedes this call.
-	if s.deletionAccounting != nil {
-		flushCtx, stop := context.WithTimeout(ctx, time.Second)
-		_ = s.deletionAccounting.FlushDeletionAccounting(flushCtx, x.Account)
-		stop()
+	if s.deletionAccounting == nil {
+		return errors.New("quota deletion accounting unavailable")
 	}
+	flushCtx, stop := context.WithTimeout(ctx, time.Second)
+	_ = s.deletionAccounting.FlushDeletionAccounting(flushCtx, x.Account)
+	stop()
 	subject, err := s.deletions.DeletionIdentity(ctx, x.Account)
 	if err != nil {
 		return deletionDatabaseError(err)
@@ -328,13 +329,16 @@ func (s *Server) finalizeDeletion(ctx context.Context, x pendingDeletion) error 
 	if err != nil {
 		return err
 	}
-	digest := s.digest(s.CurrentPepper, "retained-quota", googleIssuer+"\x00"+subject)
+	retained, err := s.deletionAccounting.RetainedUsageKey(googleIssuer, subject)
+	if err != nil {
+		return err
+	}
 	tx, err := s.deletions.BeginDeletion(ctx)
 	if err != nil {
 		return deletionDatabaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	err = tx.FinalizeDeletion(ctx, x.ID, x.Account, subject, s.CurrentPepper, digest, auditID)
+	err = tx.FinalizeDeletion(ctx, x.ID, x.Account, subject, retained, auditID)
 	if err != nil {
 		return deletionDatabaseError(err)
 	}

@@ -40,7 +40,7 @@ type DeletionTransaction interface {
 	Transaction
 	DeletionOwner(context.Context, string) (DeletionOwner, error)
 	AdmitDeletion(context.Context, DeletionAdmissionRequest) (DeletionAdmission, error)
-	FinalizeDeletion(context.Context, string, string, string, uint64, []byte, string) error
+	FinalizeDeletion(context.Context, string, string, string, RetainedUsageKey, string) error
 }
 
 type DeletionRepository interface {
