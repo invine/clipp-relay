@@ -4,7 +4,9 @@
 
 **Blocked by:** [01: Reject stale Quota assessments](01-fence-stale-quota-assessments.md)
 
-**Status:** ready-for-agent
+**Status:** claimed
+
+**Claimed by:** quota-ownership-coordinator (2026-11-05)
 
 - [ ] Use the spec's opaque assessment, final admission and count publication contracts. Relay holds its registry lock through final admission. Quota checks the assessment and commits the in-memory registry change and aggregate counts together.
 - [ ] Through real Relay Authentication, admit the first eligible session, refuse a new slot at capacity, and prove that refusal or a stale assessment creates no slot and leaves the previous connection intact when replacement is refused.
