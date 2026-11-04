@@ -1,6 +1,6 @@
-# Proposed Quota ownership tickets
+# Quota ownership tickets
 
-Review draft. Publication is pending approval of this breakdown.
+Status: implementation-in-progress
 
 Parent: [Quota ownership specification](../spec.md)  
 Decisions: [Quota ownership decisions](../decisions.md)
@@ -24,4 +24,4 @@ Decisions: [Quota ownership decisions](../decisions.md)
 - 06 and 07 reuse those rules in distinct account transactions. Neither depends on the other.
 - 08 depends on the three remaining branch tips. It removes transitional Auth interfaces only after their consumers have moved.
 
-The owner and intended publication location are the existing relay feature tracker. These drafts authorize neither implementation nor claims.
+The canonical ticket breakdown was supplied at `/private/tmp/clipp-relay-quota-tickets.M4XPHt2M/issues/README.md`. The user authorized implementation on 2026-11-05. The coordinator owns ticket claims, integration and resolution.
