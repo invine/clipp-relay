@@ -4,7 +4,9 @@
 
 **Blocked by:** [03: Let Quota reconcile committed caps against admission](03-reconcile-committed-quota-limits.md)
 
-**Status:** ready-for-agent
+**Status:** claimed
+
+**Claimed by:** quota-ownership-coordinator (2026-11-05)
 
 - [ ] Through authenticated deletion admission, verify credential invalidation and immediate logical retirement. Keep the deletion accounting handoff and physical-close release in the established post-guard order.
 - [ ] Hold Recovery Journal proof and verify the bounded final accounting flush starts only after proof and outside account and row protection. Inject an unavailable or unresolved flush and verify finalization can complete.
