@@ -17,19 +17,20 @@ var ErrExhausted = errors.New("weekly quota exhausted")
 var ErrTemporary = errors.New("quota temporarily unavailable")
 
 type Quota struct {
-	beforeLock          func()
-	beforeCommit        func(context.Context, persistence.AccountingTransaction) error
-	afterCommit         func() error
-	periodic            periodicAccounting
-	accounting          persistence.Accounting
-	diagnostics         *diagnostic.Logger
-	clock               clockState
-	stop                chan struct{}
-	done                chan struct{}
-	settlementBefore    func(context.Context, persistence.AccountingTransaction) error
-	settlementAfter     func(context.Context) error
-	eligibilityBoundary func(context.Context) error
-	adjustTime          func(time.Time) time.Time
+	beforeLock           func()
+	beforeCommit         func(context.Context, persistence.AccountingTransaction) error
+	afterCommit          func() error
+	periodic             periodicAccounting
+	accounting           persistence.Accounting
+	diagnostics          *diagnostic.Logger
+	clock                clockState
+	stop                 chan struct{}
+	done                 chan struct{}
+	settlementBefore     func(context.Context, persistence.AccountingTransaction) error
+	settlementAfter      func(context.Context) error
+	eligibilityBoundary  func(context.Context) error
+	afterEligibilityRead func(context.Context) error
+	adjustTime           func(time.Time) time.Time
 }
 
 // SetAccountingBoundariesForTest controls clock and authority availability at the
@@ -44,6 +45,14 @@ func (q *Quota) SetAccountingBoundariesForTest(adjust func(time.Time) time.Time,
 	q.clock.mu.Unlock()
 	q.periodic.monotonicNow = monotonic
 	q.eligibilityBoundary = eligibility
+}
+
+// SetEligibilityReadBoundaryForTest pauses after persistence has returned its
+// authoritative eligibility result and before Quota applies that snapshot.
+// Configure it before serving; tests use it to order a committed policy edit
+// against a captured read result.
+func (q *Quota) SetEligibilityReadBoundaryForTest(boundary func(context.Context) error) {
+	q.afterEligibilityRead = boundary
 }
 
 // SetDiagnostics connects the process-wide, bounded application logger.

@@ -70,6 +70,7 @@ type observedAccount struct {
 type periodicAccounting struct {
 	monotonicNow func() time.Time
 	mu           sync.Mutex
+	policyEpoch  uint64
 	accounts     map[string]*observedAccount
 	started      bool
 	cancel       context.CancelFunc
@@ -133,6 +134,9 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 	if q.accounting == nil {
 		return result, ErrTemporary
 	}
+	q.periodic.mu.Lock()
+	policyEpoch := q.periodic.policyEpoch
+	q.periodic.mu.Unlock()
 	policy, err := q.accounting.ReadAccountingEligibility(ctx, id)
 	if err != nil {
 		return result, ErrTemporary
@@ -154,8 +158,16 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 		}
 		durable = resultFromPersistence(stored)
 	}
+	if q.afterEligibilityRead != nil {
+		if err := q.afterEligibilityRead(ctx); err != nil {
+			return result, ErrTemporary
+		}
+	}
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
+	if q.periodic.policyEpoch != policyEpoch {
+		return result, ErrTemporary
+	}
 	a := q.observedAccountLocked(id)
 	if a == nil {
 		return result, ErrTemporary
@@ -538,9 +550,9 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 				case id := <-jobs:
 					_ = q.FlushAccounting(ctx, id)
 					// Background reads and decisions share Quota's account state.
-					_, err := q.Eligibility(ctx, id)
+					assessment, err := q.Eligibility(ctx, id)
 					if errors.Is(err, ErrExhausted) {
-						q.cutoff(id, "quota_exhausted")
+						q.cutoffAssessment(id, "quota_exhausted", assessment.Revision)
 					}
 					q.periodic.mu.Lock()
 					if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
@@ -604,10 +616,19 @@ func (q *Quota) CheckAccountingHealth() {
 	}
 }
 func (q *Quota) cutoff(id, reason string) { q.cutoffChecked(id, reason, false) }
+
+func (q *Quota) cutoffAssessment(id, reason string, revision uint64) {
+	q.cutoffCheckedWithFreshness(id, reason, false, &revision)
+}
+
 func (q *Quota) cutoffChecked(id, reason string, expiredOnly bool) {
+	q.cutoffCheckedWithFreshness(id, reason, expiredOnly, nil)
+}
+
+func (q *Quota) cutoffCheckedWithFreshness(id, reason string, expiredOnly bool, assessmentRevision *uint64) {
 	q.periodic.mu.Lock()
 	a := q.periodic.accounts[id]
-	if a == nil || a.blocked || expiredOnly && !q.accountingExpiredLocked(a) {
+	if a == nil || a.blocked || assessmentRevision != nil && a.revision != *assessmentRevision || expiredOnly && !q.accountingExpiredLocked(a) {
 		q.periodic.mu.Unlock()
 		return
 	}
@@ -682,6 +703,7 @@ func (q *Quota) ConfigureAccountingFailureDeadline(deadline time.Duration) error
 func (q *Quota) ApplyAccountingPolicy(id string, cap int64) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
+	q.periodic.policyEpoch++
 	a := q.periodic.accounts[id]
 	if a == nil {
 		return cap <= 0
