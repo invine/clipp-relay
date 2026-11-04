@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -158,7 +159,109 @@ func (q *Quota) RetainedUsageKey(issuer, subject string) (persistence.RetainedUs
 	}
 	q.retainedUsageMu.RLock()
 	defer q.retainedUsageMu.RUnlock()
-	version := q.retainedUsageCurrent
+	return q.retainedUsageKeyLocked(q.retainedUsageCurrent, issuer, subject)
+}
+
+// ValidateRetainedUsageKeyCoverage fails closed when a retained record depends
+// on a key Quota cannot use. These are accounting keys, independent of Auth's
+// credential validation requirements.
+func (q *Quota) ValidateRetainedUsageKeyCoverage(versions []uint64) error {
+	q.retainedUsageMu.RLock()
+	defer q.retainedUsageMu.RUnlock()
+	for _, version := range versions {
+		if version == 0 || len(q.retainedUsagePeppers[version]) < 32 {
+			return errors.New("retained usage key unavailable")
+		}
+	}
+	return nil
+}
+
+// RetainRecoveredUsage restores confirmed current-week usage into the retained
+// identity record inside the caller's recovery transaction. The caller keeps
+// ownership of account completion, journal proof and transaction lifetime.
+func (q *Quota) RetainRecoveredUsage(ctx context.Context, tx persistence.RecoveryAccountingTransaction, accountID, issuer, subject string) error {
+	if tx == nil || accountID == "" {
+		return errors.New("recovery accounting transaction unavailable")
+	}
+	week, err := tx.CurrentQuotaWeek(ctx)
+	if err != nil {
+		return err
+	}
+	recorded, hasUsage, err := tx.RecordedUsage(ctx, accountID, week)
+	if err != nil {
+		return err
+	}
+	if !hasUsage {
+		return nil
+	}
+	keys, err := q.recoveryRetainedUsageKeys(issuer, subject)
+	if err != nil {
+		return err
+	}
+	var matchingVersions []uint64
+	for _, key := range keys {
+		_, present, err := tx.RecoveredRetainedUsage(ctx, key.PepperVersion, key.IdentityDigest[:], week)
+		if err != nil {
+			return err
+		}
+		if present {
+			matchingVersions = append(matchingVersions, key.PepperVersion)
+		}
+	}
+	selected, err := q.selectRecoveredRetainedUsageKey(issuer, subject, matchingVersions)
+	if err != nil {
+		return err
+	}
+	return tx.StoreRecoveredRetainedUsage(ctx, selected.PepperVersion, selected.IdentityDigest[:], week, recorded)
+}
+
+// recoveryRetainedUsageKeys returns configured key candidates to detect
+// previous retained records without exposing key material outside Quota.
+func (q *Quota) recoveryRetainedUsageKeys(issuer, subject string) ([]persistence.RetainedUsageKey, error) {
+	if issuer == "" || subject == "" {
+		return nil, errors.New("retained-usage identity unavailable")
+	}
+	q.retainedUsageMu.RLock()
+	defer q.retainedUsageMu.RUnlock()
+	if _, err := q.retainedUsageKeyLocked(q.retainedUsageCurrent, issuer, subject); err != nil {
+		return nil, err
+	}
+	versions := make([]uint64, 0, len(q.retainedUsagePeppers))
+	for version := range q.retainedUsagePeppers {
+		versions = append(versions, version)
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	keys := make([]persistence.RetainedUsageKey, 0, len(versions))
+	for _, version := range versions {
+		key, err := q.retainedUsageKeyLocked(version, issuer, subject)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+// selectRecoveredRetainedUsageKey chooses the existing matching key for a
+// restored identity or the current key when no record exists. Multiple matches
+// identify duplicate logical retained records and must abort the recovery.
+func (q *Quota) selectRecoveredRetainedUsageKey(issuer, subject string, matchingVersions []uint64) (persistence.RetainedUsageKey, error) {
+	current, err := q.RetainedUsageKey(issuer, subject)
+	if err != nil {
+		return persistence.RetainedUsageKey{}, err
+	}
+	if len(matchingVersions) > 1 {
+		return persistence.RetainedUsageKey{}, errors.New("duplicate logical retained usage")
+	}
+	if len(matchingVersions) == 0 {
+		return current, nil
+	}
+	q.retainedUsageMu.RLock()
+	defer q.retainedUsageMu.RUnlock()
+	return q.retainedUsageKeyLocked(matchingVersions[0], issuer, subject)
+}
+
+func (q *Quota) retainedUsageKeyLocked(version uint64, issuer, subject string) (persistence.RetainedUsageKey, error) {
 	key := q.retainedUsagePeppers[version]
 	if version == 0 || len(key) < 32 {
 		return persistence.RetainedUsageKey{}, errors.New("current retained-usage key unavailable")

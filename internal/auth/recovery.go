@@ -15,6 +15,11 @@ import (
 // database name; Source is immutable backup identity, distinct from Target.
 type RecoveryRequest struct{ RunID, Source, Target string }
 
+type recoveryQuota interface {
+	ValidateRetainedUsageKeyCoverage([]uint64) error
+	RetainRecoveredUsage(context.Context, persistence.RecoveryAccountingTransaction, string, string, string) error
+}
+
 func (s *Server) SetRecoveryCommitHookForTest(commit func(context.Context, persistence.RecoveryTransaction) error) {
 	s.commitRecovery = commit
 }
@@ -75,13 +80,15 @@ func (s *Server) RecoverOffline(ctx context.Context, request RecoveryRequest) er
 	if err != nil {
 		return err
 	}
-	for _, version := range versions {
-		if len(s.Peppers[version]) == 0 {
-			return ErrRetainedPepperUnavailable
-		}
+	quotaOwner, ok := s.deletionAccounting.(recoveryQuota)
+	if !ok {
+		return ErrRetainedPepperUnavailable
+	}
+	if err = quotaOwner.ValidateRetainedUsageKeyCoverage(versions); err != nil {
+		return ErrRetainedPepperUnavailable
 	}
 	for _, id := range accounts {
-		if err = s.recoverDeletedAccount(ctx, tx, id); err != nil {
+		if err = s.recoverDeletedAccount(ctx, tx, quotaOwner, id); err != nil {
 			return err
 		}
 	}
@@ -125,7 +132,7 @@ func (s *Server) recoveryCompleted(ctx context.Context, r RecoveryRequest) (bool
 	return true, nil
 }
 
-func (s *Server) recoverDeletedAccount(ctx context.Context, tx persistence.RecoveryTransaction, id string) error {
+func (s *Server) recoverDeletedAccount(ctx context.Context, tx persistence.RecoveryTransaction, quotaOwner recoveryQuota, id string) error {
 	account, found, err := tx.RecoveredAccount(ctx, id)
 	if err != nil {
 		return err
@@ -136,39 +143,8 @@ func (s *Server) recoverDeletedAccount(ctx context.Context, tx persistence.Recov
 	if account.Subject == "" {
 		return errors.New("restored deletion identity missing")
 	}
-	if len(s.Peppers[s.CurrentPepper]) == 0 {
-		return errors.New("retained usage key unavailable")
-	}
-	week, err := tx.CurrentQuotaWeek(ctx)
-	if err != nil {
+	if err = quotaOwner.RetainRecoveredUsage(ctx, tx, id, googleIssuer, account.Subject); err != nil {
 		return err
-	}
-	recorded, hasUsage, err := tx.RecordedUsage(ctx, id, week)
-	if err != nil {
-		return err
-	}
-	if hasUsage {
-		var version uint64 = s.CurrentPepper
-		digest := s.digest(version, "retained-quota", googleIssuer+"\x00"+account.Subject)
-		matches := 0
-		for v := range s.Peppers {
-			candidate := s.digest(v, "retained-quota", googleIssuer+"\x00"+account.Subject)
-			_, present, readErr := tx.RecoveredRetainedUsage(ctx, v, candidate, week)
-			if readErr != nil {
-				return readErr
-			}
-			if present {
-				matches++
-				version = v
-				digest = candidate
-			}
-		}
-		if matches > 1 {
-			return errors.New("duplicate logical retained usage")
-		}
-		if err = tx.StoreRecoveredRetainedUsage(ctx, version, digest, week, recorded); err != nil {
-			return err
-		}
 	}
 	auditID, err := uuid()
 	if err != nil {
