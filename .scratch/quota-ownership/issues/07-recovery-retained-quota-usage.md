@@ -4,7 +4,9 @@
 
 **Blocked by:** [05: Complete Relay Account Deletion accounting outside Auth](05-deletion-accounting-handoff.md)
 
-**Status:** ready-for-agent
+**Status:** claimed
+
+**Claimed by:** quota-ownership-coordinator (2026-11-05)
 
 - [ ] Through offline recovery against disposable PostgreSQL and a controlled Recovery Journal, verify deleted identities stay detached and confirmed current-week usage is retained according to the existing rules.
 - [ ] Exercise retained-usage key coverage and duplicate logical records. Preserve fail-closed outcomes for unavailable keys and maintain the distinction between accounting key coverage and Auth's credential requirements.

@@ -4,7 +4,9 @@
 
 **Blocked by:** [05: Complete Relay Account Deletion accounting outside Auth](05-deletion-accounting-handoff.md)
 
-**Status:** ready-for-agent
+**Status:** claimed
+
+**Claimed by:** quota-ownership-coordinator (2026-11-05)
 
 - [ ] Through the protected registration path with disposable PostgreSQL, delete and re-register within the same Weekly Quota Window. Confirm usage appears as the fresh account's opening total and is imported once, including concurrent registration or an uncertain retry.
 - [ ] Exercise a later Weekly Quota Window and bounded retention cleanup. Expired Retained Quota Usage is not imported, and cleanup keeps its existing bounds and observable outcomes.
