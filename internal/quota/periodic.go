@@ -55,7 +55,7 @@ func (w *observedWeek) effectiveBytes() (int64, bool) {
 }
 
 type observedAccount struct {
-	sessions           int
+	identity           uint64
 	weeks              map[time.Time]*observedWeek
 	eligibleWeek       time.Time
 	healthy            time.Time
@@ -68,15 +68,19 @@ type observedAccount struct {
 	flushCancel        context.CancelFunc
 }
 type periodicAccounting struct {
-	monotonicNow func() time.Time
-	mu           sync.Mutex
-	policyEpoch  uint64
-	accounts     map[string]*observedAccount
-	started      bool
-	cancel       context.CancelFunc
-	done         chan struct{}
-	close        func(ClosureOutcome)
-	deadline     time.Duration
+	monotonicNow  func() time.Time
+	mu            sync.Mutex
+	policyEpoch   uint64
+	nextIdentity  uint64
+	liveCounts    map[string]int
+	liveZeroOrder map[string]uint64
+	liveSequence  uint64
+	accounts      map[string]*observedAccount
+	started       bool
+	cancel        context.CancelFunc
+	done          chan struct{}
+	close         func(ClosureOutcome)
+	deadline      time.Duration
 }
 
 func (q *Quota) observedAccountLocked(id string) *observedAccount {
@@ -85,7 +89,8 @@ func (q *Quota) observedAccountLocked(id string) *observedAccount {
 	}
 	a := q.periodic.accounts[id]
 	if a == nil && len(q.periodic.accounts) < maxAccountingAccounts {
-		a = &observedAccount{weeks: make(map[time.Time]*observedWeek)}
+		q.periodic.nextIdentity++
+		a = &observedAccount{identity: q.periodic.nextIdentity, weeks: make(map[time.Time]*observedWeek)}
 		q.periodic.accounts[id] = a
 	}
 	return a
@@ -555,7 +560,7 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 						q.cutoffAssessment(id, "quota_exhausted", assessment.Revision)
 					}
 					q.periodic.mu.Lock()
-					if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
+					if a := q.periodic.accounts[id]; a != nil && q.periodic.liveCounts[id] == 0 && !a.busy && !hasObserved(a) {
 						delete(q.periodic.accounts, id)
 					}
 					q.periodic.mu.Unlock()
@@ -675,11 +680,7 @@ func (q *Quota) accountingNow() time.Time {
 // AccountingSessions records only physical registry occupancy, never policy.
 // Relay calls it with its registry mutex held after installation/removal.
 func (q *Quota) AccountingSessions(id string, count int) {
-	q.periodic.mu.Lock()
-	if a := q.periodic.accounts[id]; a != nil {
-		a.sessions = count
-	}
-	q.periodic.mu.Unlock()
+	q.PublishLiveCounts(map[string]int{id: count})
 }
 
 // AccountingFailed fences reporter counter failures through the same immediate

@@ -53,6 +53,15 @@ type Accounting interface {
 	FlushAllAccounting(context.Context) error
 }
 
+// AdmissionAccounting is implemented by Quota in production. Relay holds its
+// registry lock while Quota validates the assessment, installs the exact
+// session transition, and publishes its final absolute account counts.
+type AdmissionAccounting interface {
+	Assess(context.Context, string) (quota.Assessment, error)
+	CommitAdmission(quota.Assessment, quota.SessionChange, func() map[string]int) error
+	PublishLiveCounts(map[string]int)
+}
+
 // DiagnosticSink is the shared, catalog-validated application event boundary.
 // It is optional so protocol fixtures can run without capturing stdout.
 type DiagnosticSink interface {
@@ -106,6 +115,8 @@ const (
 type sessionManager struct {
 	authority             Authority
 	accounting            Accounting
+	admission             AdmissionAccounting
+	committingAdmission   bool
 	diagnostics           DiagnosticSink
 	maxSessions           int
 	scheduleExpiry        func(time.Duration, func()) sessionTimer
@@ -320,6 +331,9 @@ func newServer(a Authority, accounting Accounting, opts Options, installProtecti
 	}
 	s := &Server{manager: manager, tracer: &circuitTracer{diagnostics: opts.Diagnostics}, authority: a, diagnostics: opts.Diagnostics, tcpEnabled: opts.ListenAddress != "", wsEnabled: opts.WebSocketListenAddress != "", webrtcEnabled: opts.WebRTCListenAddress != "", webSocketHostname: opts.WebSocketHostname}
 	s.sessionManager = &sessionManager{authority: a, accounting: accounting, diagnostics: opts.Diagnostics, maxSessions: opts.MaxSessions, scheduleExpiry: func(d time.Duration, callback func()) sessionTimer { return time.AfterFunc(d, callback) }, physicalClose: func(c network.Conn) { _ = c.Close() }, closePending: map[network.Conn]struct{}{}, closeInFlight: map[network.Conn]struct{}{}, closeWake: make(chan struct{}, 1), closeStop: make(chan struct{}), closeDone: make(chan struct{}), deferredGrantCloses: map[string]map[network.Conn]struct{}{}, deferredAccountCloses: map[string]map[network.Conn]struct{}{}, lifecycle: map[network.Conn]connectionLifecycle{}, connectionInfo: map[network.Conn]connectionDiagnostic{}, byConn: map[network.Conn]*session{}, byPeer: map[peer.ID]*session{}, byAccount: map[string]map[*session]struct{}{}, authAttempts: map[network.Conn]*authAttempt{}, preauth: map[network.Conn]*time.Timer{}, connRate: map[network.Conn]tokenBucket{}, rvConnRate: map[network.Conn]tokenBucket{}, reservations: map[peer.ID]reservationOwner{}, leases: map[peer.ID]*rendezvousLease{}}
+	if admission, ok := accounting.(AdmissionAccounting); ok {
+		s.sessionManager.admission = admission
+	}
 	reporter := &endpointReporter{sessions: s.sessionManager}
 	listen := make([]string, 0, 3)
 	transportOptions := []libp2p.Option{libp2p.Identity(key), libp2p.NoTransports,
@@ -577,14 +591,23 @@ func (m *sessionManager) removeSessionLocked(v *session, preserveRendezvous bool
 		delete(m.byPeer, v.conn.RemotePeer())
 	}
 	delete(m.byAccount[v.account], v)
-	if m.accounting != nil {
-		m.accounting.AccountingSessions(v.account, len(m.byAccount[v.account]))
+	if !m.committingAdmission {
+		m.publishAccountCountLocked(v.account)
 	}
 	if len(m.byAccount[v.account]) == 0 {
 		delete(m.byAccount, v.account)
 	}
 	if v.timer != nil {
 		v.timer.Stop()
+	}
+}
+
+func (m *sessionManager) publishAccountCountLocked(account string) {
+	count := len(m.byAccount[account])
+	if m.admission != nil {
+		m.admission.PublishLiveCounts(map[string]int{account: count})
+	} else if m.accounting != nil {
+		m.accounting.AccountingSessions(account, count)
 	}
 }
 
@@ -990,8 +1013,13 @@ func (m *sessionManager) authenticateAdmitted(ctx context.Context, c network.Con
 		return time.Time{}, 0, "account_change_requires_new_connection"
 	}
 	var eligibility quota.AccountingEligibility
+	var assessment quota.Assessment
 	var quotaErr error
-	eligibility, quotaErr = m.accounting.Eligibility(ctx, credential.AccountID)
+	if m.admission != nil {
+		assessment, quotaErr = m.admission.Assess(ctx, credential.AccountID)
+	} else {
+		eligibility, quotaErr = m.accounting.Eligibility(ctx, credential.AccountID)
+	}
 	if err := quotaErr; err != nil {
 		if errors.Is(err, quota.ErrExhausted) {
 			*reason = "" // The fixed authentication catalog has no quota-exhausted pair.
@@ -1015,7 +1043,7 @@ func (m *sessionManager) authenticateAdmitted(ctx context.Context, c network.Con
 	// Uniform 75–85% of admitted lifetime, independent of a stable Peer ID.
 	renewFraction := 0.75 + float64(binary.LittleEndian.Uint64(jitter[:])%10001)/100000
 	m.mu.Lock()
-	if ctx.Err() != nil || m.closing || (m.lifecycle[c] != connectionUnauthenticated && m.lifecycle[c] != connectionAuthenticated) || c.IsClosed() || m.authAttempts[c] != attempt || m.accounting != nil && !m.accounting.AccountingCurrent(credential.AccountID, eligibility.Revision) {
+	if ctx.Err() != nil || m.closing || (m.lifecycle[c] != connectionUnauthenticated && m.lifecycle[c] != connectionAuthenticated) || c.IsClosed() || m.authAttempts[c] != attempt || m.admission == nil && m.accounting != nil && !m.accounting.AccountingCurrent(credential.AccountID, eligibility.Revision) {
 		m.mu.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
@@ -1023,58 +1051,91 @@ func (m *sessionManager) authenticateAdmitted(ctx context.Context, c network.Con
 		m.mu.Unlock()
 		return time.Time{}, 0, "temporarily_unavailable"
 	}
-	if current == nil {
-		count := len(m.byAccount[credential.AccountID])
-		if replaced != nil && replaced.account == credential.AccountID {
-			count--
+	if current == nil && len(m.byConn) >= m.maxSessions && replaced == nil {
+		m.mu.Unlock()
+		*reason = "session_limit"
+		return time.Time{}, 0, "session_limit_exceeded"
+	}
+	install := func() map[string]int {
+		if current != nil {
+			m.removeSessionLocked(current, true)
 		}
-		if count >= eligibility.SessionLimit {
+		if replaced != nil && replaced != current {
+			m.endSessionLocked(replaced, "replaced")
+			m.queueCloseLocked(replaced.conn)
+		}
+		m.nextSessionIdentity++
+		v := &session{identity: m.nextSessionIdentity, conn: c, account: credential.AccountID, grantID: credential.GrantID, deadline: deadline}
+		m.byConn[c] = v
+		m.lifecycle[c] = connectionAuthenticated
+		m.byPeer[c.RemotePeer()] = v
+		if current != nil {
+			if lease := m.leases[c.RemotePeer()]; lease != nil && lease.owner == current {
+				lease.owner = v
+			}
+		}
+		if m.byAccount[v.account] == nil {
+			m.byAccount[v.account] = map[*session]struct{}{}
+		}
+		m.byAccount[v.account][v] = struct{}{}
+		if t := m.preauth[c]; t != nil {
+			t.Stop()
+			delete(m.preauth, c)
+		}
+		v.timer = m.scheduleExpiry(time.Until(deadline), func() { m.expire(v) })
+		delete(m.authAttempts, c)
+		counts := map[string]int{v.account: len(m.byAccount[v.account])}
+		if replaced != nil && replaced.account != v.account {
+			counts[replaced.account] = len(m.byAccount[replaced.account])
+		}
+		return counts
+	}
+	if m.admission != nil {
+		change := quota.SessionChange{Kind: quota.SessionNew}
+		if current != nil {
+			change.Kind = quota.SessionRenewal
+		} else if replaced != nil {
+			change.Kind = quota.SessionReplacement
+			change.PreviousAccount = replaced.account
+		}
+		m.committingAdmission = true
+		err := m.admission.CommitAdmission(assessment, change, install)
+		m.committingAdmission = false
+		if err != nil {
 			m.mu.Unlock()
-			*reason = "session_limit"
-			return time.Time{}, 0, "session_limit_exceeded"
+			if errors.Is(err, quota.ErrExhausted) {
+				*reason = ""
+				return time.Time{}, 0, "quota_exhausted"
+			}
+			if errors.Is(err, quota.ErrSessionLimit) {
+				*reason = "session_limit"
+				return time.Time{}, 0, "session_limit_exceeded"
+			}
+			*reason = "quota_unavailable"
+			return time.Time{}, 0, "temporarily_unavailable"
 		}
-		if len(m.byConn) >= m.maxSessions && replaced == nil {
-			m.mu.Unlock()
-			*reason = "session_limit"
-			return time.Time{}, 0, "session_limit_exceeded"
+	} else {
+		if current == nil {
+			count := len(m.byAccount[credential.AccountID])
+			if replaced != nil && replaced.account == credential.AccountID {
+				count--
+			}
+			if count >= eligibility.SessionLimit {
+				m.mu.Unlock()
+				*reason = "session_limit"
+				return time.Time{}, 0, "session_limit_exceeded"
+			}
 		}
+		install()
+		m.publishAccountCountLocked(credential.AccountID)
 	}
-	if current != nil {
-		m.removeSessionLocked(current, true)
-	}
-	if replaced != nil && replaced != current {
-		m.endSessionLocked(replaced, "replaced")
-		m.queueCloseLocked(replaced.conn)
-	}
-	m.nextSessionIdentity++
-	v := &session{identity: m.nextSessionIdentity, conn: c, account: credential.AccountID, grantID: credential.GrantID, deadline: deadline}
-	m.byConn[c] = v
-	m.lifecycle[c] = connectionAuthenticated
-	m.byPeer[c.RemotePeer()] = v
-	if current != nil {
-		if lease := m.leases[c.RemotePeer()]; lease != nil && lease.owner == current {
-			lease.owner = v
-		}
-	}
-	if m.byAccount[v.account] == nil {
-		m.byAccount[v.account] = map[*session]struct{}{}
-	}
-	m.byAccount[v.account][v] = struct{}{}
-	if m.accounting != nil {
-		m.accounting.AccountingSessions(v.account, len(m.byAccount[v.account]))
-	}
-	if t := m.preauth[c]; t != nil {
-		t.Stop()
-		delete(m.preauth, c)
-	}
-	v.timer = m.scheduleExpiry(time.Until(deadline), func() { m.expire(v) })
-	delete(m.authAttempts, c)
+	installed := m.byConn[c]
 	m.mu.Unlock()
 	if replaced != nil && replaced != current {
 		*oldToClose = replaced.conn
 	}
 	lifetime := time.Until(deadline)
-	return deadline, time.Duration(float64(lifetime) * renewFraction), ""
+	return installed.deadline, time.Duration(float64(lifetime) * renewFraction), ""
 }
 
 type byteReader struct{ io.Reader }
