@@ -6,9 +6,9 @@
 
 **Status:** resolved
 
-- [x] Through offline recovery against disposable PostgreSQL and a controlled Recovery Journal, verify deleted identities stay detached and confirmed current-week usage is retained according to the existing rules.
+- [ ] Through offline recovery against disposable PostgreSQL and a controlled Recovery Journal, verify deleted identities stay detached and confirmed current-week usage is retained according to the existing rules. This scenario was not executed without a serving fixture.
 - [x] Exercise retained-usage key coverage and duplicate logical records. Preserve fail-closed outcomes for unavailable keys and maintain the distinction between accounting key coverage and Auth's credential requirements.
-- [x] Exercise uncertain completion and retry. Preserve atomic recovery accounting, identity changes, audit and run receipt. Retain writer fencing, proof recheck and Recovery Review Hold coverage.
+- [ ] Exercise uncertain completion and retry. Preserve atomic recovery accounting, identity changes, audit and run receipt. Retain writer fencing, proof recheck and Recovery Review Hold coverage. The database-backed scenario was not executed without a serving fixture.
 - [x] Move recovered usage reads and retention decisions out of Auth while preserving the existing recovery operation and transaction lifetime.
 
 **Spec coverage:** I1, I7–I8 · T10 (recovery and key coverage). See the [parent specification](../spec.md) and [decision record](../decisions.md).

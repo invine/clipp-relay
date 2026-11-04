@@ -6,8 +6,8 @@
 
 **Status:** resolved
 
-- [x] Through the protected registration path with disposable PostgreSQL, delete and re-register within the same Weekly Quota Window. Confirm usage appears as the fresh account's opening total and is imported once, including concurrent registration or an uncertain retry.
-- [x] Exercise a later Weekly Quota Window and bounded retention cleanup. Expired Retained Quota Usage is not imported, and cleanup keeps its existing bounds and observable outcomes.
+- [ ] Through the protected registration path with disposable PostgreSQL, delete and re-register within the same Weekly Quota Window. Confirm usage appears as the fresh account's opening total and is imported once, including concurrent registration or an uncertain retry. This scenario was not executed without a serving fixture.
+- [ ] Exercise a later Weekly Quota Window and bounded retention cleanup. Expired Retained Quota Usage is not imported, and cleanup keeps its existing bounds and observable outcomes. This database-backed scenario was not executed without a serving fixture.
 - [x] Exercise duplicate logical retained usage and unavailable required key material. Preserve existing fail-closed outcomes and registration transaction rollback.
 - [x] Keep registration, import and credential issuance in the existing transaction. Auth receives the registration result without retained records, usage figures or accounting key selection.
 

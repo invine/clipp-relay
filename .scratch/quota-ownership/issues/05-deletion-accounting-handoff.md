@@ -8,7 +8,7 @@
 
 - [x] Through authenticated deletion admission, verify credential invalidation and immediate logical retirement. Keep the deletion accounting handoff and physical-close release in the established post-guard order.
 - [x] Hold Recovery Journal proof and verify the bounded final accounting flush starts only after proof and outside account and row protection. Inject an unavailable or unresolved flush and verify finalization can complete.
-- [x] With disposable PostgreSQL, verify one finalization transaction retains confirmed current-week usage, seals late settlement, detaches identity and records completion and audit. A late settlement cannot charge the replacement account.
+- [ ] With disposable PostgreSQL, verify one finalization transaction retains confirmed current-week usage, seals late settlement, detaches identity and records completion and audit. A late settlement cannot charge the replacement account. This scenario was not executed without a serving fixture.
 - [x] Exercise a lost commit acknowledgement. Confirm finalization independently before forgetting in-memory accounting. Verify retry and worker failure classifications remain observable.
 - [x] Give the accounting side ownership of deletion's transaction-scoped retention and keyed-identity rules. Leave a seam reusable by registration and offline recovery without exposing usage figures to Auth or creating a second transaction.
 

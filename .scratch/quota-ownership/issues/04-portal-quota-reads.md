@@ -7,8 +7,8 @@
 **Status:** resolved
 
 - [x] Route Recorded Relay Usage, remaining allowance and history directly to the Portal read path. Auth's authorization results contain credential or policy facts without usage totals or live counts.
-- [x] With authenticated owner and administrator routes backed by disposable PostgreSQL, verify configured caps, confirmed current-week usage and history, and the owner capacity distinction between live Relay Sessions and active Login Grants. Exercise known zero and unavailable count separately.
-- [x] Revoke the owner Portal Session between initial authorization and the protected profile read. Assert that the response exposes no usage data. Keep the session recheck and durable policy-and-usage snapshot within one database operation.
+- [ ] With authenticated owner and administrator routes backed by disposable PostgreSQL, verify configured caps, confirmed current-week usage and history, and the owner capacity distinction between live Relay Sessions and active Login Grants. Exercise known zero and unavailable count separately. The gated coverage is present; it was not executed without a serving fixture.
+- [ ] Revoke the owner Portal Session between initial authorization and the protected profile read. Assert that the response exposes no usage data. Keep the session recheck and durable policy-and-usage snapshot within one database operation. The gated coverage is present; it was not executed without a serving fixture.
 - [x] Preserve administrator authority and deleted-account visibility, existing responses and rendering. Keep live count sampling separate from the durable profile snapshot.
 - [x] Retire the previous Auth usage projection and count sampler for the migrated pages. Existing Portal behavior tests continue to pass.
 
