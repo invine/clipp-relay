@@ -4,7 +4,9 @@
 
 **Blocked by:** [04: Serve Portal usage and live counts outside Auth](04-portal-quota-reads.md), [06: Import Retained Quota Usage outside Auth on re-registration](06-reregistration-retained-quota-usage.md), [07: Recover Retained Quota Usage outside Auth](07-recovery-retained-quota-usage.md)
 
-**Status:** ready-for-agent
+**Status:** claimed
+
+**Claimed by:** quota-ownership-coordinator (2026-11-05)
 
 - [ ] Remove compatibility forwarding and unused Auth interfaces or response fields after their last callers migrate. Auth handles configured policy and credential facts without reading usage, history, live counts or retained accounting records.
 - [ ] Verify production wiring and supported fixtures use the final interfaces. Keep exact connection ownership, global Safety Limits, existing Relay Authentication responses and the client transport decision.
