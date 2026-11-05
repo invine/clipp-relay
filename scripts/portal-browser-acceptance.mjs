@@ -72,15 +72,134 @@ try {
   await call('Page.navigate', { url: `${base}/` }); await ready(); await wait(100)
   await evalJS(`document.querySelector('.welcome a[href="/auth/login"]').click()`); await wait(500); await ready(); await wait(500)
   if (!(await evalJS(`document.body.innerText.includes('Your account')`))) throw new Error(`OAuth login did not reach the account workspace at ${await evalJS('location.href')}: ${(await evalJS('document.body.innerText')).slice(0,1200)}; responses=${JSON.stringify(responses.slice(-12))}`)
-  const facts = await evalJS(`({ title: document.querySelector('h1')?.innerText, account: document.body.innerText.includes('workspace-a@example.test'), allowance: document.body.innerText.includes('Your allowance'), setup: document.body.innerText.includes('Add this relay to Clipp'), width: innerWidth, scroll: document.documentElement.scrollWidth })`)
+  const facts = await evalJS(`({ title: document.querySelector('h1')?.innerText, account: document.body.innerText.includes('workspace-a@example.test'), allowance: document.body.innerText.includes('Your allowance'), setup: document.querySelector('#connection-setup')?.innerText.includes('Add this relay to Clipp') === true, discovery:document.querySelector('#discovery-url')?.value,width: innerWidth, scroll: document.documentElement.scrollWidth })`)
   if (!facts.account || !facts.allowance || !facts.setup) throw new Error(`expected account workspace facts missing: ${JSON.stringify(facts)}`)
+  const connectTask = await evalJS(`(()=>{const trigger=document.querySelector('.connect-clipp');trigger.click();const dialog=document.querySelector('#connect-dialog');return {href:trigger.getAttribute('href'),open:dialog?.open===true,modal:dialog?.matches(':modal')===true,title:dialog?.querySelector('#setup-title')?.innerText,endpoint:dialog?.querySelector('#discovery-url')?.value,close:!!dialog?.querySelector('[data-close-connect]'),instructions:dialog?.querySelector('.setup-instructions')?.textContent.includes('Authenticated discovery')===true,portalBoundary:dialog?.innerText.includes('A Portal Session signs you into this website'),focusInside:dialog?.contains(document.activeElement)}})()`)
+  if (connectTask.href !== '#connection-setup' || !connectTask.open || !connectTask.modal || !connectTask.title || connectTask.endpoint !== facts.discovery || !connectTask.close || !connectTask.instructions || !connectTask.portalBoundary || !connectTask.focusInside) throw new Error(`Connect Clipp did not open its contextual setup task: ${JSON.stringify(connectTask)}`)
+  const connectClosed = await evalJS(`(()=>{const trigger=document.querySelector('.connect-clipp');document.querySelector('[data-close-connect]').click();return {closed:!document.querySelector('#connect-dialog').open,focusRestored:document.activeElement===trigger}})()`)
+  if (!connectClosed.closed || !connectClosed.focusRestored) throw new Error(`Connect Clipp did not close and restore focus: ${JSON.stringify(connectClosed)}`)
+  await evalJS(`document.querySelector('.connect-clipp').click()`)
+  await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Escape', code:'Escape', windowsVirtualKeyCode:27 })
+  await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Escape', code:'Escape', windowsVirtualKeyCode:27 })
+  const connectEscape = await evalJS(`({closed:!document.querySelector('#connect-dialog').open,focusRestored:document.activeElement===document.querySelector('.connect-clipp')})`)
+  if (!connectEscape.closed || !connectEscape.focusRestored) throw new Error(`Connect Clipp Escape did not close and restore focus: ${JSON.stringify(connectEscape)}`)
+  const themeEvidence = await evalJS(`(()=>{const button=document.querySelector('.workspace-sidebar [data-theme-toggle]');if(!button.getBoundingClientRect().width)throw new Error('sidebar theme control unavailable');const initial=document.documentElement.dataset.theme;button.click();const selected={theme:document.documentElement.dataset.theme,label:button.innerText,pressed:button.getAttribute('aria-checked'),stored:localStorage.getItem('clipp-relay-appearance')};return {initial,...selected}})()`)
+  if (themeEvidence.initial !== 'dark' || themeEvidence.theme !== 'light' || themeEvidence.label !== 'Light mode' || themeEvidence.pressed !== 'false' || themeEvidence.stored !== 'light') throw new Error(`theme toggle did not select and store light appearance: ${JSON.stringify(themeEvidence)}`)
+  await snap('account-light-1440.png')
+  await call('Page.reload'); await ready(); await wait(120)
+  themeEvidence.reloaded = await evalJS(`({theme:document.documentElement.dataset.theme,label:([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')).textContent,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
+  if (themeEvidence.reloaded.theme !== 'light' || themeEvidence.reloaded.label !== 'Light mode' || themeEvidence.reloaded.overflow) throw new Error(`saved theme was not restored safely: ${JSON.stringify(themeEvidence.reloaded)}`)
+  await evalJS(`([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')).click()`)
+  themeEvidence.restored = await evalJS(`({theme:document.documentElement.dataset.theme,stored:localStorage.getItem('clipp-relay-appearance')})`)
+  if (themeEvidence.restored.theme !== 'dark' || themeEvidence.restored.stored !== 'dark') throw new Error(`theme control did not restore dark appearance: ${JSON.stringify(themeEvidence.restored)}`)
+  const lightThemeSweep = {}
+  await evalJS(`localStorage.setItem('clipp-relay-appearance','light')`)
+  const inspectLight = async (name, width, path) => {
+    await call('Emulation.setDeviceMetricsOverride', { width, height: viewportHeight(width), deviceScaleFactor: 1, mobile: width < 640 })
+    await call('Page.navigate', { url: `${base}${path}` }); await ready(); await wait(220)
+    const result = await evalJS(`(()=>{const rgb=s=>{const m=s.match(/[\\d.]+/g);return m&&!(m.length>3&&Number(m[3])===0)?m.slice(0,3).map(Number):null};const lum=c=>{const a=c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return .2126*a[0]+.7152*a[1]+.0722*a[2]};const contrast=(a,b)=>{a=rgb(a);b=rgb(b);if(!a||!b)return null;const x=lum(a),y=lum(b);return +((Math.max(x,y)+.05)/(Math.min(x,y)+.05)).toFixed(2)};const ground=getComputedStyle(document.querySelector('.workspace-main')||document.body).backgroundColor;const controls=[...document.querySelectorAll('button:not(:disabled),.button')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0}).map(e=>({label:e.innerText.trim().replace(/\\s+/g,' ').slice(0,48),ratio:contrast(getComputedStyle(e).color,rgb(getComputedStyle(e).backgroundColor)?getComputedStyle(e).backgroundColor:ground),border:getComputedStyle(e).borderColor,bg:getComputedStyle(e).backgroundColor,fg:getComputedStyle(e).color}));return {theme:document.documentElement.dataset.theme,width:innerWidth,scroll:document.documentElement.scrollWidth,themeToggle:!!([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')),controls,disabled:[...document.querySelectorAll('button:disabled,input:disabled')].length,mark:[...document.images].every(i=>i.complete&&i.naturalWidth>0)}})()`)
+    if (result.theme !== 'light' || result.scroll > width || !result.mark) throw new Error(`light theme ${name} at ${width}px failed: ${JSON.stringify(result)}`)
+    if (!result.themeToggle) throw new Error(`light theme switch is missing on ${name}: ${JSON.stringify(result)}`)
+    if (result.controls.some(control => control.ratio !== null && control.ratio < 4.5)) throw new Error(`light theme control contrast failed on ${name}: ${JSON.stringify(result.controls)}`)
+    await evalJS(`document.querySelector('.workspace-menu').open=true`)
+    const toggleRect = await evalJS(`(()=>{const r=([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]'))?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+    if (!toggleRect) throw new Error(`light theme switch is not visible on ${name}`)
+    if (toggleRect) {
+      await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:toggleRect.x, y:toggleRect.y }); await wait(80)
+      const hover = await evalJS(`(()=>{const e=([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]')),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
+      if (hover.ratio < 4.5) throw new Error(`light theme toggle hover contrast failed on ${name}: ${JSON.stringify(hover)}`)
+      await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 }); await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+      const focus = await evalJS(`(()=>{const e=([...document.querySelectorAll('[data-theme-toggle]')].find(e=>e.getBoundingClientRect().width>0)||document.querySelector('[data-theme-toggle]'));e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth),color:s.outlineColor}})()`)
+      if (focus.outline === 'none' || focus.width < 2) throw new Error(`light theme toggle focus indicator missing on ${name}: ${JSON.stringify(focus)}`)
+      result.interaction = { hover, focus }
+    }
+    if (name === 'owner' && width === 1440) {
+      const logoutRect = await evalJS(`(()=>{const menu=document.querySelector('.workspace-menu');if(menu)menu.open=true;const all=[...document.querySelectorAll('.sidebar-logout button,.menu-logout button')];const e=all.find(x=>x.getBoundingClientRect().width>0)||all[0];const r=e?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2,selector:e.matches('.sidebar-logout button')?'.sidebar-logout button':'.menu-logout button'}:null})()`)
+      if (!logoutRect) throw new Error('light theme owner view has no visible logout control')
+      if (logoutRect) {
+        await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:logoutRect.x, y:logoutRect.y }); await wait(80)
+        result.logoutHover = await evalJS(`(()=>{const e=document.querySelector('${logoutRect.selector}'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor==='rgba(0, 0, 0, 0)'?'rgb(255,255,255)':s.backgroundColor));return {color:s.color,background:s.backgroundColor,ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),visible:e.getBoundingClientRect().width>0}})()`)
+        if (!result.logoutHover.visible || result.logoutHover.ratio < 4.5) throw new Error(`light theme logout hover contrast failed: ${JSON.stringify(result.logoutHover)}`)
+        await evalJS(`document.querySelector('.workspace-menu').open=false`)
+      }
+    }
+    if (name === 'owner' && width === 390) {
+      const menuLogout = await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true;const e=document.querySelector('.menu-logout button'),r=e?.getBoundingClientRect();return r&&r.width>0&&r.height>0?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+      if (!menuLogout) throw new Error('light theme phone menu has no visible logout control')
+      await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:menuLogout.x, y:menuLogout.y }); await wait(80)
+      result.mobileLogoutHover = await evalJS(`(()=>{const e=document.querySelector('.menu-logout button'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);let bg=s.backgroundColor;if(bg==='rgba(0, 0, 0, 0)')bg=getComputedStyle(e.parentElement).backgroundColor;const a=l(rgb(s.color)),b=l(rgb(bg));return {visible:e.getBoundingClientRect().width>0,ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:bg,color:s.color}})()`)
+      if (!result.mobileLogoutHover.visible || result.mobileLogoutHover.ratio < 4.5) throw new Error(`light theme phone menu logout hover contrast failed: ${JSON.stringify(result.mobileLogoutHover)}`)
+      await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 }); await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+      result.mobileLogoutFocus = await evalJS(`(()=>{const e=document.querySelector('.menu-logout button');e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth)}})()`)
+      if (result.mobileLogoutFocus.outline === 'none' || result.mobileLogoutFocus.width < 2) throw new Error(`light theme phone menu logout focus indicator missing: ${JSON.stringify(result.mobileLogoutFocus)}`)
+      await evalJS(`document.querySelector('.workspace-menu').open=false`)
+    }
+    await snap(`light-${name}-${width}.png`, false)
+    return result
+  }
+  const portalCookie = (await call('Network.getAllCookies')).cookies.find(item => item.name === '__Host-clipp-portal' && item.domain === 'localhost')
+  if (!portalCookie) throw new Error('light-theme sweep could not preserve the disposable portal session')
+  await call('Network.deleteCookies', { name:portalCookie.name, url:`${base}/` })
+  lightThemeSweep['signed-out-1440'] = await inspectLight('signed-out', 1440, '/')
+  await call('Network.setCookie', { name:portalCookie.name, value:portalCookie.value, url:`${base}/`, path:'/', secure:true, httpOnly:true, sameSite:portalCookie.sameSite })
+  for (const width of [1440, 768, 390, 320]) lightThemeSweep[`owner-${width}`] = await inspectLight('owner', width, '/')
+  await call('Page.navigate', { url:`${base}/` }); await ready(); await wait(180)
+  await evalJS(`document.querySelector('.connect-clipp')?.click()`)
+  const closeState = await evalJS(`(()=>{const d=document.querySelector('.connect-dialog'),e=d?.querySelector('.dialog-close'),r=e?.getBoundingClientRect();return {open:d?.open===true,close:!!e,visible:!!r&&r.width>0&&r.height>0,rect:r?{x:r.x+r.width/2,y:r.y+r.height/2}:null}})()`)
+  if (!closeState.open || !closeState.close || !closeState.visible) throw new Error(`light theme Connect Clipp dialog/close control is missing: ${JSON.stringify(closeState)}`)
+  const closeRect = closeState.rect
+  if (closeRect) {
+    await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:closeRect.x, y:closeRect.y }); await wait(80)
+    lightThemeSweep.dialogCloseHover = await evalJS(`(()=>{const e=document.querySelector('.connect-dialog .dialog-close'),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);const a=l(rgb(s.color)),b=l(rgb(s.backgroundColor));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:s.backgroundColor,color:s.color}})()`)
+    if (lightThemeSweep.dialogCloseHover.ratio < 4.5) throw new Error(`light theme dialog-close hover contrast failed: ${JSON.stringify(lightThemeSweep.dialogCloseHover)}`)
+    await evalJS(`document.querySelector('.connect-dialog .dialog-close').focus()`)
+    lightThemeSweep.dialogCloseFocus = await evalJS(`(()=>{const e=document.querySelector('.connect-dialog .dialog-close'),s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth)}})()`)
+    if (lightThemeSweep.dialogCloseFocus.outline === 'none' || lightThemeSweep.dialogCloseFocus.width < 2) throw new Error(`light theme dialog-close focus indicator missing: ${JSON.stringify(lightThemeSweep.dialogCloseFocus)}`)
+    await evalJS(`document.querySelector('.connect-dialog .dialog-close').click()`)
+  }
+  for (const [name, path] of [['security','/account/security'],['admin','/admin'],['admin-detail','/admin?selected=66000000-0000-4000-8000-000000000001&view=detail'],['plans','/admin/plans']]) {
+    lightThemeSweep[name] = await inspectLight(name, 1440, path)
+    lightThemeSweep[`${name}-phone`] = await inspectLight(name, 390, path)
+  }
+  lightThemeSweep['error-1440'] = await inspectLight('error', 1440, '/auth/deletion/not-a-valid-id')
+  lightThemeSweep['error-phone'] = await inspectLight('error', 390, '/auth/deletion/not-a-valid-id')
+  await evalJS(`localStorage.setItem('clipp-relay-appearance','dark')`)
+  await navigate(1440)
+  lightThemeSweep.restoredDark = await evalJS(`({theme:document.documentElement.dataset.theme,stored:localStorage.getItem('clipp-relay-appearance')})`)
+  if (lightThemeSweep.restoredDark.theme !== 'dark') throw new Error(`theme sweep did not restore dark appearance: ${JSON.stringify(lightThemeSweep.restoredDark)}`)
+  const inspectDarkInteraction = async (name, selector) => {
+    const rect = await evalJS(`(()=>{const r=document.querySelector(${JSON.stringify(selector)})?.getBoundingClientRect();return r&&r.width>0&&r.height>0?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()`)
+    if (!rect) throw new Error(`dark theme ${name} control is missing or hidden`)
+    await call('Input.dispatchMouseEvent', { type:'mouseMoved', x:rect.x, y:rect.y }); await wait(80)
+    const hover = await evalJS(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),s=getComputedStyle(e);const rgb=v=>(v.match(/[\\d.]+/g)||[]).slice(0,3).map(Number);const l=c=>c.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);let bg=s.backgroundColor;if(bg==='rgba(0, 0, 0, 0)')bg=getComputedStyle(e.parentElement).backgroundColor;const a=l(rgb(s.color)),b=l(rgb(bg));return {ratio:+((Math.max(a,b)+.05)/(Math.min(a,b)+.05)).toFixed(2),background:bg,color:s.color}})()`)
+    if (hover.ratio < 4.5) throw new Error(`dark theme ${name} hover contrast failed: ${JSON.stringify(hover)}`)
+    await call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 }); await call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+    const focus = await evalJS(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.focus();const s=getComputedStyle(e);return {visible:e.matches(':focus-visible'),outline:s.outlineStyle,width:parseFloat(s.outlineWidth),color:s.outlineColor}})()`)
+    if (focus.outline === 'none' || focus.width < 2) throw new Error(`dark theme ${name} focus indicator missing: ${JSON.stringify(focus)}`)
+    return {hover,focus}
+  }
+  await evalJS(`document.querySelector('.workspace-menu').open=true`)
+  lightThemeSweep.darkThemeToggle = await inspectDarkInteraction('theme toggle','.workspace-sidebar [data-theme-toggle]')
+  await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true})()`)
+  const darkLogout = await evalJS(`(()=>[...document.querySelectorAll('.sidebar-logout button,.menu-logout button')].find(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0})?.matches('.sidebar-logout button')?'.sidebar-logout button':'.menu-logout button')()`)
+  lightThemeSweep.darkLogout = await inspectDarkInteraction('logout',darkLogout)
+  await call('Emulation.setDeviceMetricsOverride', { width:390, height:844, deviceScaleFactor:1, mobile:true })
+  await call('Page.navigate', { url:`${base}/` }); await ready(); await wait(180)
+  await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=true})()`)
+  lightThemeSweep.darkMobileMenuLogout = await inspectDarkInteraction('phone menu logout','.menu-logout button')
+  await navigate(1440)
+  await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');if(m)m.open=false;document.querySelector('.connect-clipp')?.click()})()`)
+  const darkDialog = await evalJS(`(()=>({open:document.querySelector('.connect-dialog')?.open===true,close:!!document.querySelector('.connect-dialog .dialog-close')}))()`)
+  if (!darkDialog.open || !darkDialog.close) throw new Error(`dark theme Connect Clipp dialog is not open: ${JSON.stringify(darkDialog)}`)
+  lightThemeSweep.darkDialogClose = await inspectDarkInteraction('dialog close','.connect-dialog .dialog-close')
+  await evalJS(`document.querySelector('.connect-dialog .dialog-close').click()`)
   if (process.env.PORTAL_APP_INSPECTOR) {
     const cookie = (await call('Network.getAllCookies')).cookies.find(item => item.name === '__Host-clipp-portal' && item.domain === 'localhost')?.value
     if (!cookie) throw new Error('authenticated browser did not expose its disposable portal session to the app inspector')
     const inspect = async (name, path, authenticated = true) => {
       const out = join(artifacts, 'app-inspector', name)
       await mkdir(out, { recursive: true })
-      const run = spawnSync(process.execPath, [process.env.PORTAL_APP_INSPECTOR, `${base}${path}`, '--out', out, '--widths', '1440,768,390', '--app', '--json'], {
+      const run = spawnSync(process.execPath, [process.env.PORTAL_APP_INSPECTOR, `${base}${path}`, '--out', out, '--widths', '1440,768,390', '--app', '--allow', 'palette-purple', '--json'], {
         encoding: 'utf8',
         env: { ...process.env, TASTE_INSPECT_COOKIE: authenticated ? cookie : '' },
       })
@@ -99,7 +218,7 @@ try {
     const inspectConsent = new URLSearchParams({ response_type: 'code', client_id: 'electron', redirect_uri: 'http://127.0.0.1:34567/oauth/callback', code_challenge_method: 'S256', code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM', state: 'browser-consent-inspector-state-10' })
     await inspect('owner-consent', `/oauth/authorize?${inspectConsent}`)
   }
-  const evidence = { url: base, signedOut, clipboardSuccess, clipboardRefusal, auth: facts, viewports: {}, keyboard: {}, noScript: {}, failures: {} }
+  const evidence = { url: base, signedOut, clipboardSuccess, clipboardRefusal, auth: facts, theme: themeEvidence, lightThemeSweep, viewports: {}, keyboard: {}, noScript: {}, failures: {} }
 
   const electronCallback = 'http://127.0.0.1:34567/oauth/callback'
   const consentState = decision => `browser-consent-${decision}-state-10`
@@ -129,6 +248,7 @@ try {
   evidence.consent.keyboardEvents = await evalJS(`window.__consentKeyboardEvents||[]`).catch(() => [])
   evidence.consent.keyboardCancel = { focused:evidence.consent.keyboardCancelFocused, activated:evidence.consent.keyboardEvents.some(event=>event.type==='click'&&event.target==='cancel'), submitted:evidence.consent.keyboardEvents.some(event=>event.type==='submit') }
   if (!evidence.consent.keyboardCancel.activated || !evidence.consent.keyboardCancel.submitted) throw new Error(`keyboard Cancel did not activate and submit its native form: ${JSON.stringify(evidence.consent.keyboardEvents)}`)
+  await wait(500)
 
   await call('Page.navigate', { url: consentURL(consentState('cancel-no-script')) }); await ready(); await wait(150)
   for (let i = 0; i < 50; i++) {
@@ -198,14 +318,14 @@ try {
   await call('Emulation.setEmulatedMedia', { features: [] })
   await navigate(1440)
   await evalJS(`document.querySelector('.connect-clipp').click()`)
-  evidence.connectionEntry = await evalJS(`({hash:location.hash,section:!!document.querySelector('#connection-setup'),url:document.querySelector('#discovery-url')?.value,setupAfterHistory:!!(document.querySelector('#history-title')?.closest('section').compareDocumentPosition(document.querySelector('#connection-setup'))&Node.DOCUMENT_POSITION_FOLLOWING),instructions:document.querySelector('.setup-instructions summary')?.innerText,steps:document.querySelectorAll('.setup-instructions .setup-steps li').length,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
+  evidence.connectionEntry = await evalJS(`({hash:location.hash,open:document.querySelector('#connect-dialog')?.matches(':modal')===true,section:!!document.querySelector('#connection-setup'),url:document.querySelector('#discovery-url')?.value,setupAfterHistory:!!(document.querySelector('#history-title')?.closest('section').compareDocumentPosition(document.querySelector('#connection-setup'))&Node.DOCUMENT_POSITION_FOLLOWING),instructions:document.querySelector('.setup-instructions summary')?.innerText,steps:document.querySelectorAll('.setup-instructions .setup-steps li').length,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
   await snap('connection-setup-1440.png')
-  if (evidence.connectionEntry.hash !== '#connection-setup' || !evidence.connectionEntry.setupAfterHistory || evidence.connectionEntry.url !== `${base}/v1/relay` || evidence.connectionEntry.steps !== 3 || evidence.connectionEntry.overflow) throw new Error(`Connect Clipp did not reach setup beside history: ${JSON.stringify(evidence.connectionEntry)}`)
+  if (!evidence.connectionEntry.open || !evidence.connectionEntry.setupAfterHistory || evidence.connectionEntry.url !== `${base}/v1/relay` || evidence.connectionEntry.steps !== 3 || evidence.connectionEntry.overflow) throw new Error(`Connect Clipp did not open the contextual setup beside history: ${JSON.stringify(evidence.connectionEntry)}`)
   await navigate(390)
   await evalJS(`document.querySelector('.connect-clipp').click()`)
-  evidence.connectionEntry.phone = await evalJS(`({hash:location.hash,visible:document.querySelector('#discovery-url').getBoundingClientRect().width>0,copyVisible:(()=>{const b=document.querySelector('[data-copy]').getBoundingClientRect();return b.width>0&&b.height>=44})(),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
+  evidence.connectionEntry.phone = await evalJS(`({open:document.querySelector('#connect-dialog')?.matches(':modal')===true,visible:document.querySelector('#discovery-url').getBoundingClientRect().width>0,copyVisible:(()=>{const b=document.querySelector('[data-copy]').getBoundingClientRect();return b.width>0&&b.height>=44})(),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
   await snap('connection-setup-390.png')
-  if (evidence.connectionEntry.phone.hash !== '#connection-setup' || !evidence.connectionEntry.phone.visible || !evidence.connectionEntry.phone.copyVisible || evidence.connectionEntry.phone.overflow) throw new Error(`phone connection setup is unreachable: ${JSON.stringify(evidence.connectionEntry.phone)}`)
+  if (!evidence.connectionEntry.phone.open || !evidence.connectionEntry.phone.visible || !evidence.connectionEntry.phone.copyVisible || evidence.connectionEntry.phone.overflow) throw new Error(`phone connection setup is unreachable: ${JSON.stringify(evidence.connectionEntry.phone)}`)
   await call('Emulation.setDeviceMetricsOverride', { width:390, height:844, deviceScaleFactor:1, mobile:true })
   await call('Page.navigate', { url:`${base}/?history=all&history_rows=14` }); await ready(); await wait(250)
   evidence.fullHistoryPhone = await evalJS(`({width:innerWidth,height:innerHeight,scrollWidth:document.documentElement.scrollWidth,rows:document.querySelectorAll('.history-table tbody tr').length,currentVisible:!![...document.querySelectorAll('.history-table tr')].find(row=>row.innerText.includes('current week')),chartVisible:getComputedStyle(document.querySelector('.history-chart-scroll')).display!=='none',dates:[...document.querySelectorAll('.history-table tbody th time')].map(x=>x.dateTime)})`)
@@ -222,13 +342,20 @@ try {
   await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
   evidence.keyboard.escape = await evalJS(`({open:document.querySelector('.workspace-menu').open,focus:document.activeElement.matches('.workspace-menu summary')})`)
   if (!evidence.keyboard.open.open || evidence.keyboard.escape.open || !evidence.keyboard.escape.focus) throw new Error(`keyboard menu acceptance failed: ${JSON.stringify(evidence.keyboard)}`)
+  evidence.menuLayout = {};
+  for (const width of [320, 390, 768]) {
+    await navigate(width)
+    const layout = await evalJS(`(()=>{const m=document.querySelector('.workspace-menu');m.open=true;const nav=m.querySelector('nav');const items=[...nav.children].filter(e=>e.getBoundingClientRect().height>0).map(e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom}});const b=nav.querySelector('[data-theme-toggle]');return {items,visible:b.getBoundingClientRect().width>0}})()`)
+    if (!layout.visible || layout.items.some((r,i)=>r.x<0||r.right>width||(i>0&&r.y<layout.items[i-1].bottom-1))) throw new Error(`menu is not a single visible column at ${width}px: ${JSON.stringify(layout)}`)
+    evidence.menuLayout[width] = layout
+  }
   evidence.keyboard.logout = await evalJS(`({action:document.querySelector('.workspace-menu form')?.getAttribute('action'),method:document.querySelector('.workspace-menu form')?.getAttribute('method'),csrf:!!document.querySelector('.workspace-menu form input[name="csrf"]'),label:document.querySelector('.workspace-menu form button')?.textContent.trim()})`)
   if (evidence.keyboard.logout.action !== '/auth/logout' || evidence.keyboard.logout.method !== 'post' || !evidence.keyboard.logout.csrf || evidence.keyboard.logout.label !== 'Log out') throw new Error(`menu logout form failed: ${JSON.stringify(evidence.keyboard.logout)}`)
   // Simulate 150% browser zoom on a 390px screen as a 260 CSS-pixel viewport
   // rendered at 1.5x. The override is disposable and does not touch Chrome prefs.
   await call('Emulation.setDeviceMetricsOverride', { width:260, height:1000, deviceScaleFactor:1.5, mobile:false })
   await call('Page.navigate', { url:`${base}/` }); await ready(); await wait(250)
-  evidence.enlargedText = await evalJS(`({devicePixelRatio,viewport:innerWidth,scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth,account:document.body.innerText.includes('Your account')})`)
+  evidence.enlargedText = await evalJS(`({devicePixelRatio,viewport:innerWidth,scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth,account:document.body.innerText.includes('Your account'),bodyMin:getComputedStyle(document.body).minWidth,bodyWidth:document.body.getBoundingClientRect().width,workspaceWidth:document.querySelector('.workspace-main').getBoundingClientRect().width,pageWidth:document.querySelector('main.page').getBoundingClientRect().width,cardWidth:document.querySelector('.quota-card').getBoundingClientRect().width,brandSuffix:getComputedStyle(document.querySelector('.mobile-brand .brand-product')).display,header:document.querySelector('.workspace-bar').getBoundingClientRect().width})`)
   await snap('account-enlarged-text.png')
   if (evidence.enlargedText.devicePixelRatio !== 1.5 || evidence.enlargedText.viewport !== 260 || evidence.enlargedText.scroll > evidence.enlargedText.client || !evidence.enlargedText.account) throw new Error(`150% zoom reflow failed: ${JSON.stringify(evidence.enlargedText)}`)
   await call('Emulation.setScriptExecutionDisabled', { value: true }); await call('Page.navigate', { url: `${base}/` }); await wait(700)
@@ -255,7 +382,7 @@ try {
   await adminNavigate(1440)
   evidence.admin.desktop = await evalJS(`({heading:document.querySelector('h1')?.innerText,pendingFinding:document.querySelector('.admin-finding')?.innerText,accounts:document.querySelector('.accounts-pane')?.innerText.includes('acceptance-01@example.test'),nextAccounts:[...document.querySelectorAll('a')].some(a=>a.innerText.includes('Next accounts')),quotaPlans:document.querySelector('#quota-plans')?.getAttribute('href')==='/admin/plans',workspace:document.body.classList.contains('workspace-page'),relayHost:document.querySelector('.workspace-relay')?.innerText,legacyPlans:!!document.querySelector('.plans-pane'),footer:!!document.querySelector('.site-footer'),scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth})`)
   await snap('admin-list-1440.png', false)
-  if (!evidence.admin.desktop.accounts || !evidence.admin.desktop.nextAccounts || !evidence.admin.desktop.quotaPlans || !evidence.admin.desktop.workspace || evidence.admin.desktop.relayHost !== 'localhost:18443' || evidence.admin.desktop.legacyPlans || evidence.admin.desktop.footer || !evidence.admin.desktop.pendingFinding.includes('service-wide') || evidence.admin.desktop.scroll > evidence.admin.desktop.client) throw new Error(`desktop admin list acceptance failed: ${JSON.stringify(evidence.admin.desktop)}`)
+  if (!evidence.admin.desktop.accounts || !evidence.admin.desktop.nextAccounts || !evidence.admin.desktop.quotaPlans || !evidence.admin.desktop.workspace || evidence.admin.desktop.relayHost !== 'localhost:18443' || evidence.admin.desktop.legacyPlans || evidence.admin.desktop.footer || !evidence.admin.desktop.pendingFinding.includes('across the service') || evidence.admin.desktop.scroll > evidence.admin.desktop.client) throw new Error(`desktop admin list acceptance failed: ${JSON.stringify(evidence.admin.desktop)}`)
   await adminNavigate(1440, '/admin#quota-plans')
   evidence.admin.legacyPlanAnchor = await evalJS(`({hash:location.hash,link:document.querySelector('#quota-plans')?.getAttribute('href'),visible:document.querySelector('#quota-plans')?.getBoundingClientRect().top<innerHeight,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth})`)
   await snap('admin-legacy-quota-anchor-1440.png', false)
@@ -406,7 +533,7 @@ try {
   responses.length = 0
   requests.length = 0
   await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await call('Input.dispatchKeyEvent',{type:'char',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await call('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await wait(500);await ready();await wait(150)
-  evidence.adminMutations.overrideSubmission = await evalJS(`(()=>{const summary=document.querySelector('.account-editor')?.innerText||'';return {weekly:document.querySelector('#quota-override [name=weekly_bytes_override]')?.value,unit:document.querySelector('#quota-override [name=weekly_bytes_override_unit]')?.value,sessions:document.querySelector('#quota-override [name=sessions_override]')?.value,accountSummary:summary,effective:summary.includes('12.06 KiB per week · 0 Relay Sessions')}})()`); evidence.adminMutations.overrideSubmission.requests=requests.filter(x=>x.url?.includes(`/admin/accounts/${pendingAccountID}`)||x.redirectURL?.includes(`/admin/accounts/${pendingAccountID}`)); evidence.adminMutations.overrideSubmission.responses=responses.filter(x=>x.url.includes(`/admin/accounts/${pendingAccountID}`)); evidence.adminMutations.overrideSubmission.response=evidence.adminMutations.overrideSubmission.requests.filter(x=>x.redirectURL?.includes(`/admin/accounts/${pendingAccountID}`)&&x.redirectStatus===303).at(-1)?.redirectStatus
+  evidence.adminMutations.overrideSubmission = await evalJS(`(()=>{const summary=document.querySelector('.account-editor')?.innerText||'';return {weekly:document.querySelector('#quota-override [name=weekly_bytes_override]')?.value,unit:document.querySelector('#quota-override [name=weekly_bytes_override_unit]')?.value,sessions:document.querySelector('#quota-override [name=sessions_override]')?.value,accountSummary:summary,effective:summary.includes('Effective weekly allowance\\n12.06 KiB')&&summary.includes('Effective Relay Session limit\\n0')}})()`); evidence.adminMutations.overrideSubmission.requests=requests.filter(x=>x.url?.includes(`/admin/accounts/${pendingAccountID}`)||x.redirectURL?.includes(`/admin/accounts/${pendingAccountID}`)); evidence.adminMutations.overrideSubmission.responses=responses.filter(x=>x.url.includes(`/admin/accounts/${pendingAccountID}`)); evidence.adminMutations.overrideSubmission.response=evidence.adminMutations.overrideSubmission.requests.filter(x=>x.redirectURL?.includes(`/admin/accounts/${pendingAccountID}`)&&x.redirectStatus===303).at(-1)?.redirectStatus
   await snap('admin-quota-exact-zero-390.png', false)
   if (evidence.adminMutations.overrideSubmission.response !== 303 || evidence.adminMutations.overrideSubmission.weekly !== '12345' || evidence.adminMutations.overrideSubmission.unit !== 'B' || evidence.adminMutations.overrideSubmission.sessions !== '0' || !evidence.adminMutations.overrideSubmission.effective) throw new Error(`exact byte and explicit-zero override did not persist via keyboard: ${JSON.stringify(evidence.adminMutations.overrideSubmission)}`)
   await call('Emulation.setScriptExecutionDisabled', { value: true })
@@ -416,7 +543,7 @@ try {
   responses.length = 0
   requests.length = 0
   await clickNode(clearButton.nodeId); await wait(500); await ready(); await wait(150)
-  evidence.adminMutations.overrideClear = { response:requests.filter(x=>x.redirectURL?.includes(`/admin/accounts/${pendingAccountID}`)&&x.redirectStatus===303).at(-1)?.redirectStatus, weekly:await evalJS(`document.querySelector('#quota-override [name=weekly_bytes_override]')?.value`), sessions:await evalJS(`document.querySelector('#quota-override [name=sessions_override]')?.value`), effective:await evalJS(`document.querySelector('.account-editor')?.innerText.includes('1 MiB per week · 3 Relay Sessions')`) }
+  evidence.adminMutations.overrideClear = { response:requests.filter(x=>x.redirectURL?.includes(`/admin/accounts/${pendingAccountID}`)&&x.redirectStatus===303).at(-1)?.redirectStatus, weekly:await evalJS(`document.querySelector('#quota-override [name=weekly_bytes_override]')?.value`), sessions:await evalJS(`document.querySelector('#quota-override [name=sessions_override]')?.value`), effective:await evalJS(`(()=>{const facts=[...document.querySelectorAll('.review-facts > div')].map(node=>node.innerText);return facts.some(text=>text.includes('Effective weekly allowance')&&text.includes('1 MiB'))&&facts.some(text=>text.includes('Effective Relay Session limit')&&text.includes('3'))})()`) }
   await snap('admin-quota-cleared-no-script-390.png', false)
   if (evidence.adminMutations.overrideClear.response !== 303 || evidence.adminMutations.overrideClear.weekly !== '' || evidence.adminMutations.overrideClear.sessions !== '' || !evidence.adminMutations.overrideClear.effective) throw new Error(`blank override fields did not clear back to assigned plan: ${JSON.stringify(evidence.adminMutations.overrideClear)}`)
   await call('Emulation.setScriptExecutionDisabled', { value: false })
@@ -539,24 +666,29 @@ try {
   if (!(await evalJS(`document.body.innerText.includes('Your account')`))) throw new Error('fixture did not restore owner session after portal-only logout')
   for (const width of [1440, 768, 390, 320]) {
     await adminNavigate(width, '/account/security')
-    const result = await evalJS(`({heading:document.querySelector('h1')?.innerText,account:document.body.innerText.includes('workspace-a@example.test'),grantCount:document.body.innerText.includes('Active Login Grants:'),review:document.body.innerText.includes('revoke every Login Grant'),checkbox:!!document.querySelector('input[name="confirm"][required]'),deletion:!!document.querySelector('form[action="/auth/delete"]'),deleteConfirmation:!!document.querySelector('input[name="confirm_email"][required][pattern]'),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth})`)
-    evidence.security.viewports[width] = result
     await snap(`security-${width}.png`, false)
-    if (!result.account || !result.grantCount || !result.review || !result.checkbox || !result.deletion || !result.deleteConfirmation || result.overflow) throw new Error(`security view ${width}px acceptance failed: ${JSON.stringify(result)}`)
+    await evalJS(`document.querySelector('.security-review summary').click()`)
+    const result = await evalJS(`({heading:document.querySelector('h1')?.innerText,account:document.body.innerText.includes('workspace-a@example.test'),grantCount:document.body.innerText.includes('Active Login Grants:'),portalScope:document.body.innerText.includes('Only this browser')&&document.body.innerText.includes('Your Clipp Login Grants, Relay Access Tokens and live Relay Sessions remain active'),revokeScope:document.body.innerText.includes('All access for this Relay Account')&&document.body.innerText.includes('end all Portal Sessions')&&document.body.innerText.includes('Your account status and quota assignments do not change'),review:document.body.innerText.includes('revoke every Login Grant'),checkbox:!!document.querySelector('input[name="confirm"][required]'),deletion:!!document.querySelector('form[action="/auth/delete"]'),deletionScope:document.body.innerText.includes('Permanent account removal')&&document.querySelector('.danger-details.security-action')?.textContent.includes('Relay Account Deletion is irreversible')&&document.querySelector('.danger-details.security-action')?.textContent.includes('Retained Quota Usage for the current week may be imported'),deleteConfirmation:!!document.querySelector('input[name="confirm_email"][required][pattern]'),overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,clientWidth:document.documentElement.clientWidth})`)
+    evidence.security.viewports[width] = result
+    if (!result.account || !result.grantCount || !result.portalScope || !result.revokeScope || !result.review || !result.checkbox || !result.deletion || !result.deletionScope || !result.deleteConfirmation || result.overflow) throw new Error(`security view ${width}px acceptance failed: ${JSON.stringify(result)}`)
   }
   await adminNavigate(1440, '/account/security')
   await call('Emulation.setScriptExecutionDisabled', { value: true })
   let securityDOM = await call('DOM.getDocument', { depth: 0 })
+  const revokeSummary = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: '.security-review summary' })
+  await clickNode(revokeSummary.nodeId)
+  securityDOM = await call('DOM.getDocument', { depth: 0 })
   const unchecked = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'input[name="confirm"]' })
   const revokeButton = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'form[action="/auth/revoke"] button' })
   const uncheckedState = await call('DOM.describeNode', { nodeId: unchecked.nodeId })
-  evidence.security.noScript = { reviewVisible: (await call('DOM.getOuterHTML', { nodeId: securityDOM.root.nodeId })).outerHTML.includes('I understand this signs workspace-a@example.test out everywhere.'), required: uncheckedState.node.attributes.includes('required') }
+  const noScriptHTML = (await call('DOM.getOuterHTML', { nodeId: securityDOM.root.nodeId })).outerHTML
+  evidence.security.noScript = { reviewVisible: noScriptHTML.includes('I understand this signs workspace-a@example.test out everywhere.'), required: uncheckedState.node.attributes.includes('required'), deletionRecovery: noScriptHTML.includes('Signing in does not resubmit the deletion.') && noScriptHTML.includes('Retained Quota Usage for the current week may be imported') }
   await call('DOM.focus', { nodeId: revokeButton.nodeId })
   await call('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
   await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
   await wait(150)
   evidence.security.noScript.uncheckedPrevented = (await evalJS(`location.pathname === '/account/security'`))
-  if (!evidence.security.noScript.reviewVisible || !evidence.security.noScript.required || !evidence.security.noScript.uncheckedPrevented) throw new Error(`JavaScript-disabled security review failed: ${JSON.stringify(evidence.security.noScript)}`)
+  if (!evidence.security.noScript.reviewVisible || !evidence.security.noScript.required || !evidence.security.noScript.deletionRecovery || !evidence.security.noScript.uncheckedPrevented) throw new Error(`JavaScript-disabled security review failed: ${JSON.stringify(evidence.security.noScript)}`)
   securityDOM = await call('DOM.getDocument', { depth: 0 })
   const checked = await call('DOM.querySelector', { nodeId: securityDOM.root.nodeId, selector: 'input[name="confirm"]' })
   await clickNode(checked.nodeId)

@@ -133,7 +133,7 @@ func (s *Server) admitAccountDeletion(r *http.Request) accountDeletionOutcome {
 			}
 			reason := s.accountChanged(AccountChange{
 				AccountID: id, WeeklyBytes: admission.WeeklyBytes,
-				SessionLimit: admission.Sessions, CloseAll: true,
+				SessionLimit: admission.Sessions, CloseAll: true, PolicyUncertain: operationErr != nil,
 			})
 			if reason == "" {
 				reason = "account_access_changed"

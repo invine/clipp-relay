@@ -268,7 +268,7 @@ func TestProductionProtectionClosesAllOnSessionCapReduction(t *testing.T) {
 	t.Run("observed", func(t *testing.T) { testProtectedSessionCap(t) })
 }
 
-func TestProductionProtectionReadsCurrentCapAfterAuthReturns(t *testing.T) {
+func TestProductionProtectionDiscardsCapCapturedBeforePolicyEdit(t *testing.T) {
 	p := protectedPortalFixture(t)
 	p.mutate(t, "override", "2", url.Values{"sessions_override": {"5"}})
 	clients := make([]host.Host, 4)
@@ -280,6 +280,57 @@ func TestProductionProtectionReadsCurrentCapAfterAuthReturns(t *testing.T) {
 	}
 	if got := p.relay.AccountSessions(p.account); got != 3 {
 		t.Fatalf("initial sessions=%d, want 3", got)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	p.quota.SetEligibilityReadBoundaryForTest(func(ctx context.Context) error {
+		once.Do(func() { close(entered); <-release })
+		return ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := make(chan string, 1)
+	go func() {
+		response, err := protectedAuthenticate(ctx, clients[3], p)
+		result <- fmt.Sprintf("%s %v", response, err)
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("authentication did not reach pending Quota assessment")
+	}
+	// The read has captured the cap-five result. The edit applies cap three
+	// locally before Quota receives that older result.
+	p.mutate(t, "override", "3", url.Values{"sessions_override": {"3"}})
+	close(release)
+	select {
+	case response := <-result:
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("stale assessment response=%s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("pending authentication did not finish")
+	}
+	if got := p.relay.AccountSessions(p.account); got != 3 {
+		t.Fatalf("sessions after current cap assessment=%d, want 3", got)
+	}
+	for i := 0; i < 3; i++ {
+		if len(clients[i].Network().ConnsToPeer(p.relay.Host.ID())) != 1 {
+			t.Fatalf("existing session %d lost permission after stale assessment", i)
+		}
+	}
+	requireProtectedAuthentication(t, clients[3], p, "session_limit_exceeded")
+}
+
+func TestProductionProtectionReadsCurrentCapAfterAuthReturns(t *testing.T) {
+	p := protectedPortalFixture(t)
+	p.mutate(t, "override", "2", url.Values{"sessions_override": {"5"}})
+	clients := make([]host.Host, 4)
+	for i := range clients {
+		clients[i] = protectedClient(t, p)
+	}
+	for i := 0; i < 3; i++ {
+		requireProtectedAuthentication(t, clients[i], p, `"ok":true`)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -297,22 +348,55 @@ func TestProductionProtectionReadsCurrentCapAfterAuthReturns(t *testing.T) {
 	select {
 	case <-entered:
 	case <-ctx.Done():
-		t.Fatal("authentication did not reach pending Quota assessment")
+		t.Fatal("authentication did not reach pending Quota read")
 	}
-	// The pending assessment is ordered after Auth has already returned its
-	// credential, whose SessionLimit still reflects the old policy.
 	p.mutate(t, "override", "3", url.Values{"sessions_override": {"3"}})
 	close(release)
 	select {
 	case response := <-result:
 		if !strings.Contains(response, `"code":"session_limit_exceeded"`) {
-			t.Fatalf("current database cap response=%s", response)
+			t.Fatalf("fresh assessment response=%s", response)
 		}
 	case <-ctx.Done():
 		t.Fatal("pending authentication did not finish")
 	}
-	if got := p.relay.AccountSessions(p.account); got != 3 {
-		t.Fatalf("sessions after current cap assessment=%d, want 3", got)
+}
+
+func TestFirstQuotaAssessmentDiscardsReadCapturedBeforePolicyApplication(t *testing.T) {
+	p := protectedPortalFixture(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	p.quota.SetEligibilityReadBoundaryForTest(func(ctx context.Context) error {
+		once.Do(func() { close(entered); <-release })
+		return ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := p.quota.Eligibility(ctx, p.account)
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("first assessment did not reach the captured persistence result")
+	}
+	// This is the account's first local Quota assessment. Applying a committed
+	// cap must still fence the captured database result without an account entry.
+	p.mutate(t, "override", "2", url.Values{"sessions_override": {"3"}})
+	close(release)
+	select {
+	case err := <-result:
+		if err != quota.ErrTemporary {
+			t.Fatalf("stale first assessment=%v, want temporary refusal", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("first assessment did not finish")
+	}
+	fresh, err := p.quota.Eligibility(ctx, p.account)
+	if err != nil || fresh.SessionLimit != 3 {
+		t.Fatalf("fresh assessment=%+v err=%v", fresh, err)
 	}
 }
 

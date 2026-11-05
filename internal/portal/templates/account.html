@@ -2,24 +2,25 @@
 {{template "head" "Clipp Relay — Your account"}}
 <div class="portal-workspace">
 <aside class="workspace-sidebar" aria-label="Portal navigation">
-  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="brand" href="/"><img class="brand-mark" src="/assets/clipp-icon.png" alt="">clipp <span class="brand-product">relay</span></a>
   <nav class="workspace-nav" aria-label="Portal navigation">
-    <a href="/" aria-current="page">Your account</a>
-    {{if .SignedIn}}<a href="/account/security">Access &amp; security</a>{{end}}
-    {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
+    <a href="/" aria-current="page">{{template "nav-icon-account" .}}Your account</a>
+    {{if .SignedIn}}<a href="/account/security">{{template "nav-icon-security" .}}Access &amp; security</a>{{end}}
+    {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">{{template "nav-icon-admin" .}}Account reviews</a><a href="/admin/plans">{{template "nav-icon-plans" .}}Quota plans</a>{{end}}
   </nav>
-  {{if .SignedIn}}<div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form></div>{{end}}
+  {{if .SignedIn}}<div class="sidebar-footer">{{template "theme-control"}}<div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Log out</button></form></div>{{else}}<div class="sidebar-footer">{{template "theme-control"}}</div>{{end}}
 </aside>
 <div class="workspace-main">
 <header class="workspace-bar">
-  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="mobile-brand brand" href="/"><img class="brand-mark" src="/assets/clipp-icon.png" alt="">clipp <span class="brand-product">relay</span></a>
   <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> {{if .SignedIn}}Your account{{else}}Welcome{{end}}</span>
   {{if .SignedIn}}<span class="bar-account">{{.Email}}</span>{{end}}
   <details class="workspace-menu"><summary aria-label="Open or close portal navigation"><span class="menu-icon" aria-hidden="true"></span><span>Menu</span></summary><nav aria-label="Portal navigation">
-    <a href="/" aria-current="page">Your account</a>
-    {{if .SignedIn}}<a href="/account/security">Access &amp; security</a>{{end}}
-    {{if .Admin}}<a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
-    {{if .SignedIn}}<form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form>{{end}}
+    <a href="/" aria-current="page">{{template "nav-icon-account" .}}Your account</a>
+    {{if .SignedIn}}<a href="/account/security">{{template "nav-icon-security" .}}Access &amp; security</a>{{end}}
+    {{if .Admin}}<a href="/admin">{{template "nav-icon-admin" .}}Account reviews</a><a href="/admin/plans">{{template "nav-icon-plans" .}}Quota plans</a>{{end}}
+    {{if .SignedIn}}<form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10"/></svg>Log out</button></form>{{end}}
+    {{template "theme-control"}}
   </nav></details>
 </header>
 <main class="page">
@@ -70,12 +71,6 @@
     <section class="card quota-card" aria-labelledby="quota-title">
 <h2 id="quota-title">Your allowance</h2>
       <div class="quota-summary">
-<svg class="quota-ring" viewBox="0 0 120 120" role="img" aria-label="Recorded Relay Usage {{bytes .Recorded}} of {{bytes .WeeklyBytes}}">
-<circle class="ring-track" cx="60" cy="60" r="49"/>
-<circle class="ring-value" cx="60" cy="60" r="49" pathLength="100" stroke-dasharray="{{.Percent}} 100"/>
-<text class="ring-percent" x="60" y="61">{{.Percent}}%</text>
-<text class="ring-label" x="60" y="78">recorded</text>
-</svg>
 <div>
 <p class="metric-caption">Remaining this week</p>
 <p class="metric-value" title="{{.Remaining}} bytes">{{bytes .Remaining}}
@@ -83,6 +78,7 @@
 <p class="muted">of <strong title="{{.WeeklyBytes}} bytes">{{bytes .WeeklyBytes}}</strong> allowance</p>
 </div>
 </div>
+      <svg class="quota-progress" viewBox="0 0 100 2" preserveAspectRatio="none" role="img" aria-label="Recorded Relay Usage {{bytes .Recorded}} of {{bytes .WeeklyBytes}}"><rect class="quota-progress-track" width="100" height="2" rx="1"/><rect class="quota-progress-value" width="{{.Percent}}" height="2" rx="1"/></svg>
       <p class="quota-total">Recorded Relay Usage: {{bytes .Recorded}}
 </p>
 <p class="usage-state">{{.UsageState}}
@@ -119,8 +115,6 @@
 </tbody>
 </table>
 </div>
-<p class="muted fine-print">Concurrent Relay Sessions: {{.Sessions}}
-</p>
 <p class="muted fine-print">Relay Sessions are live relay connections. Login Grants authorize Clipp apps. Live counts are sampled separately from quota history.</p>
 </section>
   </div>
@@ -193,8 +187,6 @@
 </main>
 </div>
 </div>
-<script src="/assets/portal.js" defer>
-</script>
 {{template "foot"}}
 {{end}}
 

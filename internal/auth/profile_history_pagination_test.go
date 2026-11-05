@@ -11,6 +11,7 @@ import (
 
 	"clipp-relay/internal/auth"
 	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/quota"
 )
 
 // historyLimitReadViews lets the authenticated portal exercise snapshots with
@@ -46,6 +47,11 @@ func TestOwnerHistoryProgressiveDisclosure(t *testing.T) {
 	reads := &historyLimitReadViews{ReadViews: deps.ReadViews, limit: 53}
 	deps.ReadViews = reads
 	s := auth.New(deps, c, m, provider.endpoints())
+	accounting := quota.New(nil)
+	t.Cleanup(accounting.Close)
+	if err := s.SetDeletionAccountingForTest(accounting); err != nil {
+		t.Fatal(err)
+	}
 	subject := "history-pages-" + time.Now().UTC().Format("20060102150405.000000000")
 	cookie := loginAs(t, s, provider, subject, subject+"@example.test", "")
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',recovery_review_hold=false,plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, subject); err != nil {

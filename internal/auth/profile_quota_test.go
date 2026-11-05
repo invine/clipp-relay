@@ -98,8 +98,9 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 		t.Fatalf("terminated grant count: %d %s", withoutGrant.Code, withoutGrant.Body.String())
 	}
 	live, grants := 2, 3
+	s.SetLiveSessionCountsForTest(liveCountFixture{count: live, known: true})
 	s.SetCapacitySampler(func(context.Context, string) (auth.CapacitySample, error) {
-		return auth.CapacitySample{LiveSessions: &live, ActiveLoginGrants: &grants}, nil
+		return auth.CapacitySample{ActiveLoginGrants: &grants}, nil
 	})
 	withCounts := portalRequest(s, "GET", "/", cookie, nil, "")
 	if withCounts.Code != 200 || !strings.Contains(withCounts.Body.String(), "2 of 5") || !strings.Contains(withCounts.Body.String(), "3 of 20") {
@@ -125,3 +126,10 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 		t.Fatalf("zero allowance: %d %s", zero.Code, zero.Body.String())
 	}
 }
+
+type liveCountFixture struct {
+	count int
+	known bool
+}
+
+func (f liveCountFixture) LiveSessionCount(string) (int, bool) { return f.count, f.known }

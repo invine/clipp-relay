@@ -1,10 +1,12 @@
 package relay
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/metrics"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
@@ -63,3 +65,33 @@ func (s *Server) CloseAccountWithReason(account, reason string) {
 
 // CloseAccount invalidates all live sessions after an account policy change.
 func (s *Server) CloseAccount(account string) { s.CloseAccountWithReason(account, "policy_changed") }
+
+// ReconcileAccountSessions orders a confirmed Quota policy update against final
+// authentication admission under the shared registry lock. The decision callback
+// performs only in-memory Quota work; connection closure is queued after logical
+// permission is removed.
+func (s *Server) ReconcileAccountSessions(account string, decide func(int) (bool, string)) error {
+	if account == "" || decide == nil {
+		return errors.New("invalid account session reconciliation")
+	}
+	m := s.sessionManager
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	retire, reason := decide(len(m.byAccount[account]))
+	if retire {
+		if reason == "" {
+			reason = "policy_changed"
+		}
+		m.committingAdmission = true
+		for session := range m.byAccount[account] {
+			m.endSessionLocked(session, reason)
+			if m.deferredAccountCloses[account] == nil {
+				m.deferredAccountCloses[account] = map[network.Conn]struct{}{}
+			}
+			m.deferredAccountCloses[account][session.conn] = struct{}{}
+		}
+		m.committingAdmission = false
+	}
+	m.publishAccountCountLocked(account)
+	return nil
+}

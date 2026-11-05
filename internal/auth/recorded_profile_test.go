@@ -34,10 +34,17 @@ func TestObservedOwnerAndAdminShowConfirmedUsageAndHistory(t *testing.T) {
 		}
 		out := portalRequest(p.auth, "GET", view.path, cookie, nil, "")
 		body := out.Body.String()
-		for _, want := range []string{"Recorded Relay Usage", "12.06 KiB", "confirmation lag", "HOP and STOP", "current week + 52", "53.05 KiB", "Remaining allowance: 0 bytes"} {
+		for _, want := range []string{"Recorded Relay Usage", "12.06 KiB", "confirmation lag", "HOP and STOP", "current week + 52", "53.05 KiB"} {
 			if out.Code != 200 || !strings.Contains(body, want) {
 				t.Fatalf("%s missing %q: %d %s", view.path, want, out.Code, body)
 			}
+		}
+		remaining := "Remaining allowance: 0 bytes"
+		if view.admin {
+			remaining = "Remaining allowance</strong><span>0 bytes"
+		}
+		if !strings.Contains(body, remaining) {
+			t.Fatalf("%s missing zero remaining allowance", view.path)
 		}
 		if strings.Contains(body, "21.82 KiB") {
 			t.Fatal("pending observations presented as recorded")

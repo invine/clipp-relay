@@ -262,15 +262,16 @@ type adminAccountRow struct {
 	EffectiveSessions                                                    int
 	PlanArchived                                                         bool
 	Revision                                                             int64
-	Usage                                                                *accountUsageQuery
+	Usage                                                                *portal.AdminQuotaView
 	ReviewHref                                                           template.URL
 }
 type adminPlanRow struct {
-	ID, Name string
-	Bytes    int64
-	Sessions int
-	Revision int64
-	Archived bool
+	ID, Name         string
+	Bytes            int64
+	Sessions         int
+	Revision         int64
+	Archived         bool
+	AssignedAccounts int64
 }
 
 type adminAccessActionView struct {
@@ -539,7 +540,7 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 		data.Accounts = append(data.Accounts, account)
 	}
 	if data.Selected != "" {
-		selected, readErr := s.adminAccountUsage(r.Context(), data.Selected)
+		selectedUsage, readErr := portal.ReadAdminQuotaView(r.Context(), s.readViews, data.Selected)
 		err = readErr
 		if errors.Is(err, persistence.ErrNotFound) {
 			fail(w, 404)
@@ -549,6 +550,8 @@ func (s *Server) adminHome(w http.ResponseWriter, r *http.Request) {
 			fail(w, 503)
 			return
 		}
+		account := selectedUsage.Account
+		selected := adminAccountRow{ID: account.ID, Email: account.Email, Status: account.Status, PlanID: account.PlanID, PlanName: account.PlanName, WeeklyOverride: account.WeeklyOverride, SessionOverride: account.SessionOverride, Revision: account.Revision, RecoveryHeld: account.RecoveryHeld, PlanArchived: account.PlanArchived, EffectiveBytes: account.EffectiveBytes, EffectiveSessions: account.EffectiveSessions, Usage: &selectedUsage}
 		data.SelectedAccount = &selected
 		data.AccessActions = adminAccessActionsFor(selected)
 	}
@@ -611,7 +614,7 @@ func (s *Server) adminPlanLibrary(w http.ResponseWriter, r *http.Request) {
 			portal.Unavailable(w, "/admin/plans", "Check quota plans")
 			return
 		}
-		data.Created = &adminPlanRow{ID: created.ID, Name: created.Name, Bytes: created.Bytes, Sessions: created.Sessions, Revision: created.Revision, Archived: created.Archived}
+		data.Created = &adminPlanRow{ID: created.ID, Name: created.Name, Bytes: created.Bytes, Sessions: created.Sessions, Revision: created.Revision, Archived: created.Archived, AssignedAccounts: created.AssignedAccounts}
 	}
 	for _, plan := range plans {
 		if plan.ID == createdID {
@@ -621,7 +624,7 @@ func (s *Server) adminPlanLibrary(w http.ResponseWriter, r *http.Request) {
 			data.Next = data.Plans[len(data.Plans)-1].ID
 			break
 		}
-		data.Plans = append(data.Plans, adminPlanRow{ID: plan.ID, Name: plan.Name, Bytes: plan.Bytes, Sessions: plan.Sessions, Revision: plan.Revision, Archived: plan.Archived})
+		data.Plans = append(data.Plans, adminPlanRow{ID: plan.ID, Name: plan.Name, Bytes: plan.Bytes, Sessions: plan.Sessions, Revision: plan.Revision, Archived: plan.Archived, AssignedAccounts: plan.AssignedAccounts})
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	portal.Render(w, http.StatusOK, "plan-library", data)

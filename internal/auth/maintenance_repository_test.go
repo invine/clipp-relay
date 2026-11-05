@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/quota"
 )
 
 type controlledMaintenance struct {
@@ -106,13 +107,18 @@ func TestCleanupPassRotatesFairClassesAndCarriesCursors(t *testing.T) {
 	}
 }
 
-func TestCleanupSignalsAndPepperCoverageKeepPolicyInAuth(t *testing.T) {
+func TestCleanupSignalsDelegateRetainedUsagePepperCoverageToQuota(t *testing.T) {
 	repo := &controlledMaintenance{
 		health:   persistence.CleanupHealth{OldestAge: 25 * time.Hour, BreachEpisodes: 7},
-		coverage: persistence.PepperCoverage{PortalSessions: []uint64{4}, RetainedUsage: []uint64{9}},
+		coverage: persistence.PepperCoverage{PortalSessions: []uint64{4}, RetainedUsage: []uint64{10}},
 		batchErr: map[persistence.CleanupOperation]error{}, results: map[persistence.CleanupOperation]persistence.CleanupBatchResult{},
 	}
-	s := &Server{maintenance: repo, Peppers: map[uint64][]byte{4: []byte("portal")}}
+	accounting := quota.New(nil)
+	defer accounting.Close()
+	if err := accounting.ConfigureRetainedUsageKeys(9, map[uint64][]byte{9: []byte("retained usage key with sufficient test entropy")}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{maintenance: repo, Peppers: map[uint64][]byte{4: []byte("portal")}, deletionAccounting: accounting}
 	s.cleanupCompleted.Store(3)
 	s.cleanupFailed.Store(2)
 	signals, err := s.SampleCleanupSignals(context.Background())
@@ -122,7 +128,7 @@ func TestCleanupSignalsAndPepperCoverageKeepPolicyInAuth(t *testing.T) {
 	if err := s.ValidatePepperCoverage(context.Background()); !errors.Is(err, ErrRetainedPepperUnavailable) {
 		t.Fatalf("missing retained-usage pepper error = %v", err)
 	}
-	s.Peppers[9] = []byte("retained")
+	repo.coverage.RetainedUsage = []uint64{9}
 	if err := s.ValidatePepperCoverage(context.Background()); err != nil {
 		t.Fatalf("complete key coverage rejected: %v", err)
 	}

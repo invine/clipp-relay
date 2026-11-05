@@ -93,6 +93,7 @@ type Server struct {
 	deletions                          persistence.DeletionRepository
 	recovery                           persistence.RecoveryRepository
 	readViews                          persistence.ReadViews
+	liveSessionCounts                  portal.LiveSessionCounts
 	maintenance                        persistence.Maintenance
 	Origin, ClientID, ClientSecret     string
 	AndroidRedirect, ExtensionRedirect string
@@ -210,20 +211,26 @@ func (s *Server) withAccountGuards(ctx context.Context, ids []string, work func(
 
 // CapacitySample is a separate, aggregate live observation. Nil counts mean
 // unavailable, not zero; it contains no Device Identity or session detail.
-type CapacitySample struct{ LiveSessions, ActiveLoginGrants *int }
+type CapacitySample struct{ ActiveLoginGrants *int }
 
 func (s *Server) SetCapacitySampler(sample func(context.Context, string) (CapacitySample, error)) {
 	s.capacitySampler = sample
+}
+
+// SetLiveSessionCountsForTest controls the independent Quota sample in Portal tests.
+func (s *Server) SetLiveSessionCountsForTest(counts portal.LiveSessionCounts) {
+	s.liveSessionCounts = counts
 }
 
 // AccountChange describes the authoritative policy outcome of a protected
 // Auth command. Local invalidation runs under account protection; connection
 // close I/O is deferred until all logical guards have been released.
 type AccountChange struct {
-	AccountID    string
-	WeeklyBytes  int64
-	SessionLimit int
-	CloseAll     bool
+	AccountID       string
+	WeeklyBytes     int64
+	SessionLimit    int
+	CloseAll        bool
+	PolicyUncertain bool
 }
 
 // SetAccountChangedForTest installs a controlled invalidation adapter. Production
@@ -261,6 +268,7 @@ func (s *Server) SetAccountInvalidationCompleteForTest(complete func(string) err
 // RelaySessions exposes physical operations, not account policy decisions.
 type RelaySessions interface {
 	AccountSessions(string) int
+	ReconcileAccountSessions(string, func(int) (bool, string)) error
 	RetireAccount(string, string) error
 	CompleteAccountInvalidation(string) error
 	RetireGrant(string) error
@@ -281,10 +289,29 @@ func (s *Server) SetGrantRevokedForTest(revoked func(string) error) {
 
 // QuotaProtection applies current policy without discarding observations.
 type QuotaProtection interface {
-	ApplyAccountingPolicy(string, int64) bool
+	SetSessionReconciler(func(string, func(int) (bool, string)) error)
+	ApplyCommittedLimits(string, int64, int) (string, error)
+	InvalidatePolicyAssessments(string)
+	ConfigureRetainedUsageKeys(uint64, map[uint64][]byte) error
+	RetainedUsageKey(string, string) (persistence.RetainedUsageKey, error)
+	ImportRetainedUsage(context.Context, persistence.RetainedUsageTransaction, string, string, string) error
+	ValidateRetainedUsageKeyCoverage([]uint64) error
 	BeginAccountingDeletion(string)
 	FlushDeletionAccounting(context.Context, string) error
 	ForgetAccounting(string)
+}
+
+// SetDeletionAccountingForTest installs the Quota adapter for isolated Auth
+// fixtures that exercise deletion finalization without constructing Relay.
+func (s *Server) SetDeletionAccountingForTest(accounting QuotaProtection) error {
+	if accounting == nil {
+		return errors.New("deletion accounting is required")
+	}
+	if err := accounting.ConfigureRetainedUsageKeys(s.CurrentPepper, s.Peppers); err != nil {
+		return err
+	}
+	s.deletionAccounting = accounting
+	return nil
 }
 
 // ConfigureRelayProtection installs the complete observed policy
@@ -293,7 +320,16 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	if accounting == nil || sessions == nil {
 		return errors.New("relay account protection requires quota and sessions")
 	}
+	if err := accounting.ConfigureRetainedUsageKeys(s.CurrentPepper, s.Peppers); err != nil {
+		return err
+	}
+	counts, ok := accounting.(portal.LiveSessionCounts)
+	if !ok {
+		return errors.New("relay quota live count source unavailable")
+	}
 	s.deletionAccounting = accounting
+	accounting.SetSessionReconciler(sessions.ReconcileAccountSessions)
+	s.liveSessionCounts = counts
 	s.grantRevoked = func(grantID string) error {
 		return sessions.RetireGrant(grantID)
 	}
@@ -305,27 +341,20 @@ func (s *Server) ConfigureRelayProtection(accounting QuotaProtection, sessions R
 	s.accountInvalidationFallback = sessions.RetireAccount
 	s.accountInvalidationComplete = sessions.CompleteAccountInvalidation
 	s.accountChanged = func(change AccountChange) string {
-		exhausted := accounting.ApplyAccountingPolicy(change.AccountID, change.WeeklyBytes)
+		if change.PolicyUncertain {
+			accounting.InvalidatePolicyAssessments(change.AccountID)
+			return "account_access_changed"
+		}
+		reason, err := accounting.ApplyCommittedLimits(change.AccountID, change.WeeklyBytes, change.SessionLimit)
+		if err != nil {
+			return "account_access_changed"
+		}
 		if change.CloseAll {
 			return "account_access_changed"
 		}
-		if exhausted {
-			return "quota_exhausted"
-		}
-		if sessions.AccountSessions(change.AccountID) > change.SessionLimit {
-			return "policy_changed"
-		}
-		return ""
+		return reason
 	}
-	s.SetCapacitySampler(func(ctx context.Context, account string) (CapacitySample, error) {
-		sample, err := s.SampleActiveGrants(ctx, account)
-		if err != nil {
-			return sample, err
-		}
-		count := sessions.AccountSessions(account)
-		sample.LiveSessions = &count
-		return sample, nil
-	})
+	s.SetCapacitySampler(s.SampleActiveGrants)
 	return nil
 }
 
@@ -860,7 +889,11 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.uncertainAccounts.Delete(accountID)
 	}
 	if registered.Created {
-		if e = s.importRetainedUsage(ctx, tx, accountID, claims.Subject); e != nil {
+		if s.deletionAccounting == nil {
+			fail(w, 503)
+			return
+		}
+		if e = s.deletionAccounting.ImportRetainedUsage(ctx, tx, accountID, googleIssuer, claims.Subject); e != nil {
 			fail(w, 503)
 			return
 		}
@@ -1024,22 +1057,24 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	}
 	var status, email string
 	var recoveryHeld bool
+	var history []quotaHistory
+	var liveCount *int
 	var weekStart time.Time
 	var weeklyBytes *int64
 	var sessions *int
 	var verified bool
 	var hd *string
 	var recorded int64
-	var historyJSON []byte
 	if e == nil {
 		if s.beforeProfileRead != nil {
 			s.beforeProfileRead()
 		}
-		profile, err := s.ownerUsageProfile(r, id, version)
+		profile, err := portal.ReadOwnerQuotaView(r.Context(), s.readViews, s.liveSessionCounts, id, s.sessionDigest(r, version), version)
 		weekStart = profile.WeekStart
 		status, email, verified, hd = profile.Status, profile.Email, profile.Verified, profile.HostedDomain
 		recoveryHeld = profile.RecoveryHeld
-		weeklyBytes, sessions, recorded, historyJSON = profile.WeeklyBytes, profile.Sessions, profile.Usage, profile.HistoryJSON
+		weeklyBytes, sessions, recorded = profile.WeeklyBytes, profile.Sessions, profile.Recorded
+		history, liveCount = profile.History, profile.LiveSessions
 		if errors.Is(err, persistence.ErrNotFound) {
 			e = errInvalidSession
 		} else if err != nil {
@@ -1068,11 +1103,6 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	}
 	if sessions != nil {
 		sessionsValue = *sessions
-	}
-	var history []quotaHistory
-	if e == nil && status == "Active" && json.Unmarshal(historyJSON, &history) != nil {
-		fail(w, 503)
-		return
 	}
 	query := r.URL.Query()
 	defaultEnd := time.Now().UTC()
@@ -1131,15 +1161,15 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	var liveKnown, grantsKnown bool
 	if e == nil && status == "Active" && s.capacitySampler != nil {
 		if sample, err := s.capacitySampler(r.Context(), id); err == nil {
-			if sample.LiveSessions != nil && *sample.LiveSessions >= 0 {
-				liveSessions = *sample.LiveSessions
-				liveKnown = true
-			}
 			if sample.ActiveLoginGrants != nil && *sample.ActiveLoginGrants >= 0 {
 				activeGrants = *sample.ActiveLoginGrants
 				grantsKnown = true
 			}
 		}
+	}
+	if liveCount != nil {
+		liveSessions = *liveCount
+		liveKnown = true
 	}
 	percent := int64(0)
 	if bytesValue > 0 {

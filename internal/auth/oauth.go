@@ -248,7 +248,7 @@ func (s *Server) presentConsent(w http.ResponseWriter, r *http.Request, account,
 		callback, _ := url.Parse(intent.redirect)
 		callbackSource = callback.Scheme + ":"
 	}
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self' "+callbackSource+"; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self' "+callbackSource+"; base-uri 'none'")
 	portalOrigin, err := url.Parse(s.Origin)
 	if err != nil || portalOrigin.Host == "" {
 		s.oauthError(w, http.StatusServiceUnavailable)

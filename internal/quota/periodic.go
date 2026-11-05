@@ -55,7 +55,7 @@ func (w *observedWeek) effectiveBytes() (int64, bool) {
 }
 
 type observedAccount struct {
-	sessions           int
+	identity           uint64
 	weeks              map[time.Time]*observedWeek
 	eligibleWeek       time.Time
 	healthy            time.Time
@@ -68,14 +68,19 @@ type observedAccount struct {
 	flushCancel        context.CancelFunc
 }
 type periodicAccounting struct {
-	monotonicNow func() time.Time
-	mu           sync.Mutex
-	accounts     map[string]*observedAccount
-	started      bool
-	cancel       context.CancelFunc
-	done         chan struct{}
-	close        func(ClosureOutcome)
-	deadline     time.Duration
+	monotonicNow  func() time.Time
+	mu            sync.Mutex
+	policyEpoch   uint64
+	nextIdentity  uint64
+	liveCounts    map[string]int
+	liveZeroOrder map[string]uint64
+	liveSequence  uint64
+	accounts      map[string]*observedAccount
+	started       bool
+	cancel        context.CancelFunc
+	done          chan struct{}
+	close         func(ClosureOutcome)
+	deadline      time.Duration
 }
 
 func (q *Quota) observedAccountLocked(id string) *observedAccount {
@@ -84,7 +89,8 @@ func (q *Quota) observedAccountLocked(id string) *observedAccount {
 	}
 	a := q.periodic.accounts[id]
 	if a == nil && len(q.periodic.accounts) < maxAccountingAccounts {
-		a = &observedAccount{weeks: make(map[time.Time]*observedWeek)}
+		q.periodic.nextIdentity++
+		a = &observedAccount{identity: q.periodic.nextIdentity, weeks: make(map[time.Time]*observedWeek)}
 		q.periodic.accounts[id] = a
 	}
 	return a
@@ -133,6 +139,9 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 	if q.accounting == nil {
 		return result, ErrTemporary
 	}
+	q.periodic.mu.Lock()
+	policyEpoch := q.periodic.policyEpoch
+	q.periodic.mu.Unlock()
 	policy, err := q.accounting.ReadAccountingEligibility(ctx, id)
 	if err != nil {
 		return result, ErrTemporary
@@ -154,8 +163,16 @@ func (q *Quota) Eligibility(ctx context.Context, id string) (result AccountingEl
 		}
 		durable = resultFromPersistence(stored)
 	}
+	if q.afterEligibilityRead != nil {
+		if err := q.afterEligibilityRead(ctx); err != nil {
+			return result, ErrTemporary
+		}
+	}
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
+	if q.periodic.policyEpoch != policyEpoch {
+		return result, ErrTemporary
+	}
 	a := q.observedAccountLocked(id)
 	if a == nil {
 		return result, ErrTemporary
@@ -538,12 +555,12 @@ func (q *Quota) accountingLoop(ctx context.Context) {
 				case id := <-jobs:
 					_ = q.FlushAccounting(ctx, id)
 					// Background reads and decisions share Quota's account state.
-					_, err := q.Eligibility(ctx, id)
+					assessment, err := q.Eligibility(ctx, id)
 					if errors.Is(err, ErrExhausted) {
-						q.cutoff(id, "quota_exhausted")
+						q.cutoffAssessment(id, "quota_exhausted", assessment.Revision)
 					}
 					q.periodic.mu.Lock()
-					if a := q.periodic.accounts[id]; a != nil && a.sessions == 0 && !a.busy && !hasObserved(a) {
+					if a := q.periodic.accounts[id]; a != nil && q.periodic.liveCounts[id] == 0 && !a.busy && !hasObserved(a) {
 						delete(q.periodic.accounts, id)
 					}
 					q.periodic.mu.Unlock()
@@ -604,10 +621,19 @@ func (q *Quota) CheckAccountingHealth() {
 	}
 }
 func (q *Quota) cutoff(id, reason string) { q.cutoffChecked(id, reason, false) }
+
+func (q *Quota) cutoffAssessment(id, reason string, revision uint64) {
+	q.cutoffCheckedWithFreshness(id, reason, false, &revision)
+}
+
 func (q *Quota) cutoffChecked(id, reason string, expiredOnly bool) {
+	q.cutoffCheckedWithFreshness(id, reason, expiredOnly, nil)
+}
+
+func (q *Quota) cutoffCheckedWithFreshness(id, reason string, expiredOnly bool, assessmentRevision *uint64) {
 	q.periodic.mu.Lock()
 	a := q.periodic.accounts[id]
-	if a == nil || a.blocked || expiredOnly && !q.accountingExpiredLocked(a) {
+	if a == nil || a.blocked || assessmentRevision != nil && a.revision != *assessmentRevision || expiredOnly && !q.accountingExpiredLocked(a) {
 		q.periodic.mu.Unlock()
 		return
 	}
@@ -654,11 +680,7 @@ func (q *Quota) accountingNow() time.Time {
 // AccountingSessions records only physical registry occupancy, never policy.
 // Relay calls it with its registry mutex held after installation/removal.
 func (q *Quota) AccountingSessions(id string, count int) {
-	q.periodic.mu.Lock()
-	if a := q.periodic.accounts[id]; a != nil {
-		a.sessions = count
-	}
-	q.periodic.mu.Unlock()
+	q.PublishLiveCounts(map[string]int{id: count})
 }
 
 // AccountingFailed fences reporter counter failures through the same immediate
@@ -682,6 +704,7 @@ func (q *Quota) ConfigureAccountingFailureDeadline(deadline time.Duration) error
 func (q *Quota) ApplyAccountingPolicy(id string, cap int64) bool {
 	q.periodic.mu.Lock()
 	defer q.periodic.mu.Unlock()
+	q.periodic.policyEpoch++
 	a := q.periodic.accounts[id]
 	if a == nil {
 		return cap <= 0
@@ -700,4 +723,79 @@ func (q *Quota) ApplyAccountingPolicy(id string, cap int64) bool {
 		a.reason = ""
 	}
 	return exhausted
+}
+
+// SetSessionReconciler connects Quota's committed-limit decision to Relay's
+// registry lock. Configure it before serving. Relay calls decide with the exact
+// live count while holding that lock and applies any returned retirement before
+// it acknowledges the operation.
+func (q *Quota) SetSessionReconciler(reconcile func(string, func(int) (bool, string)) error) {
+	q.sessionReconciler = reconcile
+}
+
+// ApplyCommittedLimits applies confirmed account policy against the exact Relay
+// Session count. The Relay reconciliation callback is entered before Quota takes
+// its state lock, preserving the registry-to-Quota lock order used by admission.
+func (q *Quota) ApplyCommittedLimits(id string, weeklyBytes int64, sessionLimit int) (string, error) {
+	if id == "" || weeklyBytes < 0 || sessionLimit < 0 || q.sessionReconciler == nil {
+		return "", ErrTemporary
+	}
+	reason := ""
+	var decisionErr error
+	err := q.sessionReconciler(id, func(liveCount int) (bool, string) {
+		if liveCount < 0 {
+			decisionErr = ErrTemporary
+			return false, ""
+		}
+		q.periodic.mu.Lock()
+		defer q.periodic.mu.Unlock()
+		q.periodic.policyEpoch++
+		q.publishLiveCountsLocked(map[string]int{id: liveCount})
+		a := q.observedAccountLocked(id)
+		if a != nil {
+			a.revision++
+		}
+		exhausted := weeklyBytes == 0
+		if a != nil {
+			if w := a.weeks[weekStart(q.now())]; w != nil {
+				effective, valid := w.effectiveBytes()
+				exhausted = exhausted || !valid || effective >= weeklyBytes
+			}
+			if exhausted {
+				a.blocked = true
+				a.reason = "quota_exhausted"
+			} else if a.reason == "quota_exhausted" {
+				a.blocked = false
+				a.reason = ""
+			}
+		}
+		if exhausted {
+			reason = "quota_exhausted"
+		} else if liveCount > sessionLimit {
+			reason = "policy_changed"
+		} else {
+			reason = ""
+		}
+		return reason != "", reason
+	})
+	if err != nil {
+		return "", err
+	}
+	if decisionErr != nil {
+		return "", decisionErr
+	}
+	return reason, nil
+}
+
+// InvalidatePolicyAssessments fences work captured before an uncertain policy
+// commit without applying speculative limits.
+func (q *Quota) InvalidatePolicyAssessments(id string) {
+	q.periodic.mu.Lock()
+	q.periodic.policyEpoch++
+	if a := q.periodic.accounts[id]; a != nil {
+		a.revision++
+		a.blocked = true
+		a.reason = "account_access_changed"
+	}
+	q.periodic.mu.Unlock()
 }
