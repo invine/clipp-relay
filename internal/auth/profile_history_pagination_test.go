@@ -51,6 +51,9 @@ func TestOwnerHistoryProgressiveDisclosure(t *testing.T) {
 	if _, err := db.Pool.Exec(context.Background(), `UPDATE public.accounts SET status='Active',recovery_review_hold=false,plan_id='6dd09395-51a0-451c-96b3-716e6038e870' WHERE subject=$1`, subject); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Pool.Exec(context.Background(), `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_delta_bytes) SELECT id,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,0,0,0 FROM public.accounts WHERE subject=$1 ON CONFLICT (account_id,week_start) DO NOTHING`, subject); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		limit int

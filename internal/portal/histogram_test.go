@@ -88,3 +88,13 @@ func TestMonthlyHistogramGroupsWholeWeeksByUTCStartMonth(t *testing.T) {
 		t.Fatalf("monthly buckets must retain whole observed week totals and disclose missing observations: %+v", chart.Bars)
 	}
 }
+
+func TestMonthlyHistogramKeepsExactSumsBeyondSignedByteRange(t *testing.T) {
+	chart := quotaMonthlyHistogram([]QuotaHistoryEntry{
+		{Week: "2026-01-05", Recorded: math.MaxInt64, Observed: true},
+		{Week: "2026-01-12", Recorded: math.MaxInt64, Observed: true},
+	})
+	if len(chart.Bars) != 1 || chart.Bars[0].ExactBytes != "18446744073709551614" || chart.Bars[0].Height != 190 {
+		t.Fatalf("monthly total overflowed or failed to scale: %+v", chart.Bars)
+	}
+}
