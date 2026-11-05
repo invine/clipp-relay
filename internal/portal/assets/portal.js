@@ -31,16 +31,17 @@ document.documentElement.classList.add("js");
 
 // Fetch the same account-scoped page used by the table's Show more link.
 // Replacing the shared graph/table fragment keeps grouping and page size in sync.
-function setupHistory(root) {
+function setupHistory(root, distanceFromRight = 0) {
   const scroll = root.querySelector(".history-chart-scroll");
   const more = root.querySelector("[data-history-more]");
-  if (!scroll || !more) return;
+  if (!scroll) return;
+  scroll.scrollLeft = Math.max(0, scroll.scrollWidth - scroll.clientWidth - distanceFromRight);
   let loading = false;
   let dragging = null;
   const loadMore = async () => {
-    if (loading || !more.isConnected) return;
+    if (loading || !more?.isConnected) return;
     loading = true;
-    const position = scroll.scrollLeft;
+    const distance = scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft;
     const tableOpen = root.querySelector(".history-table-details")?.open;
     more.setAttribute("aria-busy", "true");
     try {
@@ -52,11 +53,9 @@ function setupHistory(root) {
       root.replaceWith(next);
       const details = next.querySelector(".history-table-details");
       if (details) details.open = !!tableOpen;
-      const nextScroll = next.querySelector(".history-chart-scroll");
-      if (nextScroll) nextScroll.scrollLeft = position;
       const status = next.querySelector("[data-history-status]");
       if (status) status.textContent = "Older history loaded.";
-      setupHistory(next);
+      setupHistory(next, distance);
     } catch {
       more.removeAttribute("aria-busy");
       const status = root.querySelector("[data-history-status]");
@@ -65,7 +64,7 @@ function setupHistory(root) {
     }
   };
   scroll.addEventListener("scroll", () => {
-    if (scroll.scrollWidth > scroll.clientWidth && scroll.scrollLeft + scroll.clientWidth >= scroll.scrollWidth - 12) loadMore();
+    if (scroll.scrollWidth > scroll.clientWidth && scroll.scrollLeft <= 12) loadMore();
   }, { passive: true });
   scroll.addEventListener("pointerdown", (event) => {
     if (event.pointerType !== "mouse" || event.button !== 0) return;
@@ -77,12 +76,12 @@ function setupHistory(root) {
   });
   scroll.addEventListener("pointerup", () => { dragging = null; });
   scroll.addEventListener("pointercancel", () => { dragging = null; });
-  more.addEventListener("click", (event) => {
+  more?.addEventListener("click", (event) => {
     event.preventDefault();
     loadMore();
   });
   // Fill wide viewports until there is content to scroll or history is exhausted.
-  if (scroll.scrollWidth <= scroll.clientWidth + 1) loadMore();
+  if (more && scroll.scrollWidth <= scroll.clientWidth + 1) loadMore();
 }
 document.querySelectorAll("[data-history-data]").forEach(setupHistory);
 

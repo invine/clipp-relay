@@ -59,6 +59,12 @@ func TestOwnerHistoryGroupingAndDisclosure(t *testing.T) {
 			t.Fatalf("unexpected history control %q", unwanted)
 		}
 	}
+	if strings.Index(body, "data-history-more") < strings.Index(body, `<details class="history-table-details">`) || strings.Index(body, "data-history-more") > strings.Index(body, "</details>\n<span class=\"sr-only\" data-history-status") {
+		t.Fatal("Show more must be inside the folded history table")
+	}
+	if !strings.Contains(body, "oldest to newest. Scroll left") {
+		t.Fatal("graph direction should describe the new order and loading direction")
+	}
 	monthly := portalRequest(p.auth, "GET", "/?group=monthly", p.owner, nil, "")
 	if monthly.Code != 200 || !strings.Contains(monthly.Body.String(), "Monthly usage table") || !strings.Contains(monthly.Body.String(), `Month</th>`) || strings.Contains(monthly.Body.String(), `Week starting UTC</th>`) {
 		t.Fatalf("monthly graph and table grouping: %d", monthly.Code)

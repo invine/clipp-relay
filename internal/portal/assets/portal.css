@@ -153,6 +153,7 @@ tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 .history-table-details { margin-top: 18px; }
 .history-table-details summary { cursor: pointer; }
 .history-more { margin-top: 12px; }
+.history-table-details:not([open]) .history-more { display: none; }
 .history-gridline { stroke: var(--line); stroke-dasharray: 3 4; }
 .history-axis, .history-date { fill: var(--muted); font-size: 11px; }
 .history-bar { fill: #a8c8b2; }
