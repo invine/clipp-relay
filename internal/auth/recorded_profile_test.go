@@ -69,3 +69,23 @@ func TestOwnerHistoryIncludesRetainedWeeksBeyondPreviousBoundary(t *testing.T) {
 		t.Fatal("owner history exposed expired week")
 	}
 }
+
+func TestAdminHistoryShowsObservedZeroWithoutInventingMissingWeeks(t *testing.T) {
+	p := protectedPortalFixture(t)
+	now := time.Now().UTC()
+	week := now.AddDate(0, 0, -(int(now.Weekday())+6)%7)
+	week = time.Date(week.Year(), week.Month(), week.Day(), 0, 0, 0, 0, time.UTC)
+	zero := week.AddDate(0, 0, -7*20)
+	missing := week.AddDate(0, 0, -7*21)
+	if _, err := p.runtime.Pool.Exec(context.Background(), `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_delta_bytes) VALUES($1,$2,0,0,0)`, p.account, zero); err != nil {
+		t.Fatal(err)
+	}
+	resp := portalRequest(p.auth, "GET", "/admin?selected="+p.account, p.admin, nil, "")
+	body := resp.Body.String()
+	if resp.Code != 200 || !strings.Contains(body, zero.Format("2006-01-02")+"</td><td class=\"numeric\">0 bytes") {
+		t.Fatalf("recorded zero missing from admin history: status %d", resp.Code)
+	}
+	if strings.Contains(body, missing.Format("2006-01-02")) {
+		t.Fatal("unobserved week presented as recorded usage")
+	}
+}
