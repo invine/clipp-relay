@@ -129,28 +129,29 @@
 <div>
 <h2 id="history-title">Weekly history</h2>
 </div>
-<span class="muted fine-print">Current week is incomplete</span>
+
 </div>
 {{if .History}}
-{{with histogram .History}}
+{{with histogram .ChartHistory}}
 {{$chart := .}}
 <nav class="history-range" aria-label="Weekly history range">
-  {{if $.ShowAllHistory}}<a href="/">Latest four weeks</a><span aria-current="page">All thirteen weeks</span>{{else}}<span aria-current="page">Latest four weeks</span><a href="/?history=all">All thirteen weeks</a>{{end}}
+  {{if $.ShowAllHistory}}<a href="/">Latest four weeks</a><span aria-current="page">All retained weeks</span>{{else}}<span aria-current="page">Latest four weeks</span><a href="/?history=all">All retained weeks</a>{{end}}
 </nav>
 <figure class="history-chart {{if $.ShowAllHistory}}range-all{{else}}range-recent{{end}}" aria-labelledby="history-title">
   <div class="history-chart-heading">
     <p class="muted fine-print">Recorded Relay Usage · week starting UTC</p>
-    <span class="history-legend"><span aria-hidden="true"></span>Current week · incomplete</span>
+    {{if .HasCurrent}}<span class="history-legend"><span aria-hidden="true"></span>Current week</span>{{end}}
   </div>
-  <div class="history-chart-scroll" role="region" aria-label="Weekly quota histogram, oldest to newest">
+  <p class="history-scroll-hint muted fine-print">Scroll horizontally to view the full graph.</p>
+  <div class="history-chart-scroll" tabindex="0" role="region" aria-label="Weekly quota histogram, oldest to newest">
     <svg class="history-histogram" width="{{.Width}}" height="280" viewBox="0 0 {{.Width}} 280" role="group" aria-label="Recorded Relay Usage by week">
       {{range .Ticks}}
       <line class="history-gridline" x1="64" x2="{{$chart.Right}}" y1="{{.Y}}" y2="{{.Y}}"/>
       <text class="history-axis" x="54" y="{{.Y}}" dy="4" text-anchor="end">{{.Label}}</text>
       {{end}}
       {{range .Bars}}
-      <g class="history-column{{if .Current}} current{{end}}{{if not .Observed}} missing{{end}}" tabindex="0" role="img" aria-label="Week starting {{.Week}} UTC: {{if .Observed}}{{.Value}}{{else}}no recorded observation{{end}}{{if .Current}}, current week, incomplete{{end}}">
-        <title>Week starting {{.Week}} UTC: {{if .Observed}}{{.Value}} ({{.Recorded}} bytes){{else}}no recorded observation{{end}}{{if .Current}} · current week, incomplete{{end}}</title>
+      <g class="history-column{{if .Current}} current{{end}}{{if not .Observed}} missing{{end}}" tabindex="0" role="img" aria-label="Week starting {{.Week}} UTC: {{if .Observed}}{{.Value}}{{else}}no recorded observation{{end}}{{if .Current}}, current week{{end}}">
+        <title>Week starting {{.Week}} UTC: {{if .Observed}}{{.Value}} ({{.Recorded}} bytes){{else}}no recorded observation{{end}}{{if .Current}} · current week{{end}}</title>
         {{if .Observed}}{{if eq .Recorded 0}}<circle class="history-zero-mark{{if .Current}} current{{end}}" cx="{{.CenterX}}" cy="218" r="4"/>{{else}}<rect class="history-bar" x="{{.X}}" y="{{.Y}}" width="36" height="{{.Height}}" rx="4"/>{{end}}{{else}}<circle class="history-missing-mark" cx="{{.CenterX}}" cy="218" r="4"/>{{end}}
         {{if .Observed}}<text class="history-value" x="{{.CenterX}}" y="{{.ValueY}}" text-anchor="middle">{{.Value}}</text>{{end}}
         <text class="history-date" x="{{.CenterX}}" y="242" text-anchor="middle">{{.Label}}</text>
@@ -164,12 +165,13 @@
 {{end}}
 {{else}}<p class="muted">No quota history available.</p>{{end}}
 {{if .History}}
-<div class="history-table-wrap">
+<div class="history-table-wrap" tabindex="0" role="region" aria-label="Weekly usage table">
 <table class="history-table">
 <caption class="sr-only">Weekly Recorded Relay Usage with complete UTC week dates and exact byte totals</caption>
 <thead><tr><th scope="col">Week starting UTC</th><th scope="col">Recorded Relay Usage</th><th scope="col">Observation</th></tr></thead>
-<tbody>{{range .History}}<tr><th scope="row"><time datetime="{{.Week}}">{{.Week}}</time></th><td>{{if .Observed}}{{bytes .Recorded}} <span class="exact-bytes">({{.Recorded}} bytes)</span>{{else}}—{{end}}</td><td>{{if .Observed}}{{if eq .Recorded 0}}Recorded zero{{else}}Recorded{{end}}{{else}}No observation{{end}}{{if .Current}} · current week, incomplete{{end}}</td></tr>{{end}}</tbody>
+<tbody>{{range .History}}<tr><th scope="row"><time datetime="{{.Week}}">{{.Week}}</time></th><td>{{if .Observed}}{{bytes .Recorded}} <span class="exact-bytes">({{.Recorded}} bytes)</span>{{else}}—{{end}}</td><td>{{if .Observed}}{{if eq .Recorded 0}}Recorded zero{{else}}Recorded{{end}}{{else}}No observation{{end}}{{if .Current}} · current week{{end}}</td></tr>{{end}}</tbody>
 </table>
+{{if .NextHistoryRows}}<a class="button secondary" href="/?history_rows={{.NextHistoryRows}}{{if .ShowAllHistory}}&amp;history=all{{end}}#history-title">Show more</a>{{end}}
 </div>
 {{end}}
 </section>

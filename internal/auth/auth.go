@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1059,7 +1060,20 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	showAllHistory := r.URL.Query().Get("history") == "all"
-	history = portal.QuotaHistoryRange(history, showAllHistory)
+	for i := range history {
+		history[i].Current = history[i].Week == weekStart.UTC().Format("2006-01-02")
+	}
+	chartHistory := portal.QuotaHistoryRange(history, showAllHistory)
+	sort.Slice(history, func(i, j int) bool { return history[i].Week > history[j].Week })
+	visibleRows := 4
+	if rows, err := strconv.Atoi(r.URL.Query().Get("history_rows")); err == nil && rows >= 4 {
+		visibleRows = min(rows, len(history))
+	}
+	nextRows := 0
+	if visibleRows < len(history) {
+		nextRows = min(visibleRows+10, len(history))
+		history = history[:visibleRows]
+	}
 	var liveSessions, activeGrants int
 	var liveKnown, grantsKnown bool
 	if e == nil && status == "Active" && s.capacitySampler != nil {
@@ -1102,11 +1116,12 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		Recorded, Percent                      int64
 		Remaining                              int64
 		UsageState                             string
-		History                                []quotaHistory
+		History, ChartHistory                  []quotaHistory
+		NextHistoryRows                        int
 		ShowAllHistory                         bool
 		LiveSessions, ActiveGrants, GrantLimit int
 		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", relayURL.Host, status == "Active" && !recoveryHeld, admin, r.URL.Path == "/account/security", r.URL.Query().Get("notice"), recoveryHeld, weekStart, bytesValue, sessionsValue, recorded, percent, remaining, usageState, history, showAllHistory, liveSessions, activeGrants, 20, liveKnown, grantsKnown}
+	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", relayURL.Host, status == "Active" && !recoveryHeld, admin, r.URL.Path == "/account/security", r.URL.Query().Get("notice"), recoveryHeld, weekStart, bytesValue, sessionsValue, recorded, percent, remaining, usageState, history, chartHistory, nextRows, showAllHistory, liveSessions, activeGrants, 20, liveKnown, grantsKnown}
 	if pageData.Security && !pageData.SignedIn {
 		http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 		return

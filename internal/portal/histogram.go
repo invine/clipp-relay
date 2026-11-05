@@ -33,6 +33,7 @@ type historyHistogram struct {
 	Bars         []historyBar
 	Ticks        []historyTick
 	AllZero      bool
+	HasCurrent   bool
 }
 
 func QuotaHistoryRange(history []QuotaHistoryEntry, all bool) []QuotaHistoryEntry {
@@ -40,9 +41,6 @@ func QuotaHistoryRange(history []QuotaHistoryEntry, all bool) []QuotaHistoryEntr
 	slices.SortFunc(weeks, func(a, b QuotaHistoryEntry) int { return strings.Compare(a.Week, b.Week) })
 	if !all && len(weeks) > 4 {
 		weeks = weeks[len(weeks)-4:]
-	}
-	if len(weeks) > 0 {
-		weeks[len(weeks)-1].Current = true
 	}
 	return weeks
 }
@@ -68,7 +66,10 @@ func quotaHistogram(history []QuotaHistoryEntry) historyHistogram {
 		scale *= 2
 	}
 	scale = max(scale, peak)
-	chart.AllZero = peak == 0
+	chart.AllZero = chart.AllZero && peak == 0
+	for _, week := range weeks {
+		chart.HasCurrent = chart.HasCurrent || week.Current
+	}
 	for step := int64(0); step <= 4; step++ {
 		value := (scale/4)*step + (scale%4)*step/4
 		chart.Ticks = append(chart.Ticks, historyTick{FormatBytes(value), 218 - float64(step)*47.5})

@@ -8,7 +8,7 @@ import (
 )
 
 func TestQuotaHistogramPreservesWeeksAndScalesRecordedAmounts(t *testing.T) {
-	history := []QuotaHistoryEntry{{Week: "2026-10-05", Recorded: 65536, Observed: true}, {Week: "2026-09-28", Recorded: 12345, Observed: true}, {Week: "2026-09-21", Recorded: 0, Observed: true}}
+	history := []QuotaHistoryEntry{{Week: "2026-10-05", Recorded: 65536, Observed: true, Current: true}, {Week: "2026-09-28", Recorded: 12345, Observed: true}, {Week: "2026-09-21", Recorded: 0, Observed: true}}
 	original := slices.Clone(history)
 	chart := quotaHistogram(history)
 	if !slices.Equal(history, original) || len(chart.Bars) != len(history) {
@@ -30,7 +30,7 @@ func TestQuotaHistogramPreservesWeeksAndScalesRecordedAmounts(t *testing.T) {
 				t.Fatalf("invalid geometry for zero or maximum quota: %+v", bar)
 			}
 		}
-		if len(history) > 0 && history[0].Recorded == 0 && !chart.AllZero {
+		if len(history) > 0 && history[0].Observed && history[0].Recorded == 0 && !chart.AllZero {
 			t.Fatal("all-zero history missing its zero-usage state")
 		}
 	}
@@ -56,7 +56,7 @@ func TestQuotaHistoryRangeDefaultsToLatestFourAndRetainsAllThirteen(t *testing.T
 
 func TestQuotaHistoryRangeOrdersYearRolloverAndKeepsMissingDistinct(t *testing.T) {
 	history := []QuotaHistoryEntry{
-		{Week: "2026-01-05", Recorded: math.MaxInt64, Observed: true},
+		{Week: "2026-01-05", Recorded: math.MaxInt64, Observed: true, Current: true},
 		{Week: "2025-12-29", Recorded: 0, Observed: true},
 		{Week: "2025-12-22", Observed: false},
 	}
@@ -67,5 +67,12 @@ func TestQuotaHistoryRangeOrdersYearRolloverAndKeepsMissingDistinct(t *testing.T
 	chart := quotaHistogram(ranged)
 	if chart.AllZero || chart.Bars[0].Current || chart.Bars[0].Observed || !chart.Bars[1].Observed || !chart.Bars[2].Current || chart.Bars[2].Height != 190 || chart.Ticks[4].Label != FormatBytes(math.MaxInt64) {
 		t.Fatalf("missing/zero/large history collapsed: %+v", chart)
+	}
+}
+
+func TestQuotaHistogramDoesNotInventCurrentWeekOrZeroForMissingData(t *testing.T) {
+	chart := quotaHistogram([]QuotaHistoryEntry{{Week: "2025-12-22", Observed: false}})
+	if chart.HasCurrent || chart.AllZero || chart.Bars[0].Current || chart.Bars[0].Observed {
+		t.Fatalf("missing old week presented as current or zero: %+v", chart)
 	}
 }
