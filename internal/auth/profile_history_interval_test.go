@@ -1,11 +1,46 @@
 package auth_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestOwnerMonthlyHistoryTotalsAndAccountIsolation(t *testing.T) {
+	p := protectedPortalFixture(t)
+	now := time.Now().UTC()
+	week := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(int(now.Weekday())+6)%7)
+	// Pick two adjacent retained weeks with the same UTC start month.
+	for week.Month() != week.AddDate(0, 0, -7).Month() {
+		week = week.AddDate(0, 0, -7)
+	}
+	earlier := week.AddDate(0, 0, -7)
+	seedRecordedWeek(t, p, earlier, 1024)
+	seedRecordedWeek(t, p, week, 2048)
+	seedRecordedWeek(t, p, earlier.AddDate(0, 0, -7), 16384)
+	subject := fmt.Sprintf("history-other-%d", time.Now().UnixNano())
+	loginAs(t, p.auth, p.provider, subject, "history-other@example.test", "")
+	other := p
+	if err := p.runtime.Pool.QueryRow(context.Background(), `SELECT id FROM public.accounts WHERE subject=$1`, subject).Scan(&other.account); err != nil {
+		t.Fatal(err)
+	}
+	seedRecordedWeek(t, other, earlier, 65536)
+	path := fmt.Sprintf("/?start=%s&end=%s&group=monthly", earlier.Format("2006-01-02"), week.Format("2006-01-02"))
+	response := portalRequest(p.auth, "GET", path, p.owner, nil, "")
+	body := response.Body.String()
+	for _, want := range []string{fmt.Sprintf("Month %s UTC: 3 KiB (3072 bytes)", week.Format("2006-01")), "(1024 bytes)", "(2048 bytes)"} {
+		if response.Code != 200 || !strings.Contains(body, want) {
+			t.Fatalf("monthly owner history missing %q (status %d)", want, response.Code)
+		}
+	}
+	for _, unwanted := range []string{"(16384 bytes)", "(65536 bytes)", "(68608 bytes)"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("monthly owner history exposed out-of-interval or another account's usage: %s", unwanted)
+		}
+	}
+}
 
 func TestOwnerHistoryIntervalAndMonthlyGrouping(t *testing.T) {
 	p := protectedPortalFixture(t)

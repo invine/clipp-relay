@@ -1175,7 +1175,19 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		HistoryError, WeeklyLink, MonthlyLink, MoreHistoryLink string
 		LiveSessions, ActiveGrants, GrantLimit                 int
 		LiveSessionsKnown, ActiveGrantsKnown                   bool
-	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", relayURL.Host, status == "Active" && !recoveryHeld, admin, r.URL.Path == "/account/security", r.URL.Query().Get("notice"), recoveryHeld, weekStart, bytesValue, sessionsValue, recorded, percent, remaining, usageState, history, chartHistory, nextRows, startDate, endDate, group, intervalError, link("weekly", visibleRows), link("monthly", visibleRows), link(group, nextRows), liveSessions, activeGrants, 20, liveKnown, grantsKnown}
+	}{
+		SignedIn: e == nil, Status: status, Description: description, Email: email, CSRF: csrf,
+		DiscoveryURL: s.Origin + "/v1/relay", RelayHost: relayURL.Host,
+		Active: status == "Active" && !recoveryHeld, Admin: admin,
+		Security: r.URL.Path == "/account/security", Notice: r.URL.Query().Get("notice"), RecoveryHeld: recoveryHeld,
+		WeekStart: weekStart, WeeklyBytes: bytesValue, Sessions: sessionsValue,
+		Recorded: recorded, Percent: percent, Remaining: remaining, UsageState: usageState,
+		History: history, ChartHistory: chartHistory, NextHistoryRows: nextRows,
+		HistoryStart: startDate, HistoryEnd: endDate, HistoryGroup: group, HistoryError: intervalError,
+		WeeklyLink: link("weekly", visibleRows), MonthlyLink: link("monthly", visibleRows), MoreHistoryLink: link(group, nextRows),
+		LiveSessions: liveSessions, ActiveGrants: activeGrants, GrantLimit: 20,
+		LiveSessionsKnown: liveKnown, ActiveGrantsKnown: grantsKnown,
+	}
 	if pageData.Security && !pageData.SignedIn {
 		http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 		return
