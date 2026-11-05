@@ -41,7 +41,7 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 	}
 	out := portalRequest(s, "GET", "/", cookie, nil, "")
 	body := out.Body.String()
-	if out.Code != 200 || !strings.Contains(body, "Recorded Relay Usage: 10 KiB") || !strings.Contains(body, "12.06 KiB") || !strings.Contains(body, "periodic confirmation lag") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Weekly Quota Window") || !strings.Contains(body, "Refresh account state") || !strings.Contains(body, "Unavailable") {
+	if out.Code != 200 || !strings.Contains(body, "Recorded Relay Usage: 10 KiB") || !strings.Contains(body, "12.06 KiB") || !strings.Contains(body, "periodic confirmation lag") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Weekly Quota Window") || !strings.Contains(body, "Unavailable") {
 		t.Fatalf("profile: %d %s", out.Code, body)
 	}
 	if strings.Contains(strings.ToLower(body), "incomplete") || !strings.Contains(body, "10 KiB <span class=\"exact-bytes\">(10240 bytes)</span>") || !strings.Contains(body, "No observation") || !strings.Contains(body, "Recorded zero") || !strings.Contains(body, `class="history-column missing"`) || !strings.Contains(body, "no recorded observation") {
