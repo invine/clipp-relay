@@ -37,6 +37,7 @@ type HistoryHistogram struct {
 	Width, Right int
 	PlotWidth    int
 	Bars         []historyBar
+	PlotBars     []historyBar
 	Ticks        []historyTick
 	AllZero      bool
 	HasCurrent   bool
@@ -78,12 +79,14 @@ func HistoryPage(history []QuotaHistoryEntry, group string, limit int) (HistoryH
 		chart = quotaMonthlyHistogram(weeks)
 	}
 	slices.Reverse(chart.Bars)
+	chart.PlotBars = slices.Clone(chart.Bars)
+	slices.Reverse(chart.PlotBars)
 	chart.Width = 80 + 64*len(chart.Bars)
 	chart.Right = chart.Width - 16
 	chart.PlotWidth = chart.Width - 64
 	chart.HasCurrent = false
-	for i := range chart.Bars {
-		bar := &chart.Bars[i]
+	for i := range chart.PlotBars {
+		bar := &chart.PlotBars[i]
 		bar.CenterX = 96 + 64*float64(i)
 		bar.X = bar.CenterX - 18
 		chart.HasCurrent = chart.HasCurrent || bar.Current

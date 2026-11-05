@@ -114,8 +114,14 @@ func TestHistoryPageKeepsMonthlyTotalsCompleteAndPagesNewestFirst(t *testing.T) 
 	if more || len(chart.Bars) != 3 || chart.Bars[1].Week != "2026-02" || chart.Bars[2].Observed {
 		t.Fatalf("complete monthly page lost missing observation or ordering: %+v", chart.Bars)
 	}
+	if chart.PlotBars[0].Week != "2026-01" || chart.PlotBars[2].Week != "2026-03" || chart.PlotBars[0].CenterX >= chart.PlotBars[2].CenterX {
+		t.Fatalf("monthly graph must put the newest month on the right: %+v", chart.PlotBars)
+	}
 	weekly, more := HistoryPage(history, "weekly", 2)
 	if !more || len(weekly.Bars) != 2 || weekly.Bars[0].Week != "2026-03-30" || weekly.Bars[1].Week != "2026-03-23" {
 		t.Fatalf("weekly page is not newest first: %+v", weekly.Bars)
+	}
+	if weekly.PlotBars[0].Week != "2026-03-23" || weekly.PlotBars[1].Week != "2026-03-30" || weekly.PlotBars[0].CenterX >= weekly.PlotBars[1].CenterX {
+		t.Fatalf("weekly graph must put the newest week on the right: %+v", weekly.PlotBars)
 	}
 }
