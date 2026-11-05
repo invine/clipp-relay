@@ -32,12 +32,63 @@ type historyTick struct {
 	Y     float64
 }
 
-type historyHistogram struct {
+// HistoryHistogram holds the geometry and values for one history page.
+type HistoryHistogram struct {
 	Width, Right int
+	PlotWidth    int
 	Bars         []historyBar
 	Ticks        []historyTick
 	AllZero      bool
 	HasCurrent   bool
+}
+
+type historyHistogram = HistoryHistogram
+
+// HistoryPage groups the complete retained snapshot before selecting a page, so
+// a monthly total never changes as more weeks from that month are revealed.
+func HistoryPage(history []QuotaHistoryEntry, group string, limit int) (HistoryHistogram, bool) {
+	weeks := QuotaHistoryRange(history, true)
+	more := false
+	if group == "monthly" {
+		months := 0
+		lastMonth := ""
+		start := len(weeks)
+		for i := len(weeks) - 1; i >= 0; i-- {
+			if len(weeks[i].Week) < len("2006-01") {
+				continue
+			}
+			month := weeks[i].Week[:len("2006-01")]
+			if month != lastMonth {
+				months++
+				lastMonth = month
+			}
+			if months > limit {
+				more = true
+				break
+			}
+			start = i
+		}
+		weeks = weeks[start:]
+	} else if len(weeks) > limit {
+		more = true
+		weeks = weeks[len(weeks)-limit:]
+	}
+	chart := quotaHistogram(weeks)
+	if group == "monthly" {
+		chart = quotaMonthlyHistogram(weeks)
+	}
+	slices.Reverse(chart.Bars)
+	chart.Width = 80 + 64*len(chart.Bars)
+	chart.Right = chart.Width - 16
+	chart.PlotWidth = chart.Width - 64
+	chart.HasCurrent = false
+	for i := range chart.Bars {
+		bar := &chart.Bars[i]
+		bar.CenterX = 96 + 64*float64(i)
+		bar.X = bar.CenterX - 18
+		chart.HasCurrent = chart.HasCurrent || bar.Current
+	}
+	return chart, more
 }
 
 func QuotaHistoryRange(history []QuotaHistoryEntry, all bool) []QuotaHistoryEntry {

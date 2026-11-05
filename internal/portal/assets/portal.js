@@ -29,21 +29,62 @@ document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
 
 document.documentElement.classList.add("js");
 
-document.querySelectorAll("[data-history-interval]").forEach((form) => {
-  const start = form.querySelector('[name="start"]');
-  const end = form.querySelector('[name="end"]');
-  const validate = () => {
-    end.setCustomValidity("");
-    if (!start.value || !end.value) return;
-    const [year, month, day] = start.value.split("-").map(Number);
-    const lastDay = new Date(Date.UTC(year + 1, month, 0)).getUTCDate();
-    const limit = `${String(year + 1).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
-    if (end.value < start.value || end.value > limit) end.setCustomValidity("Choose dates in order, no more than one calendar year apart.");
+// Fetch the same account-scoped page used by the table's Show more link.
+// Replacing the shared graph/table fragment keeps grouping and page size in sync.
+function setupHistory(root) {
+  const scroll = root.querySelector(".history-chart-scroll");
+  const more = root.querySelector("[data-history-more]");
+  if (!scroll || !more) return;
+  let loading = false;
+  let dragging = null;
+  const loadMore = async () => {
+    if (loading || !more.isConnected) return;
+    loading = true;
+    const position = scroll.scrollLeft;
+    const tableOpen = root.querySelector(".history-table-details")?.open;
+    more.setAttribute("aria-busy", "true");
+    try {
+      const response = await fetch(more.href, { credentials: "same-origin" });
+      if (!response.ok) throw new Error("History request failed");
+      const page = new DOMParser().parseFromString(await response.text(), "text/html");
+      const next = page.querySelector("[data-history-data]");
+      if (!next) throw new Error("History is unavailable");
+      root.replaceWith(next);
+      const details = next.querySelector(".history-table-details");
+      if (details) details.open = !!tableOpen;
+      const nextScroll = next.querySelector(".history-chart-scroll");
+      if (nextScroll) nextScroll.scrollLeft = position;
+      const status = next.querySelector("[data-history-status]");
+      if (status) status.textContent = "Older history loaded.";
+      setupHistory(next);
+    } catch {
+      more.removeAttribute("aria-busy");
+      const status = root.querySelector("[data-history-status]");
+      if (status) status.textContent = "Could not load older history. Use Show more to try again.";
+      loading = false;
+    }
   };
-  start.addEventListener("input", validate);
-  end.addEventListener("input", validate);
-  form.addEventListener("submit", validate);
-});
+  scroll.addEventListener("scroll", () => {
+    if (scroll.scrollWidth > scroll.clientWidth && scroll.scrollLeft + scroll.clientWidth >= scroll.scrollWidth - 12) loadMore();
+  }, { passive: true });
+  scroll.addEventListener("pointerdown", (event) => {
+    if (event.pointerType !== "mouse" || event.button !== 0) return;
+    dragging = { x: event.clientX, left: scroll.scrollLeft };
+    scroll.setPointerCapture(event.pointerId);
+  });
+  scroll.addEventListener("pointermove", (event) => {
+    if (dragging) scroll.scrollLeft = dragging.left + dragging.x - event.clientX;
+  });
+  scroll.addEventListener("pointerup", () => { dragging = null; });
+  scroll.addEventListener("pointercancel", () => { dragging = null; });
+  more.addEventListener("click", (event) => {
+    event.preventDefault();
+    loadMore();
+  });
+  // Fill wide viewports until there is content to scroll or history is exhausted.
+  if (scroll.scrollWidth <= scroll.clientWidth + 1) loadMore();
+}
+document.querySelectorAll("[data-history-data]").forEach(setupHistory);
 
 document.querySelectorAll(".workspace-menu").forEach((menu) => {
   const summary = menu.querySelector("summary");
