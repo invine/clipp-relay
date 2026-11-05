@@ -100,7 +100,8 @@ func TestOwnerHistoryProgressiveDisclosure(t *testing.T) {
 				if link == nil {
 					t.Fatalf("limit %d page %d: Show more missing", tc.limit, page)
 				}
-				path = html.UnescapeString(link[1])
+				// Browsers do not send URL fragments to the server.
+				path, _, _ = strings.Cut(html.UnescapeString(link[1]), "#")
 			}
 		}
 	}
