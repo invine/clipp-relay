@@ -59,7 +59,7 @@ func TestOwnerHistoryIncludesRetainedWeeksBeyondPreviousBoundary(t *testing.T) {
 	seedRecordedWeek(t, p, week.AddDate(0, 0, -91), 23456)
 	seedRecordedWeek(t, p, week.AddDate(0, 0, -364), 34567)
 	seedRecordedWeek(t, p, week.AddDate(0, 0, -371), 45678)
-	resp := portalRequest(p.auth, "GET", "/?history=all", p.owner, nil, "")
+	resp := portalRequest(p.auth, "GET", "/?history_rows=53", p.owner, nil, "")
 	for _, want := range []string{"23456 bytes", "34567 bytes"} {
 		if resp.Code != 200 || !strings.Contains(resp.Body.String(), want) {
 			t.Fatalf("owner history missing %q: status %d", want, resp.Code)

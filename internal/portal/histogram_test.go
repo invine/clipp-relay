@@ -76,3 +76,15 @@ func TestQuotaHistogramDoesNotInventCurrentWeekOrZeroForMissingData(t *testing.T
 		t.Fatalf("missing old week presented as current or zero: %+v", chart)
 	}
 }
+
+func TestMonthlyHistogramGroupsWholeWeeksByUTCStartMonth(t *testing.T) {
+	chart := quotaMonthlyHistogram([]QuotaHistoryEntry{
+		{Week: "2026-01-05", Recorded: 2048, Observed: true},
+		{Week: "2025-12-29", Recorded: 1024, Observed: true},
+		{Week: "2025-12-22", Recorded: 0, Observed: true},
+		{Week: "2025-12-15", Observed: false},
+	})
+	if len(chart.Bars) != 2 || chart.Bars[0].Week != "2025-12" || chart.Bars[0].ExactBytes != "1024" || chart.Bars[1].ExactBytes != "2048" || !chart.Bars[0].Partial {
+		t.Fatalf("monthly buckets must retain whole observed week totals and disclose missing observations: %+v", chart.Bars)
+	}
+}

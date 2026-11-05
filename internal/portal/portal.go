@@ -16,10 +16,11 @@ import (
 var files embed.FS
 
 var pages = template.Must(template.New("portal").Funcs(template.FuncMap{
-	"bytes":        FormatBytes,
-	"byteInput":    byteInput,
-	"histogram":    quotaHistogram,
-	"emailPattern": func(email string) string { return regexp.QuoteMeta(email) },
+	"bytes":            FormatBytes,
+	"byteInput":        byteInput,
+	"histogram":        quotaHistogram,
+	"monthlyHistogram": quotaMonthlyHistogram,
+	"emailPattern":     func(email string) string { return regexp.QuoteMeta(email) },
 	"clientName": func(client string) string {
 		switch client {
 		case "electron":

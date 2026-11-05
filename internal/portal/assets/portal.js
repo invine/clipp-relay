@@ -1,5 +1,21 @@
 document.documentElement.classList.add("js");
 
+document.querySelectorAll("[data-history-interval]").forEach((form) => {
+  const start = form.querySelector('[name="start"]');
+  const end = form.querySelector('[name="end"]');
+  const validate = () => {
+    end.setCustomValidity("");
+    if (!start.value || !end.value) return;
+    const [year, month, day] = start.value.split("-").map(Number);
+    const lastDay = new Date(Date.UTC(year + 1, month, 0)).getUTCDate();
+    const limit = `${String(year + 1).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(Math.min(day, lastDay)).padStart(2, "0")}`;
+    if (end.value < start.value || end.value > limit) end.setCustomValidity("Choose dates in order, no more than one calendar year apart.");
+  };
+  start.addEventListener("input", validate);
+  end.addEventListener("input", validate);
+  form.addEventListener("submit", validate);
+});
+
 document.querySelectorAll(".workspace-menu").forEach((menu) => {
   const summary = menu.querySelector("summary");
   menu.addEventListener("keydown", (event) => {

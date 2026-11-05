@@ -992,6 +992,21 @@ func (s *Server) verify(ctx context.Context, raw, nonce string) (identity, error
 
 type quotaHistory = portal.QuotaHistoryEntry
 
+// historyInterval uses inclusive UTC week-start dates. The anniversary is
+// clamped to February 28 when a leap-day start has no next-year equivalent.
+func historyInterval(start, end string) (time.Time, time.Time, bool) {
+	a, errA := time.Parse("2006-01-02", start)
+	b, errB := time.Parse("2006-01-02", end)
+	if errA != nil || errB != nil || a.Format("2006-01-02") != start || b.Format("2006-01-02") != end {
+		return time.Time{}, time.Time{}, false
+	}
+	limit := a.AddDate(1, 0, 0)
+	if limit.Month() != a.Month() {
+		limit = time.Date(a.Year()+1, a.Month()+1, 0, 0, 0, 0, 0, time.UTC)
+	}
+	return a, b, !b.Before(a) && !b.After(limit)
+}
+
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" && r.URL.Path != "/account/security" {
 		http.NotFound(w, r)
@@ -1059,11 +1074,38 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503)
 		return
 	}
-	showAllHistory := r.URL.Query().Get("history") == "all"
+	query := r.URL.Query()
+	endDate := time.Now().UTC().Format("2006-01-02")
+	startDate := time.Now().UTC().AddDate(-1, 0, 0).Format("2006-01-02")
+	if query.Has("start") || query.Has("end") {
+		startDate, endDate = query.Get("start"), query.Get("end")
+	}
+	start, end, intervalValid := historyInterval(startDate, endDate)
+	intervalError := ""
+	if !intervalValid && e == nil && status == "Active" {
+		intervalError = "Choose valid UTC start and end dates in order, no more than one calendar year apart."
+	}
+	group := "weekly"
+	if query.Get("group") == "monthly" {
+		group = "monthly"
+	}
 	for i := range history {
 		history[i].Current = history[i].Week == weekStart.UTC().Format("2006-01-02")
 	}
-	chartHistory := portal.QuotaHistoryRange(history, showAllHistory)
+	selected := history[:0]
+	observed := false
+	for _, row := range history {
+		date, err := time.Parse("2006-01-02", row.Week)
+		if intervalValid && err == nil && !date.Before(start) && !date.After(end) {
+			selected = append(selected, row)
+			observed = observed || row.Observed
+		}
+	}
+	if !observed {
+		selected = nil
+	}
+	history = selected
+	chartHistory := portal.QuotaHistoryRange(history, true)
 	sort.Slice(history, func(i, j int) bool { return history[i].Week > history[j].Week })
 	visibleRows := 4
 	if rows, err := strconv.Atoi(r.URL.Query().Get("history_rows")); err == nil && rows >= 4 {
@@ -1073,6 +1115,13 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	if visibleRows < len(history) {
 		nextRows = min(visibleRows+10, len(history))
 		history = history[:visibleRows]
+	}
+	link := func(g string, rows int) string {
+		v := url.Values{"start": {startDate}, "end": {endDate}, "group": {g}}
+		if rows > 0 {
+			v.Set("history_rows", strconv.Itoa(rows))
+		}
+		return "/?" + v.Encode() + "#history-title"
 	}
 	var liveSessions, activeGrants int
 	var liveKnown, grantsKnown bool
@@ -1103,25 +1152,26 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	relayURL, _ := url.Parse(s.Origin)
 	pageData := struct {
-		SignedIn                               bool
-		Status, Description, Email, CSRF       string
-		DiscoveryURL, RelayHost                string
-		Active, Admin                          bool
-		Security                               bool
-		Notice                                 string
-		RecoveryHeld                           bool
-		WeekStart                              time.Time
-		WeeklyBytes                            int64
-		Sessions                               int
-		Recorded, Percent                      int64
-		Remaining                              int64
-		UsageState                             string
-		History, ChartHistory                  []quotaHistory
-		NextHistoryRows                        int
-		ShowAllHistory                         bool
-		LiveSessions, ActiveGrants, GrantLimit int
-		LiveSessionsKnown, ActiveGrantsKnown   bool
-	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", relayURL.Host, status == "Active" && !recoveryHeld, admin, r.URL.Path == "/account/security", r.URL.Query().Get("notice"), recoveryHeld, weekStart, bytesValue, sessionsValue, recorded, percent, remaining, usageState, history, chartHistory, nextRows, showAllHistory, liveSessions, activeGrants, 20, liveKnown, grantsKnown}
+		SignedIn                                               bool
+		Status, Description, Email, CSRF                       string
+		DiscoveryURL, RelayHost                                string
+		Active, Admin                                          bool
+		Security                                               bool
+		Notice                                                 string
+		RecoveryHeld                                           bool
+		WeekStart                                              time.Time
+		WeeklyBytes                                            int64
+		Sessions                                               int
+		Recorded, Percent                                      int64
+		Remaining                                              int64
+		UsageState                                             string
+		History, ChartHistory                                  []quotaHistory
+		NextHistoryRows                                        int
+		HistoryStart, HistoryEnd, HistoryGroup                 string
+		HistoryError, WeeklyLink, MonthlyLink, MoreHistoryLink string
+		LiveSessions, ActiveGrants, GrantLimit                 int
+		LiveSessionsKnown, ActiveGrantsKnown                   bool
+	}{e == nil, status, description, email, csrf, s.Origin + "/v1/relay", relayURL.Host, status == "Active" && !recoveryHeld, admin, r.URL.Path == "/account/security", r.URL.Query().Get("notice"), recoveryHeld, weekStart, bytesValue, sessionsValue, recorded, percent, remaining, usageState, history, chartHistory, nextRows, startDate, endDate, group, intervalError, link("weekly", visibleRows), link("monthly", visibleRows), link(group, nextRows), liveSessions, activeGrants, 20, liveKnown, grantsKnown}
 	if pageData.Security && !pageData.SignedIn {
 		http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 		return
@@ -1130,7 +1180,11 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		portal.Render(w, http.StatusOK, "account-security", pageData)
 		return
 	}
-	portal.Render(w, http.StatusOK, "account", pageData)
+	responseStatus := http.StatusOK
+	if intervalError != "" {
+		responseStatus = http.StatusBadRequest
+	}
+	portal.Render(w, responseStatus, "account", pageData)
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != s.Origin {
