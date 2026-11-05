@@ -22,7 +22,7 @@ func (r *ReadViews) OwnerProfile(ctx context.Context, id string, digest []byte, 
 SELECT a.status,a.email,a.email_verified,a.hosted_domain,a.recovery_review_hold,(SELECT monday::timestamp AT TIME ZONE 'UTC' FROM current_week),COALESCE(a.weekly_bytes_override,q.weekly_bytes),COALESCE(a.sessions_override,q.sessions),
 COALESCE((SELECT u.recorded_bytes FROM public.weekly_relay_usage u WHERE u.account_id=a.id AND u.week_start=(SELECT monday FROM current_week)),0),
 (SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'recorded',COALESCE(u.recorded_bytes,0),'observed',u.account_id IS NOT NULL) ORDER BY w.week_start DESC)
- FROM (SELECT ((SELECT monday FROM current_week)-7*n)::date AS week_start FROM generate_series(0,12) n) w
+ FROM (SELECT ((SELECT monday FROM current_week)-7*n)::date AS week_start FROM generate_series(0,52) n) w
  LEFT JOIN public.weekly_relay_usage u ON u.account_id=a.id AND u.week_start=w.week_start)
 FROM public.portal_sessions ps JOIN public.accounts a ON a.id=ps.account_id LEFT JOIN public.quota_plans q ON q.id=a.plan_id
 WHERE a.id=$1 AND ps.credential_digest=$2 AND ps.pepper_version=$3 AND ps.credential_generation=a.credential_generation
@@ -38,7 +38,7 @@ func (r *ReadViews) AdminAccount(ctx context.Context, id string) (persistence.Ad
 SELECT a.id::text,a.email,a.status,COALESCE(a.plan_id::text,''),COALESCE(q.name,''),COALESCE(a.weekly_bytes_override::text,''),COALESCE(a.sessions_override::text,''),a.revision,a.recovery_review_hold,q.archived_at IS NOT NULL,
 COALESCE(a.weekly_bytes_override,q.weekly_bytes,0),COALESCE(a.sessions_override,q.sessions,0),
 COALESCE(u.recorded_bytes,0),GREATEST(0,COALESCE(a.weekly_bytes_override,q.weekly_bytes,0)-COALESCE(u.recorded_bytes,0)),
-(SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'recorded',COALESCE(h.recorded_bytes,0)) ORDER BY w.week_start DESC) FROM (SELECT ((SELECT monday FROM cw)-7*n)::date AS week_start FROM generate_series(0,12) n) w LEFT JOIN public.weekly_relay_usage h ON h.account_id=a.id AND h.week_start=w.week_start)
+(SELECT jsonb_agg(jsonb_build_object('week',w.week_start,'recorded',COALESCE(h.recorded_bytes,0)) ORDER BY w.week_start DESC) FROM (SELECT ((SELECT monday FROM cw)-7*n)::date AS week_start FROM generate_series(0,52) n) w LEFT JOIN public.weekly_relay_usage h ON h.account_id=a.id AND h.week_start=w.week_start)
 FROM public.accounts a LEFT JOIN public.quota_plans q ON q.id=a.plan_id LEFT JOIN public.weekly_relay_usage u ON u.account_id=a.id AND u.week_start=(SELECT monday FROM cw)
 WHERE a.id=$1 AND a.deletion_started_at IS NULL`, id).Scan(&a.ID, &a.Email, &a.Status, &a.PlanID, &a.PlanName, &a.WeeklyOverride, &a.SessionOverride, &a.Revision, &a.RecoveryHeld, &a.PlanArchived, &a.EffectiveBytes, &a.EffectiveSessions, &a.Recorded, &a.Remaining, &a.HistoryJSON)
 	return a, readError(err)

@@ -27,7 +27,7 @@ func (m *Maintenance) CleanupHealth(ctx context.Context) (persistence.CleanupHea
 		COALESCE((SELECT min(absolute_expires_at) FROM public.portal_sessions WHERE absolute_expires_at<clock_timestamp()),clock_timestamp()),
 		COALESCE((SELECT min(deleted_at) FROM public.accounts WHERE deleted_at IS NOT NULL),clock_timestamp()),
 		COALESCE((SELECT min(last_portal_login_at+interval '90 days') FROM public.accounts WHERE status='Pending' AND deletion_started_at IS NULL AND last_portal_login_at<clock_timestamp()-interval '90 days'),clock_timestamp()),
-		COALESCE((SELECT min((week_start::timestamp AT TIME ZONE 'UTC')+interval '91 days') FROM public.weekly_relay_usage WHERE week_start<(date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-84)),clock_timestamp()),
+		COALESCE((SELECT min((week_start::timestamp AT TIME ZONE 'UTC')+interval '371 days') FROM public.weekly_relay_usage WHERE week_start<(date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-364)),clock_timestamp()),
 		COALESCE((SELECT min(occurred_at+interval '180 days') FROM public.audit_events WHERE occurred_at<clock_timestamp()-interval '180 days'),clock_timestamp()),
 		COALESCE((SELECT min((week_start::timestamp AT TIME ZONE 'UTC')+interval '7 days') FROM public.retained_quota_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date),clock_timestamp())
 	)),0)`).Scan(&seconds); err != nil {
@@ -90,7 +90,7 @@ SELECT (SELECT count(*) FROM removed),(SELECT count(*) FROM candidates),
 
 var cleanupQueries = map[persistence.CleanupOperation]cleanupQuery{
 	persistence.CleanupRetainedUsage:            {sql: `DELETE FROM public.retained_quota_usage WHERE (pepper_version,identity_digest,week_start) IN (SELECT pepper_version,identity_digest,week_start FROM public.retained_quota_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date ORDER BY week_start LIMIT $1)`},
-	persistence.CleanupWeeklyUsage:              {sql: `DELETE FROM public.weekly_relay_usage WHERE (account_id,week_start) IN (SELECT account_id,week_start FROM public.weekly_relay_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-84 ORDER BY week_start,account_id LIMIT $1)`},
+	persistence.CleanupWeeklyUsage:              {sql: `DELETE FROM public.weekly_relay_usage WHERE (account_id,week_start) IN (SELECT account_id,week_start FROM public.weekly_relay_usage WHERE week_start<date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-364 ORDER BY week_start,account_id LIMIT $1)`},
 	persistence.CleanupAuthorizationCodes:       {sql: `DELETE FROM public.native_authorization_codes WHERE credential_digest IN (SELECT credential_digest FROM public.native_authorization_codes WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`},
 	persistence.CleanupAccessTokens:             {sql: `DELETE FROM public.native_access_tokens WHERE credential_digest IN (SELECT credential_digest FROM public.native_access_tokens WHERE expires_at<clock_timestamp()-interval '1 hour' ORDER BY expires_at LIMIT $1)`},
 	persistence.CleanupTerminatedAccessTokens:   {sql: `DELETE FROM public.native_access_tokens WHERE credential_digest IN (SELECT t.credential_digest FROM public.native_access_tokens t JOIN public.native_login_grants g ON g.id=t.grant_id WHERE g.terminated_at<clock_timestamp()-interval '1 hour' ORDER BY g.terminated_at LIMIT $1)`},

@@ -51,7 +51,7 @@ Quota keeps pending observations, the immutable in-flight batch, its confirmed
 receipt, uncertainty and retirement together for each account and week. Each
 window serializes settlement without holding the observation lock during SQL;
 eligibility and policy changes use the same effective-usage calculation.
-The owner profile shows confirmed Recorded Relay Usage and twelve preceding
+The owner profile shows confirmed Recorded Relay Usage and 52 preceding
 weekly totals. Its capacity table distinguishes configured limits from separately
 sampled live counts. Active Login Grants are sampled from PostgreSQL; live Relay
 Sessions are sampled from this process. A confirmed grant-local revocation closes
@@ -297,8 +297,9 @@ unavailable, even when settlement writes succeed. This is a soft allowance,
 with no hard boundary byte guarantee.
 Observations retain their processing week through lock waits and lost replies.
 
-History retains the current week and twelve preceding weeks as absolute totals,
-not percentages of today's allowance. Remaining allowance is clamped to zero
+History retains the current week and 52 preceding weeks as absolute totals,
+not percentages of today's allowance. Weeks already removed under the previous
+retention policy cannot be restored. Remaining allowance is clamped to zero
 after overrun. Weekly totals and their latest retry receipts expire together;
 bounded cleanup also removes hidden account children fairly. Local unresolved
 work stays attached to its original week until settlement or authoritative

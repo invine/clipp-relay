@@ -163,7 +163,7 @@ func (q *Quota) settleInOperation(op persistence.AccountingOperation, b settleme
 	if b.WeekStart.After(current) {
 		return RecordedUsage{}, ErrTemporary
 	}
-	if b.WeekStart.Before(current.AddDate(0, 0, -84)) {
+	if b.WeekStart.Before(current.AddDate(0, 0, -364)) {
 		return RecordedUsage{}, ErrUsageRetired
 	}
 	result, err := tx.SettleUsage(ctx, persistence.UsageSettlement{AccountID: b.AccountID, WeekStart: b.WeekStart, OperationID: b.OperationID, DeltaBytes: b.DeltaBytes, Sequence: b.Sequence})
@@ -233,7 +233,7 @@ func (q *Quota) RecordedUsage(ctx context.Context, id string, week time.Time) (R
 	if week.After(current) {
 		return RecordedUsage{}, ErrTemporary
 	}
-	if week.Before(current.AddDate(0, 0, -84)) {
+	if week.Before(current.AddDate(0, 0, -364)) {
 		return RecordedUsage{}, ErrUsageRetired
 	}
 	return result, nil

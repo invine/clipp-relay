@@ -91,7 +91,7 @@
 <p class="muted fine-print">Starts {{.WeekStart.Format "2 January 2006"}} 00:00 UTC. Resets next Monday at 00:00 UTC. Unused allowance does not roll over.</p>
 <details class="explanation">
 <summary>What does Recorded Relay Usage mean?</summary>
-<p>Confirmed durable usage has a periodic confirmation lag; recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for the same account; control traffic can count too. This conservative measure is not exact application payload traffic. History retains the current week + twelve preceding weeks as absolute totals, independent of today’s allowance.</p>
+<p>Confirmed durable usage has a periodic confirmation lag; recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for the same account; control traffic can count too. This conservative measure is not exact application payload traffic. History retains the current week + 52 preceding weeks as absolute totals, independent of today’s allowance.</p>
 
 </details>
     </section>
@@ -135,7 +135,7 @@
 {{with histogram .History}}
 {{$chart := .}}
 <nav class="history-range" aria-label="Weekly history range">
-  {{if $.ShowAllHistory}}<a href="/">Latest four weeks</a><span aria-current="page">All thirteen weeks</span>{{else}}<span aria-current="page">Latest four weeks</span><a href="/?history=all">All thirteen weeks</a>{{end}}
+  {{if $.ShowAllHistory}}<a href="/">Latest four weeks</a><span aria-current="page">All 53 weeks</span>{{else}}<span aria-current="page">Latest four weeks</span><a href="/?history=all">All 53 weeks</a>{{end}}
 </nav>
 <figure class="history-chart {{if $.ShowAllHistory}}range-all{{else}}range-recent{{end}}" aria-labelledby="history-title">
   <div class="history-chart-heading">
