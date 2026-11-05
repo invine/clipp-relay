@@ -228,9 +228,9 @@ func TestPeriodicRetiredPendingCannotBlockCurrentWeek(t *testing.T) {
 		t.Fatal(err)
 	}
 	q.afterCommit = nil
-	q.adjustTime = func(now time.Time) time.Time { return now.AddDate(0, 0, 91) }
+	q.adjustTime = func(now time.Time) time.Time { return now.AddDate(0, 0, 371) }
 	q.clock.mu.Lock()
-	q.clock.sampled = q.clock.sampled.AddDate(0, 0, 91)
+	q.clock.sampled = q.clock.sampled.AddDate(0, 0, 371)
 	q.clock.mu.Unlock()
 	if err := q.FlushAccounting(ctx, id); err != nil {
 		t.Fatalf("retired work prevented bounded cleanup: %v", err)

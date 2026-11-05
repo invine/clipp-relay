@@ -32,7 +32,7 @@ VALUES($1,'https://accounts.google.com','retention-boundary','boundary@example.t
 		t.Fatal(err)
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id=$1`, id)
-	for _, offset := range []int{0, 12, 13} {
+	for _, offset := range []int{0, 12, 13, 52, 53} {
 		_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes)
 VALUES($1,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*$2,10,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f',10)`, id, offset)
 		if err != nil {
@@ -73,7 +73,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var oldHistory, oldRetained, oldAudit int
-		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-91`, id).Scan(&oldHistory)
+		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-371`, id).Scan(&oldHistory)
 		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.retained_quota_usage WHERE identity_digest=decode(repeat('cd',32),'hex')`).Scan(&oldRetained)
 		_ = db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id='2d41eb9e-c19a-4dcf-9094-f64123115573'`).Scan(&oldAudit)
 		if oldHistory == 0 && oldRetained == 0 && oldAudit == 0 {
@@ -103,7 +103,7 @@ VALUES('2d41eb9e-c19a-4dcf-9094-f64123115573',clock_timestamp()-interval '181 da
 	if err := db.Pool.QueryRow(ctx, `SELECT count(*) FROM public.audit_events WHERE id='24775912-acbe-4226-bbf9-c8da7d17877d'`).Scan(&currentAudit); err != nil {
 		t.Fatal(err)
 	}
-	if history != 2 || retained != 1 || expiredRetained != 0 || liveHash != 1 || account != 1 || oldAudit != 0 || currentAudit != 1 {
+	if history != 4 || retained != 1 || expiredRetained != 0 || liveHash != 1 || account != 1 || oldAudit != 0 || currentAudit != 1 {
 		t.Fatalf("retention boundary: history=%d retained=%d expired retained=%d live hash=%d active account=%d old audit=%d current audit=%d", history, retained, expiredRetained, liveHash, account, oldAudit, currentAudit)
 	}
 }
@@ -468,7 +468,7 @@ FROM public.accounts WHERE subject LIKE 'fair-page-%'`, s.CurrentPepper)
 	}
 }
 
-func TestMaintenanceRetainsThirteenRecordedWindowsAndRemovesHiddenChildren(t *testing.T) {
+func TestMaintenanceRetainsFiftyThreeRecordedWindowsAndRemovesHiddenChildren(t *testing.T) {
 	c, m, db := fixture(t)
 	s := newTestServer(t, db.Pool, c, m, newProvider(t).endpoints())
 	ctx := context.Background()
@@ -480,7 +480,7 @@ func TestMaintenanceRetainsThirteenRecordedWindowsAndRemovesHiddenChildren(t *te
 	}
 	defer db.Pool.Exec(ctx, `DELETE FROM public.accounts WHERE id IN ($1,$2)`, id, hidden)
 	defer db.Pool.Exec(ctx, `DELETE FROM public.weekly_relay_usage WHERE account_id IN ($1,$2)`, id, hidden)
-	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) SELECT $1::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*n,10,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f'::uuid,10 FROM generate_series(0,13) n UNION ALL SELECT $2::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,20,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f',20`, id, hidden)
+	_, err = db.Pool.Exec(ctx, `INSERT INTO public.weekly_relay_usage(account_id,week_start,recorded_bytes,sequence,latest_operation_id,latest_delta_bytes) SELECT $1::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date-7*n,10,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f'::uuid,10 FROM generate_series(0,53) n UNION ALL SELECT $2::uuid,date_trunc('week',clock_timestamp() AT TIME ZONE 'UTC')::date,20,1,'ad243d69-f4a1-4556-bd90-72c8b2b3b09f',20`, id, hidden)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,16 +490,16 @@ func TestMaintenanceRetainsThirteenRecordedWindowsAndRemovesHiddenChildren(t *te
 	defer func() { cancel(); <-done }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		var retained, hiddenCount int
-		err = db.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1),(SELECT count(*) FROM public.accounts WHERE id=$2)`, id, hidden).Scan(&retained, &hiddenCount)
+		var retained, receipts, hiddenCount int
+		err = db.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1),(SELECT count(*) FROM public.weekly_relay_usage WHERE account_id=$1 AND sequence=1 AND latest_operation_id='ad243d69-f4a1-4556-bd90-72c8b2b3b09f' AND latest_delta_bytes=10),(SELECT count(*) FROM public.accounts WHERE id=$2)`, id, hidden).Scan(&retained, &receipts, &hiddenCount)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if retained == 13 && hiddenCount == 0 {
+		if retained == 53 && receipts == 53 && hiddenCount == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("recorded retention: windows=%d hidden=%d", retained, hiddenCount)
+			t.Fatalf("recorded retention: windows=%d receipts=%d hidden=%d", retained, receipts, hiddenCount)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -34,7 +34,7 @@ func TestObservedOwnerAndAdminShowConfirmedUsageAndHistory(t *testing.T) {
 		}
 		out := portalRequest(p.auth, "GET", view.path, cookie, nil, "")
 		body := out.Body.String()
-		for _, want := range []string{"Recorded Relay Usage", "12.06 KiB", "confirmation lag", "HOP and STOP", "current week + twelve", "53.05 KiB", "Remaining allowance: 0 bytes"} {
+		for _, want := range []string{"Recorded Relay Usage", "12.06 KiB", "confirmation lag", "HOP and STOP", "current week + 52", "53.05 KiB", "Remaining allowance: 0 bytes"} {
 			if out.Code != 200 || !strings.Contains(body, want) {
 				t.Fatalf("%s missing %q: %d %s", view.path, want, out.Code, body)
 			}
@@ -49,4 +49,23 @@ func TestObservedOwnerAndAdminShowConfirmedUsageAndHistory(t *testing.T) {
 	client := protectedClient(t, p)
 	requireProtectedAuthentication(t, client, p, `"code":"quota_exhausted"`)
 
+}
+
+func TestOwnerHistoryIncludesRetainedWeeksBeyondPreviousBoundary(t *testing.T) {
+	p := protectedPortalFixture(t)
+	now := time.Now().UTC()
+	week := now.AddDate(0, 0, -(int(now.Weekday())+6)%7)
+	week = time.Date(week.Year(), week.Month(), week.Day(), 0, 0, 0, 0, time.UTC)
+	seedRecordedWeek(t, p, week.AddDate(0, 0, -91), 23456)
+	seedRecordedWeek(t, p, week.AddDate(0, 0, -364), 34567)
+	seedRecordedWeek(t, p, week.AddDate(0, 0, -371), 45678)
+	resp := portalRequest(p.auth, "GET", "/?history=all", p.owner, nil, "")
+	for _, want := range []string{"23456 bytes", "34567 bytes"} {
+		if resp.Code != 200 || !strings.Contains(resp.Body.String(), want) {
+			t.Fatalf("owner history missing %q: status %d", want, resp.Code)
+		}
+	}
+	if strings.Contains(resp.Body.String(), "45678 bytes") {
+		t.Fatal("owner history exposed expired week")
+	}
 }
