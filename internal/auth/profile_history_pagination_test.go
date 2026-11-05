@@ -68,7 +68,9 @@ func TestOwnerHistoryProgressiveDisclosure(t *testing.T) {
 		{3, []int{3}}, {4, []int{4}}, {5, []int{4, 5}}, {53, []int{4, 14, 24, 34, 44, 53}},
 	} {
 		reads.limit = tc.limit
-		path := "/"
+		now := time.Now().UTC()
+		week := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(int(now.Weekday())+6)%7)
+		path := "/?start=" + week.AddDate(-1, 0, 0).Format("2006-01-02") + "&end=" + week.Format("2006-01-02")
 		var previous []string
 		for page, want := range tc.pages {
 			response := portalRequest(s, "GET", path, cookie, nil, "")
