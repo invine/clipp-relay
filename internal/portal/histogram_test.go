@@ -98,3 +98,24 @@ func TestMonthlyHistogramKeepsExactSumsBeyondSignedByteRange(t *testing.T) {
 		t.Fatalf("monthly total overflowed or failed to scale: %+v", chart.Bars)
 	}
 }
+
+func TestHistoryPageKeepsMonthlyTotalsCompleteAndPagesNewestFirst(t *testing.T) {
+	history := []QuotaHistoryEntry{
+		{Week: "2026-03-30", Recorded: 1024, Observed: true, Current: true},
+		{Week: "2026-03-23", Recorded: 2048, Observed: true},
+		{Week: "2026-02-23", Recorded: 4096, Observed: true},
+		{Week: "2026-01-26", Observed: false},
+	}
+	chart, more := HistoryPage(history, "monthly", 1)
+	if !more || len(chart.Bars) != 1 || chart.Bars[0].Week != "2026-03" || chart.Bars[0].ExactBytes != "3072" || !chart.Bars[0].Current {
+		t.Fatalf("first monthly page lost grouping or ordering: %+v", chart.Bars)
+	}
+	chart, more = HistoryPage(history, "monthly", 4)
+	if more || len(chart.Bars) != 3 || chart.Bars[1].Week != "2026-02" || chart.Bars[2].Observed {
+		t.Fatalf("complete monthly page lost missing observation or ordering: %+v", chart.Bars)
+	}
+	weekly, more := HistoryPage(history, "weekly", 2)
+	if !more || len(weekly.Bars) != 2 || weekly.Bars[0].Week != "2026-03-30" || weekly.Bars[1].Week != "2026-03-23" {
+		t.Fatalf("weekly page is not newest first: %+v", weekly.Bars)
+	}
+}

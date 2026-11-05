@@ -125,58 +125,53 @@
 </div>
 
 </div>
-<nav class="history-range" aria-label="Graph grouping">
+<nav class="history-range" aria-label="History grouping">
   {{if eq .HistoryGroup "weekly"}}<span aria-current="page">Weekly</span><a href="{{.MonthlyLink}}">Monthly</a>{{else}}<a href="{{.WeeklyLink}}">Weekly</a><span aria-current="page">Monthly</span>{{end}}
 </nav>
-{{if .History}}
-{{$chart := histogram .ChartHistory}}
-{{if eq .HistoryGroup "monthly"}}{{$chart = monthlyHistogram .ChartHistory}}{{end}}
-{{with $chart}}
+<div class="history-data" data-history-data>
+{{with .Chart}}
+{{if .Bars}}
 <figure class="history-chart" aria-labelledby="history-title">
   <div class="history-chart-heading">
-    <p class="muted fine-print">{{if eq $.HistoryGroup "monthly"}}Recorded Relay Usage · whole weekly totals grouped by the UTC month containing each week start. Totals include observed weeks only.{{else}}Recorded Relay Usage · week starting UTC{{end}}</p>
+    <p class="muted fine-print">{{if eq $.HistoryGroup "monthly"}}Recorded Relay Usage · whole weeks grouped by the UTC month of their start.{{else}}Recorded Relay Usage · week starting UTC{{end}}</p>
     {{if .HasCurrent}}<span class="history-legend"><span aria-hidden="true"></span>{{if eq $.HistoryGroup "monthly"}}Contains current week{{else}}Current week{{end}}</span>{{end}}
   </div>
-  <p class="history-scroll-hint muted fine-print">Scroll horizontally to view the full graph.</p>
-  <div class="history-chart-scroll" tabindex="0" role="region" aria-label="{{if eq $.HistoryGroup "monthly"}}Monthly{{else}}Weekly{{end}} quota histogram, oldest to newest">
-    <svg class="history-histogram" width="{{.Width}}" height="280" viewBox="0 0 {{.Width}} 280" role="group" aria-label="Recorded Relay Usage by {{if eq $.HistoryGroup "monthly"}}month of week start{{else}}week{{end}}">
-      {{range .Ticks}}
-      <line class="history-gridline" x1="64" x2="{{$chart.Right}}" y1="{{.Y}}" y2="{{.Y}}"/>
-      <text class="history-axis" x="54" y="{{.Y}}" dy="4" text-anchor="end">{{.Label}}</text>
-      {{end}}
-      {{range .Bars}}
-      <g class="history-column{{if .Current}} current{{end}}{{if not .Observed}} missing{{end}}" tabindex="0" role="img" aria-label="{{if eq $.HistoryGroup "monthly"}}Month{{else}}Week starting{{end}} {{.Week}} UTC: {{if .Observed}}{{.Value}}{{else}}no recorded observation{{end}}{{if .Partial}}, some weeks have no observation{{end}}{{if .Current}}, {{if eq $.HistoryGroup "monthly"}}contains {{end}}current week{{end}}">
-        <title>{{if eq $.HistoryGroup "monthly"}}Month{{else}}Week starting{{end}} {{.Week}} UTC: {{if .Observed}}{{.Value}} ({{.ExactBytes}} bytes){{else}}no recorded observation{{end}}{{if .Partial}} · some weeks have no observation{{end}}{{if .Current}} · {{if eq $.HistoryGroup "monthly"}}contains {{end}}current week{{end}}</title>
-        {{if .Observed}}{{if .Zero}}<circle class="history-zero-mark{{if .Current}} current{{end}}" cx="{{.CenterX}}" cy="218" r="4"/>{{else}}<rect class="history-bar" x="{{.X}}" y="{{.Y}}" width="36" height="{{.Height}}" rx="4"/>{{end}}{{else}}<circle class="history-missing-mark" cx="{{.CenterX}}" cy="218" r="4"/>{{end}}
-        {{if .Observed}}<text class="history-value" x="{{.CenterX}}" y="{{.ValueY}}" text-anchor="middle">{{.Value}}</text>{{end}}
-        <text class="history-date" x="{{.CenterX}}" y="242" text-anchor="middle">{{.Label}}</text>
-        {{if .Current}}<text class="history-current-label" x="{{.CenterX}}" y="263" text-anchor="middle">{{if eq $.HistoryGroup "monthly"}}Current week{{else}}This week{{end}}</text>{{end}}
-      </g>
-      {{end}}
+  <div class="history-chart-frame">
+    <svg class="history-axis-fixed" width="64" height="280" viewBox="0 0 64 280" preserveAspectRatio="none" aria-hidden="true">
+      {{range .Ticks}}<text class="history-axis" x="60" y="{{.Y}}" dy="4" text-anchor="end">{{.Label}}</text>{{end}}
     </svg>
+    <div class="history-chart-scroll" tabindex="0" role="region" aria-label="{{if eq $.HistoryGroup "monthly"}}Monthly{{else}}Weekly{{end}} usage graph, newest to oldest. Scroll right to load older periods.">
+      <svg class="history-histogram" width="{{.PlotWidth}}" height="280" viewBox="64 0 {{.PlotWidth}} 280" preserveAspectRatio="none" role="group" aria-label="Recorded Relay Usage by {{if eq $.HistoryGroup "monthly"}}month of week start{{else}}week{{end}}">
+        {{range .Ticks}}<line class="history-gridline" x1="64" x2="{{$.Chart.Right}}" y1="{{.Y}}" y2="{{.Y}}"/>{{end}}
+        {{range .Bars}}
+        <g class="history-column{{if .Current}} current{{end}}{{if not .Observed}} missing{{end}}" tabindex="0" role="img" aria-label="{{if eq $.HistoryGroup "monthly"}}Month{{else}}Week starting{{end}} {{.Week}} UTC: {{if .Observed}}{{.Value}}{{else}}no recorded observation{{end}}{{if .Partial}}, some weeks have no observation{{end}}{{if .Current}}, {{if eq $.HistoryGroup "monthly"}}contains {{end}}current week{{end}}">
+          <title>{{if eq $.HistoryGroup "monthly"}}Month{{else}}Week starting{{end}} {{.Week}} UTC: {{if .Observed}}{{.Value}} ({{.ExactBytes}} bytes){{else}}no recorded observation{{end}}{{if .Partial}} · some weeks have no observation{{end}}{{if .Current}} · {{if eq $.HistoryGroup "monthly"}}contains {{end}}current week{{end}}</title>
+          {{if .Observed}}{{if .Zero}}<circle class="history-zero-mark{{if .Current}} current{{end}}" cx="{{.CenterX}}" cy="218" r="4"/>{{else}}<rect class="history-bar" x="{{.X}}" y="{{.Y}}" width="36" height="{{.Height}}" rx="4"/>{{end}}{{else}}<circle class="history-missing-mark" cx="{{.CenterX}}" cy="218" r="4"/>{{end}}
+          {{if .Observed}}<text class="history-value" x="{{.CenterX}}" y="{{.ValueY}}" text-anchor="middle">{{.Value}}</text>{{end}}
+          <text class="history-date" x="{{.CenterX}}" y="242" text-anchor="middle">{{.Label}}</text>
+          {{if .Current}}<text class="history-current-label" x="{{.CenterX}}" y="263" text-anchor="middle">{{if eq $.HistoryGroup "monthly"}}Current{{else}}This week{{end}}</text>{{end}}
+        </g>
+        {{end}}
+      </svg>
+    </div>
   </div>
+  {{if $.MoreHistoryLink}}<p class="history-scroll-hint muted fine-print">Scroll right to load older {{if eq $.HistoryGroup "monthly"}}months{{else}}weeks{{end}}.</p>{{end}}
   {{if .AllZero}}<figcaption class="muted fine-print">Recorded usage was zero in every observed week.</figcaption>{{end}}
 </figure>
+<details class="history-table-details">
+  <summary>{{if eq $.HistoryGroup "monthly"}}Monthly{{else}}Weekly{{end}} usage table</summary>
+  <div class="history-table-wrap" tabindex="0" role="region" aria-label="{{if eq $.HistoryGroup "monthly"}}Monthly{{else}}Weekly{{end}} usage table">
+    <table class="history-table">
+      <caption class="sr-only">{{if eq $.HistoryGroup "monthly"}}Monthly totals grouped by UTC week start{{else}}Weekly Recorded Relay Usage{{end}} with exact byte totals</caption>
+      <thead><tr><th scope="col">{{if eq $.HistoryGroup "monthly"}}Month{{else}}Week starting UTC{{end}}</th><th scope="col">Recorded Relay Usage</th></tr></thead>
+      <tbody>{{range .Bars}}<tr><th scope="row"><time datetime="{{.Week}}">{{.Week}}</time>{{if .Current}} <span class="muted fine-print">· {{if eq $.HistoryGroup "monthly"}}contains {{end}}current week</span>{{end}}</th><td>{{if .Observed}}{{.Value}} <span class="exact-bytes">({{.ExactBytes}} bytes)</span>{{if .Partial}} <span class="muted fine-print">· some weeks have no observation</span>{{end}}{{else}}No observation{{end}}</td></tr>{{end}}</tbody>
+    </table>
+  </div>
+</details>
+{{if $.MoreHistoryLink}}<a class="button secondary history-more" href="{{$.MoreHistoryLink}}" data-history-more>Show more</a><span class="sr-only" data-history-status role="status"></span>{{end}}
+{{else}}<p class="muted">No quota history available.</p>{{end}}
 {{end}}
-{{else}}{{if not .HistoryError}}<p class="muted">No quota history available for this interval.</p>{{end}}{{end}}
-{{if .History}}
-<div class="history-table-wrap" tabindex="0" role="region" aria-label="Weekly usage table">
-<table class="history-table">
-<caption class="sr-only">Weekly Recorded Relay Usage with complete UTC week dates and exact byte totals</caption>
-<thead><tr><th scope="col">Week starting UTC</th><th scope="col">Recorded Relay Usage</th><th scope="col">Observation</th></tr></thead>
-<tbody>{{range .History}}<tr><th scope="row"><time datetime="{{.Week}}">{{.Week}}</time></th><td>{{if .Observed}}{{bytes .Recorded}} <span class="exact-bytes">({{.Recorded}} bytes)</span>{{else}}—{{end}}</td><td>{{if .Observed}}{{if eq .Recorded 0}}Recorded zero{{else}}Recorded{{end}}{{else}}No observation{{end}}{{if .Current}} · current week{{end}}</td></tr>{{end}}</tbody>
-</table>
-{{if .NextHistoryRows}}<a class="button secondary" href="{{.MoreHistoryLink}}">Show more</a>{{end}}
 </div>
-{{end}}
-<form class="history-interval" method="get" action="/" data-history-interval>
-  <div><label for="history-start">Start date</label><input type="date" id="history-start" name="start" value="{{.HistoryStart}}" required aria-describedby="history-date-help"></div>
-  <div><label for="history-end">End date</label><input type="date" id="history-end" name="end" value="{{.HistoryEnd}}" required aria-describedby="history-date-help"></div>
-  <input type="hidden" name="group" value="{{.HistoryGroup}}">
-  <button type="submit">Apply</button>
-</form>
-<p id="history-date-help" class="muted fine-print">Includes weeks whose UTC start date falls on or between these dates. Maximum one calendar year.</p>
-{{if .HistoryError}}<p role="alert" class="fine-print">{{.HistoryError}}</p>{{end}}
 </section>
 {{end}}
 {{if .SignedIn}}
