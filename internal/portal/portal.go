@@ -46,9 +46,14 @@ func Render(w http.ResponseWriter, status int, name string, data any) {
 	_, _ = w.Write(body.Bytes())
 }
 
-// RegisterAssets serves only the two public presentation assets, without exposing templates.
+// RegisterAssets serves the public embedded presentation assets without exposing templates.
 func RegisterAssets(mux *http.ServeMux) {
-	for name, contentType := range map[string]string{"portal.css": "text/css; charset=utf-8", "portal.js": "text/javascript; charset=utf-8"} {
+	for name, contentType := range map[string]string{
+		"portal.css":     "text/css; charset=utf-8",
+		"portal.js":      "text/javascript; charset=utf-8",
+		"clipp-mark.svg": "image/svg+xml",
+		"clipp-icon.png": "image/png",
+	} {
 		body, err := files.ReadFile("assets/" + name)
 		if err != nil {
 			panic(err)

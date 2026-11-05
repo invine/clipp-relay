@@ -2,22 +2,23 @@
 {{template "head" "Clipp Relay — Access & security"}}
 <div class="portal-workspace">
 <aside class="workspace-sidebar" aria-label="Portal navigation">
-  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="brand" href="/"><img class="brand-mark" src="/assets/clipp-icon.png" alt="">clipp <span class="brand-product">relay</span></a>
   <nav class="workspace-nav" aria-label="Portal navigation">
-    <a href="/">Your account</a><a href="/account/security" aria-current="page">Access &amp; security</a>
-    {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
+    <a href="/">{{template "nav-icon-account" .}}Your account</a><a href="/account/security" aria-current="page">{{template "nav-icon-security" .}}Access &amp; security</a>
+    {{if .Admin}}<span class="nav-group-label">Administration</span><a href="/admin">{{template "nav-icon-admin" .}}Account reviews</a><a href="/admin/plans">{{template "nav-icon-plans" .}}Quota plans</a>{{end}}
   </nav>
-  <div class="sidebar-footer"><div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form></div>
+  <div class="sidebar-footer">{{template "theme-control"}}<div class="sidebar-account"><span class="avatar" aria-hidden="true">{{printf "%.1s" .Email}}</span><span class="sidebar-email">{{.Email}}</span></div><form class="sidebar-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Log out</button></form></div>
 </aside>
 <div class="workspace-main">
 <header class="workspace-bar">
-  <a class="mobile-brand brand" href="/"><span class="brand-mark" aria-hidden="true"></span>Clipp <span class="brand-product">Relay</span></a>
+  <a class="mobile-brand brand" href="/"><img class="brand-mark" src="/assets/clipp-icon.png" alt="">clipp <span class="brand-product">relay</span></a>
   <span class="workspace-context"><span class="workspace-relay">{{.RelayHost}}</span><span aria-hidden="true">/</span> Access &amp; security</span>
   <span class="bar-account">{{.Email}}</span>
   <details class="workspace-menu"><summary aria-label="Open or close portal navigation"><span class="menu-icon" aria-hidden="true"></span><span>Menu</span></summary><nav aria-label="Portal navigation">
     <a href="/">Your account</a><a href="/account/security" aria-current="page">Access &amp; security</a>
     {{if .Admin}}<a href="/admin">Account reviews</a><a href="/admin/plans">Quota plans</a>{{end}}
-    <form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Log out</button></form>
+    <form class="menu-logout" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit"><svg class="nav-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10"/></svg>Log out</button></form>
+    {{template "theme-control"}}
   </nav></details>
 </header>
 <main class="page">
@@ -28,31 +29,34 @@
 <p class="muted">{{if .Active}}Your account is approved to use relay capacity.{{else}}{{.Description}}{{end}}</p>
 <p class="muted">Active Login Grants: {{if .ActiveGrantsKnown}}{{.ActiveGrants}} of {{.GrantLimit}}{{else}}Unavailable · limit {{.GrantLimit}}{{end}}. Login Grants authorize Clipp apps; this portal does not maintain a device list.</p>
 </section>
-<section class="card" aria-labelledby="portal-session-title">
+<div class="security-tasks">
+<section class="card security-action" aria-labelledby="portal-session-title">
+<p class="security-scope">Only this browser</p>
 <h2 id="portal-session-title">This portal</h2>
 <p>Log out of this portal to end this browser session. Your Clipp Login Grants, Relay Access Tokens and live Relay Sessions remain active.</p>
 <form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary">Log out of this portal</button></form>
 </section>
-<section class="card" aria-labelledby="revoke-title">
-<h2 id="revoke-title">Sign out everywhere</h2>
-<p>This will revoke every Login Grant and Relay Access Token for <strong>{{.Email}}</strong>, end all portal sessions, and invalidate its live Relay Sessions. Clipp apps will need to sign in again. Physical connection closure may take a short time after access is invalidated.</p>
+<details class="card security-action security-review" aria-labelledby="revoke-title">
+<summary><span><span class="security-scope">All access for this Relay Account</span><span id="revoke-title" class="security-review-title">Sign out everywhere</span></span><span class="security-review-affordance">Review</span></summary>
+<p>This Account-wide Revocation will revoke every Login Grant and Relay Access Token for <strong>{{.Email}}</strong>, end all Portal Sessions, and invalidate its live Relay Sessions. Clipp apps will need to sign in again. Access is invalidated before this action is reported complete; physical connection closure may take a short time. Your account status and quota assignments do not change.</p>
 <form method="post" action="/auth/revoke" class="reviewed-action">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label><input type="checkbox" name="confirm" value="yes" required> I understand this signs {{.Email}} out everywhere.</label>
 <button class="secondary">Confirm sign out everywhere</button>
 </form>
-</section>
-<details class="danger-details">
-<summary>Delete relay account</summary>
-<p>Deleting your account closes relay access, ends your Portal Sessions and Clipp app authorizations, and permanently removes this Relay Account. The deletion may take time to finish; closing this page will not cancel it.</p>
+</details>
+<details class="danger-details security-action">
+<summary><span class="security-scope">Permanent account removal</span><span class="security-delete-title">Delete relay account</span></summary>
+<p>Relay Account Deletion is irreversible. It closes relay access, ends your Portal Sessions and Clipp app authorizations, and permanently removes this Relay Account. The deletion may take time to finish; closing this page will not cancel it. If you register again, you will start with a new Pending Relay Account. Retained Quota Usage for the current week may be imported and reduce its available allowance.</p>
 <form class="deletion-confirmation" method="post" action="/auth/delete">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="delete-account-email">To confirm, type <strong>{{.Email}}</strong>.</label>
 <input id="delete-account-email" name="confirm_email" type="email" autocomplete="off" required pattern="{{emailPattern .Email}}" title="Enter the email address shown above exactly.">
-<p class="muted fine-print">Deletion requires a recent Google sign-in. If prompted, sign in and return here to review and submit this action again.</p>
+<p class="muted fine-print">Deletion requires a recent Google sign-in. If prompted, sign in and return here to review and submit this action again. Signing in does not resubmit the deletion.</p>
 <button class="danger">Permanently delete relay account</button>
 </form>
 </details>
+</div>
 </main>
 </div>
 </div>
