@@ -133,9 +133,12 @@ tbody th { font-weight: 500; }
 tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 .capacity-card .fine-print { margin-top: 18px; }
 .history-chart { margin: 0; }
+.history-interval { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 12px 0; }
+.history-interval > div { display: grid; gap: 6px; }
+.history-interval input { max-width: 100%; }
 .history-range { display: flex; gap: 18px; margin: 4px 0 18px; }
 .history-range [aria-current="page"] { color: var(--ink); font-weight: 650; }
-.history-table-wrap { margin-top: 18px; max-width: 100%; }
+.history-table-wrap { margin-top: 18px; max-width: 100%; overflow-x: auto; }
 .history-table { width: 100%; table-layout: fixed; }
 .history-table th:first-child { width: 30%; }
 .history-table th:nth-child(2) { width: 45%; }
@@ -146,8 +149,8 @@ tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 .history-chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .history-legend { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .history-legend span { width: 9px; height: 9px; border-radius: 3px; background: var(--accent); }
-.history-chart-scroll { overflow: hidden; padding: 4px 0; display: flex; justify-content: center; }
-.history-histogram { display: block; width: 100%; max-width: 100%; height: 280px; }
+.history-chart-scroll { overflow-x: auto; padding: 4px 0; display: flex; justify-content: safe center; }
+.history-histogram { display: block; width: auto; min-width: 640px; max-width: none; flex: none; height: 280px; }
 .history-gridline { stroke: var(--line); stroke-dasharray: 3 4; }
 .history-axis, .history-date { fill: var(--muted); font-size: 11px; }
 .history-bar { fill: #a8c8b2; }
@@ -471,7 +474,6 @@ body { background: var(--ground); }
 .capacity-card table { font-size: 14px; }
 .capacity-card td, .capacity-card th { padding-top: 10px; padding-bottom: 10px; }
 .capacity-card .fine-print { margin-top: 10px; }
-.history-chart-scroll { overflow: hidden; }
 .history-histogram { height: 230px; }
 .history-table-wrap { margin-top: 12px; }
 .history-table { table-layout: auto; }
@@ -593,10 +595,7 @@ body { background: var(--ground); }
   .admin-filters .filter-clear { align-self: center; }
   .admin-filters label { flex-basis: auto; }
   .history-chart-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
-  .history-chart .history-chart-scroll { display: none; }
-  .history-table th:first-child { width: 32%; }
-  .history-table th:nth-child(2) { width: 42%; }
-  .history-table th:last-child { width: 26%; }
+  .history-scroll-hint { display: block; }
   .site-header { padding: 19px 20px; }
   .header-note { display: none; }
   .page, .page.narrow { padding: 26px 16px 8px; }

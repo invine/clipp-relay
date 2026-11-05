@@ -97,7 +97,7 @@
 </dl>
 {{if .RecoveryHeld}}<p class="review-hold"><strong>Recovery Review Hold</strong><span>Relay use is blocked until an administrator explicitly reviews status and quota assignments. The hold is separate from the account status.</span></p>{{end}}
 {{with .Usage}}<div class="review-usage"><p><strong>Recorded Relay Usage</strong><span>{{bytes .Recorded}} this week</span></p><p><strong>Remaining allowance</strong><span>{{bytes .Remaining}}</span></p></div>
-<p class="muted fine-print">Periodic confirmation lag means recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for one account; control traffic may count. History retains the current week + twelve preceding weeks as absolute totals.</p>
+<p class="muted fine-print">Periodic confirmation lag means recent traffic may not yet appear. HOP and STOP endpoints count independently, including twice for one account; control traffic may count. History retains the current week + 52 preceding weeks as absolute totals.</p>
 <details><summary>Recorded Relay Usage history</summary><table><thead><tr><th>Week starting UTC</th><th class="numeric">Confirmed usage</th></tr></thead><tbody>{{range .History}}<tr><td>{{.Week}}</td><td class="numeric">{{bytes .Recorded}}</td></tr>{{end}}</tbody></table></details>{{end}}
 {{if eq .Status "Pending"}}
 <form class="form-stack account-mutation" id="approve-account" method="post" action="{{$.MutationHref}}">

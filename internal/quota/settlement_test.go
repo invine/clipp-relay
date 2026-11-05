@@ -13,6 +13,30 @@ import (
 	"clipp-relay/internal/persistence/postgres"
 )
 
+type retentionReadFixture struct {
+	persistence.Accounting
+	now time.Time
+}
+
+func (r retentionReadFixture) ReadRecordedUsage(_ context.Context, _ string, week time.Time) (persistence.RecordedUsage, error) {
+	return persistence.RecordedUsage{WeekStart: week, DatabaseNow: r.now, RecordedBytes: 71}, nil
+}
+
+func TestRecordedUsageReadsRetainedWindows(t *testing.T) {
+	now := time.Date(2026, time.November, 2, 12, 0, 0, 0, time.UTC)
+	q := &Quota{accounting: retentionReadFixture{now: now}}
+	for _, weeks := range []int{12, 13, 52} {
+		week := weekStart(now).AddDate(0, 0, -7*weeks)
+		got, err := q.RecordedUsage(context.Background(), "account", week)
+		if err != nil || got.RecordedBytes != 71 {
+			t.Fatalf("%d preceding weeks: got %+v, %v", weeks, got, err)
+		}
+	}
+	if _, err := q.RecordedUsage(context.Background(), "account", weekStart(now).AddDate(0, 0, -371)); !errors.Is(err, ErrUsageRetired) {
+		t.Fatalf("53 preceding weeks: got %v, want retired", err)
+	}
+}
+
 func TestRecordedUsageSettlesFullOverrunAndIdenticalRetry(t *testing.T) {
 	q, id, _ := fixture(t)
 	ctx := context.Background()
@@ -199,7 +223,7 @@ func TestRecordedUsageRetirementUsesDatabaseTimeAfterAccountWait(t *testing.T) {
 	ctx := context.Background()
 	week := weekStart(time.Now())
 	op, _ := newOperationID()
-	batch := settlement{AccountID: id, WeekStart: week.AddDate(0, 0, -84), OperationID: op, DeltaBytes: 71, Sequence: 1}
+	batch := settlement{AccountID: id, WeekStart: week.AddDate(0, 0, -364), OperationID: op, DeltaBytes: 71, Sequence: 1}
 	// The oldest retained window is still writable until the next Monday.
 	if _, err := q.settle(ctx, batch); err != nil {
 		t.Fatal(err)

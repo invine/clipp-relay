@@ -41,10 +41,10 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 	}
 	out := portalRequest(s, "GET", "/", cookie, nil, "")
 	body := out.Body.String()
-	if out.Code != 200 || !strings.Contains(body, "Recorded Relay Usage: 10 KiB") || !strings.Contains(body, "12.06 KiB") || !strings.Contains(body, "periodic confirmation lag") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Weekly Quota Window") || !strings.Contains(body, "Refresh account state") || !strings.Contains(body, "Unavailable") {
+	if out.Code != 200 || !strings.Contains(body, "Recorded Relay Usage: 10 KiB") || !strings.Contains(body, "12.06 KiB") || !strings.Contains(body, "periodic confirmation lag") || !strings.Contains(body, "Login Grants") || !strings.Contains(body, "Weekly Quota Window") || !strings.Contains(body, "Unavailable") {
 		t.Fatalf("profile: %d %s", out.Code, body)
 	}
-	if !strings.Contains(body, "Current week is incomplete") || !strings.Contains(body, "10 KiB <span class=\"exact-bytes\">(10240 bytes)</span>") || !strings.Contains(body, "No observation") || !strings.Contains(body, "Recorded zero") || !strings.Contains(body, `class="history-column missing"`) || !strings.Contains(body, "no recorded observation") {
+	if strings.Contains(strings.ToLower(body), "incomplete") || !strings.Contains(body, "10 KiB <span class=\"exact-bytes\">(10240 bytes)</span>") || !strings.Contains(body, "No observation") || !strings.Contains(body, "Recorded zero") || !strings.Contains(body, `class="history-column missing"`) || !strings.Contains(body, "no recorded observation") {
 		t.Fatalf("history states or exact values missing: %s", body)
 	}
 	historyTable := func(html string) string {
@@ -61,9 +61,19 @@ func TestOwnerProfileShowsRecordedUsageAndAbsoluteHistory(t *testing.T) {
 	if got := strings.Count(historyTable(body), "<tr>"); got != 5 {
 		t.Fatalf("latest range should expose four weekly rows plus its header, got %d", got)
 	}
-	all := portalRequest(s, "GET", "/?history=all", cookie, nil, "")
-	if all.Code != 200 || strings.Count(historyTable(all.Body.String()), "<tr>") != 14 || !strings.Contains(all.Body.String(), `href="/">Latest four weeks</a>`) {
-		t.Fatalf("all retained history selection: %d %s", all.Code, all.Body.String())
+	if !strings.Contains(body, `>Show more</a>`) {
+		t.Fatalf("expected Show more while rows remain: %s", body)
+	}
+	more := portalRequest(s, "GET", "/?history_rows=14", cookie, nil, "")
+	rows := historyTable(more.Body.String())
+	rowCount := strings.Count(rows, "<tr>") - 1
+	if more.Code != 200 || rowCount < 13 || rowCount > 14 {
+		t.Fatalf("expanded history: %d %s", more.Code, more.Body.String())
+	}
+	currentWeek := time.Now().UTC().AddDate(0, 0, -(int(time.Now().UTC().Weekday())+6)%7)
+	newest, oldest := currentWeek.Format("2006-01-02"), currentWeek.AddDate(0, 0, -7*(rowCount-1)).Format("2006-01-02")
+	if strings.Index(rows, newest) < 0 || strings.Index(rows, oldest) < strings.Index(rows, newest) {
+		t.Fatalf("weekly rows are not newest first: %s", rows)
 	}
 	if strings.Index(body, "Your allowance") > strings.Index(body, "Add this relay to Clipp") || strings.Contains(body, "Device Network") || strings.Contains(body, "connected devices") || !strings.Contains(body, `href="/account/security"`) || !strings.Contains(body, "<details class=\"workspace-menu\">") || !strings.Contains(body, "portal.example.test") {
 		t.Fatalf("account facts are not leading or imply device connectivity: %s", body)
