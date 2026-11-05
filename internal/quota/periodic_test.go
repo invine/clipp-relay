@@ -376,6 +376,84 @@ func TestPeriodicPolicyInvalidationFencesLateSettlement(t *testing.T) {
 	}
 }
 
+func TestStaleExhaustionAssessmentCannotRetireAfterAllowanceIncrease(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx := context.Background()
+	if _, err := q.Eligibility(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Observe(id, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=100 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	assessment, err := q.Eligibility(ctx, id)
+	if err != ErrExhausted {
+		t.Fatalf("exhausted assessment=%v, want quota exhaustion", err)
+	}
+	closed := make(chan ClosureOutcome, 1)
+	if err := q.StartAccounting(func(out ClosureOutcome) { closed <- out }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=1000 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if q.ApplyAccountingPolicy(id, 1000) {
+		t.Fatal("increased allowance remained exhausted")
+	}
+	q.cutoffAssessment(id, "quota_exhausted", assessment.Revision)
+	if !q.AccountingReady(id) {
+		t.Fatal("stale exhaustion assessment blocked the recovered account")
+	}
+	select {
+	case out := <-closed:
+		t.Fatalf("stale exhaustion assessment retired the account: %+v", out)
+	default:
+	}
+}
+
+func TestIssuedExhaustionCutoffBecomesStaleAfterAllowanceRecovery(t *testing.T) {
+	q, id, pool := fixture(t)
+	ctx := context.Background()
+	if _, err := q.Eligibility(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Observe(id, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=100 WHERE id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	assessment, err := q.Eligibility(ctx, id)
+	if err != ErrExhausted {
+		t.Fatalf("exhausted assessment=%v, want quota exhaustion", err)
+	}
+	entered, release := make(chan ClosureOutcome, 1), make(chan struct{})
+	releaseCutoff := sync.OnceFunc(func() { close(release) })
+	defer releaseCutoff()
+	q.periodic.mu.Lock()
+	q.periodic.close = func(out ClosureOutcome) {
+		entered <- out
+		<-release
+	}
+	q.periodic.mu.Unlock()
+	go q.cutoffAssessment(id, "quota_exhausted", assessment.Revision)
+	out := <-entered
+	if _, err := pool.Exec(ctx, `UPDATE public.accounts SET weekly_bytes_override=1000 WHERE id=$1`, id); err != nil {
+		releaseCutoff()
+		t.Fatal(err)
+	}
+	if q.ApplyAccountingPolicy(id, 1000) {
+		releaseCutoff()
+		t.Fatal("increased allowance remained exhausted")
+	}
+	releaseCutoff()
+	if q.ClosureCurrent(out) {
+		t.Fatal("delayed cutoff remained current after policy recovery")
+	}
+}
+
 func TestPeriodicPolicyCapUsesUncertainBatchExactlyOnce(t *testing.T) {
 	q, id, _ := fixture(t)
 	ctx := context.Background()

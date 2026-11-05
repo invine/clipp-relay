@@ -126,7 +126,7 @@ func (d *Deletions) PrepareDeletionEvent(ctx context.Context, p persistence.Dele
 	return tag.RowsAffected() == 1, nil
 }
 
-func (t *transaction) FinalizeDeletion(ctx context.Context, operationID, accountID, expectedSubject string, pepper uint64, digest []byte, auditID string) error {
+func (t *transaction) FinalizeDeletion(ctx context.Context, operationID, accountID, expectedSubject string, retained persistence.RetainedUsageKey, auditID string) error {
 	var subject *string
 	var deleted *time.Time
 	err := t.tx.QueryRow(ctx, `SELECT subject,deleted_at FROM public.accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&subject, &deleted)
@@ -158,7 +158,7 @@ func (t *transaction) FinalizeDeletion(ctx context.Context, operationID, account
 	}
 	err = t.tx.QueryRow(ctx, `SELECT recorded_bytes FROM public.weekly_relay_usage WHERE account_id=$1 AND week_start=$2`, accountID, week).Scan(&recorded)
 	if err == nil {
-		if _, err = t.tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes) VALUES($1,$2,$3,$4)`, pepper, digest, week, recorded); err != nil {
+		if _, err = t.tx.Exec(ctx, `INSERT INTO public.retained_quota_usage(pepper_version,identity_digest,week_start,recorded_bytes) VALUES($1,$2,$3,$4)`, retained.PepperVersion, retained.IdentityDigest[:], week, recorded); err != nil {
 			return unavailable(err)
 		}
 	} else if !errors.Is(err, pgx.ErrNoRows) {

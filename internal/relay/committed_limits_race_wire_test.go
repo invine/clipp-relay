@@ -1,0 +1,305 @@
+package relay
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"clipp-relay/internal/persistence"
+	"clipp-relay/internal/quota"
+	libp2p "github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
+)
+
+type committedPolicyFixture struct {
+	mu           sync.Mutex
+	weeklyBytes  int64
+	sessionLimit int
+}
+
+func (p *committedPolicyFixture) ProbeDatabaseTime(context.Context) (time.Time, error) {
+	return time.Now(), nil
+}
+func (p *committedPolicyFixture) ReadAccountingEligibility(context.Context, string) (persistence.AccountingEligibility, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return persistence.AccountingEligibility{DatabaseNow: time.Now(), CapBytes: p.weeklyBytes, SessionLimit: p.sessionLimit}, nil
+}
+func (*committedPolicyFixture) ReadRecordedUsage(context.Context, string, time.Time) (persistence.RecordedUsage, error) {
+	return persistence.RecordedUsage{}, nil
+}
+func (*committedPolicyFixture) StartSettlement(context.Context) (persistence.AccountingOperation, error) {
+	return nil, errors.New("settlement is not used in this test")
+}
+func (p *committedPolicyFixture) commitLimits(weeklyBytes int64, sessionLimit int) {
+	p.mu.Lock()
+	p.weeklyBytes, p.sessionLimit = weeklyBytes, sessionLimit
+	p.mu.Unlock()
+}
+
+func TestQuotaBackedRenewalAndCrossAccountReplacementPublishBothCounts(t *testing.T) {
+	store := &committedPolicyFixture{weeklyBytes: 1_000, sessionLimit: 1}
+	accounting := quota.New(store)
+	defer accounting.Close()
+	server, err := New(twoAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	key, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	info := peer.AddrInfo{ID: server.Host.ID(), Addrs: server.Host.Addrs()}
+	if err := first.Connect(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+
+	if response := authResponse(t, ctx, first, server.Host.ID(), "a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("initial authentication: %s", response)
+	}
+	if got, known := accounting.LiveSessionCount("a"); !known || got != 1 {
+		t.Fatalf("initial Quota count=(%d,%v), want (1,true)", got, known)
+	}
+
+	// Renewal uses the same authenticated connection and must keep its slot at
+	// the account cap of one.
+	if response := authResponse(t, ctx, first, server.Host.ID(), "a"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("same-connection renewal at capacity: %s", response)
+	}
+	if got := server.AccountSessions("a"); got != 1 {
+		t.Fatalf("Relay count after renewal=%d, want 1", got)
+	}
+	if got, known := accounting.LiveSessionCount("a"); !known || got != 1 {
+		t.Fatalf("Quota count after renewal=(%d,%v), want (1,true)", got, known)
+	}
+
+	// A new physical connection with the same Peer ID can replace the account
+	// association. Quota receives the target and source absolute counts together.
+	replacement, err := libp2p.New(libp2p.Identity(key), libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	if err := replacement.Connect(ctx, info); err != nil {
+		t.Fatal(err)
+	}
+	if response := authResponse(t, ctx, replacement, server.Host.ID(), "b"); !strings.Contains(response, `"ok":true`) {
+		t.Fatalf("cross-account replacement: %s", response)
+	}
+	if got := server.AccountSessions("a"); got != 0 {
+		t.Fatalf("source Relay count after replacement=%d, want 0", got)
+	}
+	if got := server.AccountSessions("b"); got != 1 {
+		t.Fatalf("target Relay count after replacement=%d, want 1", got)
+	}
+	if got, known := accounting.LiveSessionCount("a"); !known || got != 0 {
+		t.Fatalf("source Quota count after replacement=(%d,%v), want known zero", got, known)
+	}
+	if got, known := accounting.LiveSessionCount("b"); !known || got != 1 {
+		t.Fatalf("target Quota count after replacement=(%d,%v), want (1,true)", got, known)
+	}
+	if got := server.ActiveSessions(); got != 1 {
+		t.Fatalf("effective Relay Sessions after replacement=%d, want 1", got)
+	}
+	if _, err := relayclient.Reserve(ctx, replacement, info); err != nil {
+		t.Fatalf("replacement Relay Session could not reserve: %v", err)
+	}
+}
+
+func TestCommittedCapRacingFinalAdmissionRetiresAllBeforeAcknowledgment(t *testing.T) {
+	store := &committedPolicyFixture{weeklyBytes: 1_000, sessionLimit: 5}
+	accounting := quota.New(store)
+	defer accounting.Close()
+	server, err := New(&validationOnlyAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	reconcileAttempted := make(chan struct{})
+	accounting.SetSessionReconciler(func(id string, decide func(int) (bool, string)) error {
+		close(reconcileAttempted)
+		return server.ReconcileAccountSessions(id, decide)
+	})
+	clients := make([]host.Host, 4)
+	for i := range clients {
+		clients[i], err = libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clients[i].Close()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, clientHost := range clients {
+		if err := clientHost.Connect(ctx, peer.AddrInfo{ID: server.Host.ID(), Addrs: server.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if response := authResponse(t, ctx, clients[i], server.Host.ID(), "authorized"); !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("initial Relay Authentication %d=%s", i, response)
+		}
+	}
+	closeStarted, releaseClose := make(chan struct{}), make(chan struct{})
+	var releaseOnce, closeStartedOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	defer release()
+	server.sessionManager.physicalClose = func(conn network.Conn) {
+		closeStartedOnce.Do(func() { close(closeStarted) })
+		<-releaseClose
+		_ = conn.Close()
+	}
+
+	admissionValidated, finishAdmission := make(chan struct{}), make(chan struct{})
+	var pauseOnce sync.Once
+	accounting.SetAdmissionInstallBoundaryForTest(func() {
+		pauseOnce.Do(func() { close(admissionValidated); <-finishAdmission })
+	})
+	admissionResponse := make(chan string, 1)
+	go func() { admissionResponse <- authResponse(t, ctx, clients[3], server.Host.ID(), "authorized") }()
+	select {
+	case <-admissionValidated:
+	case <-ctx.Done():
+		t.Fatal("fourth authentication did not reach final admission")
+	}
+
+	// The administrator transaction has committed before local reconciliation
+	// starts; changing this fixture models that durable commit boundary.
+	store.commitLimits(1_000, 3)
+	application := make(chan error, 1)
+	go func() {
+		_, applyErr := accounting.ApplyCommittedLimits("relay-account", 1_000, 3)
+		application <- applyErr
+	}()
+	select {
+	case <-reconcileAttempted:
+	case <-ctx.Done():
+		t.Fatal("cap edit did not reach Relay reconciliation")
+	}
+
+	close(finishAdmission)
+	select {
+	case response := <-admissionResponse:
+		if !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("admission that held the registry lock should install first: %s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("winning admission did not finish")
+	}
+	select {
+	case err := <-application:
+		if err != nil {
+			t.Fatalf("committed cap application: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("cap application did not finish after admission released the registry lock")
+	}
+	if got := server.AccountSessions("relay-account"); got != 0 {
+		t.Fatalf("cap application acknowledged with %d authorized sessions, want all four retired", got)
+	}
+	if got, known := accounting.LiveSessionCount("relay-account"); !known || got != 0 {
+		t.Fatalf("Quota count after retirement=(%d,%v), want known zero", got, known)
+	}
+	select {
+	case <-closeStarted:
+		t.Fatal("physical close began before the Auth completion phase")
+	default:
+	}
+	if _, err := relayclient.Reserve(ctx, clients[0], peer.AddrInfo{ID: server.Host.ID(), Addrs: server.Host.Addrs()}); err == nil {
+		t.Fatal("Relay accepted a reservation after logical retirement while physical close was deferred")
+	}
+	if err := server.CompleteAccountInvalidation("relay-account"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closeStarted:
+	case <-ctx.Done():
+		t.Fatal("physical close did not start after Auth completion")
+	}
+}
+
+func TestCommittedCapWinsAgainstCompletedAssessmentBeforeFinalAdmission(t *testing.T) {
+	store := &committedPolicyFixture{weeklyBytes: 1_000, sessionLimit: 5}
+	accounting := quota.New(store)
+	defer accounting.Close()
+	server, err := New(&validationOnlyAuthority{}, accounting, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	accounting.SetSessionReconciler(server.ReconcileAccountSessions)
+	clients := make([]host.Host, 5)
+	for i := range clients {
+		clients[i], err = libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"), libp2p.DisableRelay())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clients[i].Close()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, clientHost := range clients {
+		if err := clientHost.Connect(ctx, peer.AddrInfo{ID: server.Host.ID(), Addrs: server.Host.Addrs()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if response := authResponse(t, ctx, clients[i], server.Host.ID(), "authorized"); !strings.Contains(response, `"ok":true`) {
+			t.Fatalf("initial Relay Authentication %d=%s", i, response)
+		}
+	}
+
+	assessmentCaptured, releaseAssessment := make(chan struct{}), make(chan struct{})
+	var pauseOnce sync.Once
+	accounting.SetAssessmentReturnBoundaryForTest(func() {
+		pauseOnce.Do(func() { close(assessmentCaptured); <-releaseAssessment })
+	})
+	staleResponse := make(chan string, 1)
+	go func() { staleResponse <- authResponse(t, ctx, clients[3], server.Host.ID(), "authorized") }()
+	select {
+	case <-assessmentCaptured:
+	case <-ctx.Done():
+		t.Fatal("fourth authentication did not capture its cap-five assessment")
+	}
+
+	store.commitLimits(1_000, 3)
+	if reason, err := accounting.ApplyCommittedLimits("relay-account", 1_000, 3); err != nil || reason != "" {
+		t.Fatalf("cap equal to occupancy reason=%q err=%v", reason, err)
+	}
+	close(releaseAssessment)
+	select {
+	case response := <-staleResponse:
+		if !strings.Contains(response, `"code":"temporarily_unavailable"`) {
+			t.Fatalf("stale cap-five assessment response=%s", response)
+		}
+	case <-ctx.Done():
+		t.Fatal("stale assessment did not finish after cap application")
+	}
+	if got := server.AccountSessions("relay-account"); got != 3 {
+		t.Fatalf("stale assessment changed the three existing sessions: count=%d", got)
+	}
+	if _, err := relayclient.Reserve(ctx, clients[0], peer.AddrInfo{ID: server.Host.ID(), Addrs: server.Host.Addrs()}); err != nil {
+		t.Fatalf("existing Relay Session lost permission at exact cap: %v", err)
+	}
+	if response := authResponse(t, ctx, clients[4], server.Host.ID(), "authorized"); !strings.Contains(response, `"code":"session_limit_exceeded"`) {
+		t.Fatalf("fresh assessment at cap response=%s", response)
+	}
+}
