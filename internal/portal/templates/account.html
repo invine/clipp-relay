@@ -121,18 +121,10 @@
   <section class="card">
 <div class="section-heading">
 <div>
-<h2 id="history-title">Weekly history</h2>
+<h2 id="history-title">Usage History</h2>
 </div>
 
 </div>
-<form class="history-interval" method="get" action="/" data-history-interval>
-  <div><label for="history-start">Start date (UTC)</label><input type="date" id="history-start" name="start" value="{{.HistoryStart}}" required aria-describedby="history-date-help"></div>
-  <div><label for="history-end">End date (UTC)</label><input type="date" id="history-end" name="end" value="{{.HistoryEnd}}" required aria-describedby="history-date-help"></div>
-  <input type="hidden" name="group" value="{{.HistoryGroup}}">
-  <button type="submit">Load interval</button>
-</form>
-<p id="history-date-help" class="muted fine-print">Includes weeks whose UTC start date falls on or between these dates. Maximum one calendar year.</p>
-{{if .HistoryError}}<p role="alert" class="fine-print">{{.HistoryError}}</p>{{end}}
 <nav class="history-range" aria-label="Graph grouping">
   {{if eq .HistoryGroup "weekly"}}<span aria-current="page">Weekly</span><a href="{{.MonthlyLink}}">Monthly</a>{{else}}<a href="{{.WeeklyLink}}">Weekly</a><span aria-current="page">Monthly</span>{{end}}
 </nav>
@@ -177,6 +169,14 @@
 {{if .NextHistoryRows}}<a class="button secondary" href="{{.MoreHistoryLink}}">Show more</a>{{end}}
 </div>
 {{end}}
+<form class="history-interval" method="get" action="/" data-history-interval>
+  <div><label for="history-start">Start date</label><input type="date" id="history-start" name="start" value="{{.HistoryStart}}" required aria-describedby="history-date-help"></div>
+  <div><label for="history-end">End date</label><input type="date" id="history-end" name="end" value="{{.HistoryEnd}}" required aria-describedby="history-date-help"></div>
+  <input type="hidden" name="group" value="{{.HistoryGroup}}">
+  <button type="submit">Apply</button>
+</form>
+<p id="history-date-help" class="muted fine-print">Includes weeks whose UTC start date falls on or between these dates. Maximum one calendar year.</p>
+{{if .HistoryError}}<p role="alert" class="fine-print">{{.HistoryError}}</p>{{end}}
 </section>
 {{end}}
 {{if .SignedIn}}

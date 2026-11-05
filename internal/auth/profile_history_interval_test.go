@@ -50,6 +50,14 @@ func TestOwnerHistoryIntervalAndMonthlyGrouping(t *testing.T) {
 	old := week.AddDate(0, 0, -7)
 	seedRecordedWeek(t, p, old, 12345)
 	seedRecordedWeek(t, p, week, 1024)
+	defaultView := portalRequest(p.auth, "GET", "/", p.owner, nil, "")
+	defaultBody := defaultView.Body.String()
+	if defaultView.Code != 200 || !strings.Contains(defaultBody, "Usage History") || !strings.Contains(defaultBody, `value="`+week.AddDate(0, 0, -21).Format("2006-01-02")+`"`) || len(historyDate.FindAllStringSubmatch(defaultBody, -1)) != 4 {
+		t.Fatal("default history should include the current week and three preceding weeks")
+	}
+	if strings.Contains(defaultBody, "Start date (UTC)") || strings.Contains(defaultBody, "End date (UTC)") || strings.Index(defaultBody, `class="history-interval"`) < strings.Index(defaultBody, `class="history-table"`) {
+		t.Fatal("interval controls should follow the table and use the requested labels")
+	}
 	start, end := old.Format("2006-01-02"), week.Format("2006-01-02")
 	path := fmt.Sprintf("/?start=%s&end=%s&group=monthly", start, end)
 	resp := portalRequest(p.auth, "GET", path, p.owner, nil, "")
@@ -77,7 +85,7 @@ func TestOwnerHistoryIntervalAndMonthlyGrouping(t *testing.T) {
 	}
 	// A new interval submission has no pagination parameter; it restores the
 	// first four rows regardless of how far the preceding interval was opened.
-	expanded := portalRequest(p.auth, "GET", "/?history_rows=14", p.owner, nil, "")
+	expanded := portalRequest(p.auth, "GET", "/?start="+week.AddDate(0, 0, -98).Format("2006-01-02")+"&end="+end+"&history_rows=14", p.owner, nil, "")
 	if got := len(historyDate.FindAllStringSubmatch(expanded.Body.String(), -1)); got != 14 {
 		t.Fatalf("expanded table has %d rows", got)
 	}

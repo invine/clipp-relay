@@ -1110,7 +1110,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		defaultEnd = weekStart.UTC()
 	}
 	endDate := defaultEnd.Format("2006-01-02")
-	startDate := defaultEnd.AddDate(-1, 0, 0).Format("2006-01-02")
+	startDate := defaultEnd.AddDate(0, 0, -21).Format("2006-01-02")
 	if query.Has("start") || query.Has("end") {
 		startDate, endDate = query.Get("start"), query.Get("end")
 	}
