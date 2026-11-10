@@ -41,7 +41,7 @@
 <p>This Account-wide Revocation will revoke every Login Grant and Relay Access Token for <strong>{{.Email}}</strong>, end all Portal Sessions, and invalidate its live Relay Sessions. Clipp apps will need to sign in again. Access is invalidated before this action is reported complete; physical connection closure may take a short time. Your account status and quota assignments do not change.</p>
 <form method="post" action="/auth/revoke" class="reviewed-action">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
-<label><input type="checkbox" name="confirm" value="yes" required> I understand this signs {{.Email}} out everywhere.</label>
+<label><input type="checkbox" name="confirm" value="yes" required><span>I understand this signs {{.Email}} out everywhere.</span></label>
 <button class="secondary">Confirm sign out everywhere</button>
 </form>
 </details>
