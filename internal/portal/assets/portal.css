@@ -171,8 +171,8 @@ tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
 .action-row p { font-size: 13px; margin-top: 4px; }
 .action-row form { flex-shrink: 0; }
 .reviewed-action { display: grid; justify-items: start; gap: 16px; }
-.reviewed-action label { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; }
-.reviewed-action input[type="checkbox"] { flex: 0 0 auto; width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--accent); }
+.reviewed-action label { display: flex; align-items: center; gap: 10px; line-height: 1.5; }
+.reviewed-action input[type="checkbox"] { flex: 0 0 auto; width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
 .notice { padding: 14px 16px; background: #e7ece8; border-radius: var(--workspace-radius); }
 .danger-details { color: #a0453d; padding-top: 20px; font-size: 13px; }
 .deletion-confirmation { display: grid; justify-items: start; gap: 12px; margin-top: 16px; }
