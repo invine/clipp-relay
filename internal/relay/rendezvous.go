@@ -118,12 +118,13 @@ type rendezvousRequest struct {
 }
 
 type rendezvousOutcome struct {
-	code         string
-	retryAfter   int
-	peer         peer.ID
-	record       []byte
-	deadline     time.Time
-	registeredAt time.Time
+	code            string
+	admissionReason string
+	retryAfter      int
+	peer            peer.ID
+	record          []byte
+	deadline        time.Time
+	registeredAt    time.Time
 }
 
 func (o rendezvousOutcome) successful() bool { return o.code == "" }
@@ -179,7 +180,15 @@ func (m *sessionManager) beginRendezvous(conn network.Conn) (rendezvousRequest, 
 		if m.closing {
 			return rendezvousRequest{}, rendezvousOutcome{code: "temporarily_unavailable", retryAfter: 5000}
 		}
-		return rendezvousRequest{}, rendezvousOutcome{code: "authentication_failed"}
+		reason := "no_active_session"
+		ended := m.connectionInfo[conn].sessionEnded
+		switch {
+		case ended == "replaced":
+			reason = "session_replaced"
+		case ended == "session_expired" || owner != nil && !now.Before(owner.deadline):
+			reason = "session_expired"
+		}
+		return rendezvousRequest{}, rendezvousOutcome{code: "authentication_failed", admissionReason: reason}
 	}
 	if !allowed {
 		return rendezvousRequest{}, rendezvousOutcome{code: "rate_limited", retryAfter: 5000}
@@ -220,6 +229,13 @@ func (s *Server) handleRendezvous(st network.Stream) {
 	defer st.SetDeadline(time.Time{})
 	requestOwner, admission := s.sessionManager.beginRendezvous(st.Conn())
 	if !admission.successful() {
+		if admission.admissionReason != "" {
+			event := "relay.rendezvous.v1.admission"
+			if version == RendezvousV2Protocol {
+				event = "relay.rendezvous.v2.admission"
+			}
+			s.sessionManager.emitConnection(st.Conn(), event, "refused", admission.admissionReason, requestID, time.Since(started))
+		}
 		s.rvError(st, version, admission.code, admission.retryAfter)
 		return
 	}

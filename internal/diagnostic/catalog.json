@@ -1263,6 +1263,34 @@
       "duration_measurable": true
     },
     {
+      "event": "relay.rendezvous.v1.admission",
+      "pairs": [
+        [
+          "refused",
+          "no_active_session"
+        ],
+        [
+          "refused",
+          "session_expired"
+        ],
+        [
+          "refused",
+          "session_replaced"
+        ]
+      ],
+      "transports": [
+        "tcp",
+        "wss",
+        "webrtc_direct",
+        "unknown"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
       "event": "relay.rendezvous.v1.register",
       "pairs": [
         [
@@ -1378,6 +1406,34 @@
       ],
       "transports": [
         "none"
+      ],
+      "clients": [
+        "none"
+      ],
+      "log": "activity",
+      "duration_measurable": true
+    },
+    {
+      "event": "relay.rendezvous.v2.admission",
+      "pairs": [
+        [
+          "refused",
+          "no_active_session"
+        ],
+        [
+          "refused",
+          "session_expired"
+        ],
+        [
+          "refused",
+          "session_replaced"
+        ]
+      ],
+      "transports": [
+        "tcp",
+        "wss",
+        "webrtc_direct",
+        "unknown"
       ],
       "clients": [
         "none"

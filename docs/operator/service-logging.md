@@ -150,6 +150,13 @@ Stock `started` means circuit capacity was allocated; `success` means the stock 
 
 The version is the actual protocol on that stream. A `find` miss is logged as `refused/lease_unavailable` even though the compatibility wire response is `ok:true` with no record. `register/lease_unavailable` means the current connection lacked a live stock reservation. No row includes the looked-up Peer ID, Signed Peer Record, address, topic or response body. The outcome is observed after server processing and does not assert client receipt. A request that fails before a valid action can be identified has no truthful version-specific operation row. Shared output limits can suppress repeated rows.
 
+`relay.rendezvous.v1.admission` and `relay.rendezvous.v2.admission` record early
+`authentication_failed` responses before the server reads the action. The reason
+is `session_expired` or `session_replaced` when the relay can attribute the
+rejection to either event, and `no_active_session` otherwise. When present, the
+random `session_id` can be matched to authentication and session-end rows for
+that physical connection.
+
 Focused local checks: `go test -count=1 ./internal/relay -run 'Test(ReservationDiagnosticsDistinguishAuthenticationAndStockRenewal|CircuitDiagnosticsUseOnlyStockAggregateEvidence|RendezvousDiagnosticsFollowVersionAndLeaseOutcome|RendezvousRepeatedMissesRemainBounded)$'`. The routine and race profiles are the required broader gates. This local evidence does not establish deployed behavior.
 
 ## Quota and accounting rows
