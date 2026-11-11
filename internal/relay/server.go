@@ -81,6 +81,7 @@ type Options struct {
 type connectionDiagnostic struct {
 	id, transport string
 	ended         string
+	sessionEnded  string
 }
 
 type session struct {
@@ -573,7 +574,11 @@ func (m *sessionManager) endSessionLocked(v *session, reason string) {
 	}
 	m.markClosingLocked(v.conn)
 	if m.diagnostics != nil {
-		info := m.connectionInfo[v.conn]
+		info, observed := m.connectionInfo[v.conn]
+		if observed {
+			info.sessionEnded = reason
+			m.connectionInfo[v.conn] = info
+		}
 		m.diagnostics.Emit(diagnostic.Event{Event: "relay.session", Outcome: "ended", Reason: reason, SessionID: info.id, Transport: info.transport})
 	}
 	m.removeSessionLocked(v, false)

@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"clipp-relay/internal/auth"
+	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/quota"
 	"context"
 	"crypto/rand"
@@ -379,7 +380,10 @@ func TestRendezvousV1RegistrationV2LookupPreservesEnvelope(t *testing.T) {
 }
 
 func TestRendezvousRejectsUnauthenticatedPhysicalConnection(t *testing.T) {
-	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0"})
+	out := &lockedOutput{}
+	log := diagnostic.New(out)
+	defer log.Close()
+	s, err := New(wireAuthority{}, wireAccounting{}, Options{ListenAddress: "/ip4/127.0.0.1/tcp/0", Diagnostics: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,9 +398,26 @@ func TestRendezvousRejectsUnauthenticatedPhysicalConnection(t *testing.T) {
 	if err = h.Connect(ctx, peer.AddrInfo{ID: s.Host.ID(), Addrs: s.Host.Addrs()}); err != nil {
 		t.Fatal(err)
 	}
-	req, _ := json.Marshal(map[string]any{"action": "unregister", "topic": "clipp"})
-	if got := rvExchange(t, ctx, h, s.Host.ID(), string(RendezvousV2Protocol), req); !bytes.Equal(got["code"], []byte(`"authentication_failed"`)) {
-		t.Fatalf("unauthenticated: %v", got)
+	connection := waitRow(t, out, "relay.connection", "success", "none")
+	req, _ := json.Marshal(map[string]any{"action": "unregister", "topic": "private-request-canary"})
+	for _, tc := range []struct {
+		protocol protocol.ID
+		event    string
+	}{
+		{RendezvousV1Protocol, "relay.rendezvous.v1.admission"},
+		{RendezvousV2Protocol, "relay.rendezvous.v2.admission"},
+	} {
+		if got := rvExchange(t, ctx, h, s.Host.ID(), string(tc.protocol), req); !bytes.Equal(got["code"], []byte(`"authentication_failed"`)) {
+			t.Fatalf("unauthenticated: %v", got)
+		}
+		row := waitRow(t, out, tc.event, "refused", "no_active_session")
+		if row["request_id"] == nil || row["session_id"] == nil || row["session_id"] != connection["session_id"] || row["transport"] != "tcp" {
+			t.Fatalf("missing connection correlation: %v", row)
+		}
+		encoded, _ := json.Marshal(row)
+		if bytes.Contains(encoded, []byte("private-request-canary")) || bytes.Contains(encoded, []byte(h.ID().String())) {
+			t.Fatalf("private material in admission row: %s", encoded)
+		}
 	}
 }
 

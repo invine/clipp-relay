@@ -13,6 +13,7 @@ import (
 	"clipp-relay/internal/diagnostic"
 	"clipp-relay/internal/quota"
 	libp2p "github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -155,6 +156,8 @@ func TestRelaySessionExpiryIsDistinctFromDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	// Keep the connection open after logical expiry until the client closes it.
+	s.sessionManager.physicalClose = func(network.Conn) {}
 	h, err := libp2p.New(libp2p.NoListenAddrs, libp2p.DisableRelay())
 	if err != nil {
 		t.Fatal(err)
@@ -171,6 +174,11 @@ func TestRelaySessionExpiryIsDistinctFromDisconnect(t *testing.T) {
 	row := waitRow(t, out, "relay.session", "ended", "session_expired")
 	if row["session_id"] == nil {
 		t.Fatal(row)
+	}
+	rvNegotiatedError(t, ctx, h, s.Host.ID(), "authentication_failed")
+	admission := waitRow(t, out, "relay.rendezvous.v2.admission", "refused", "session_expired")
+	if admission["session_id"] != row["session_id"] {
+		t.Fatalf("expired connection correlation: %v", admission)
 	}
 	if strings.Contains(out.text(), "private-account-canary") || strings.Contains(out.text(), "expiry-token-canary") || strings.Contains(out.text(), h.ID().String()) {
 		t.Fatal("identity or credential leaked")
